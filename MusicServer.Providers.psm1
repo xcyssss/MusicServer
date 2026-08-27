@@ -305,11 +305,16 @@ function Resolve-DownloadCandidates {
         $candidates += New-DownloadCandidate -Provider 'local' -Url $local.File.FullName -Title $Track.title -Artist $Track.artist -Duration ([int]$Track.duration) -Priority 100 -Metadata $local
     }
 
-    # Direct candidates are known resources. Only check availability here; the real download consumes the HALF_OPEN probe.
+    # Direct candidates are known resources. Do not spend another search request if download is currently blocked.
     $direct = @(Get-DirectCandidates -Track $Track)
-    if ($direct.Count -gt 0 -and (Test-ProviderRequestAvailable -Config $Config -Provider 'bilibili_download')) { $candidates += $direct }
+    if ($direct.Count -gt 0) {
+        if (-not (Test-ProviderRequestAvailable -Config $Config -Provider 'bilibili_download')) { return @() }
+        $candidates += $direct
+    }
 
     if ($candidates.Count -eq 0) {
+        # A search is useless when the media endpoint cannot be used anyway.
+        if (-not (Test-ProviderRequestAvailable -Config $Config -Provider 'bilibili_download')) { return @() }
         $search = Search-BilibiliCandidates -Config $Config -Track $Track
         if (-not $search.Blocked) { $candidates += $search.Candidates }
     }
