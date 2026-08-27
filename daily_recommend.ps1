@@ -3,6 +3,7 @@
     每日音乐推荐：只生成远程推荐和试听元数据，不下载音频。
 .DESCRIPTION
     兼容现有 accepted.csv、lyrics_report.csv 和 Navidrome 本地库作为推荐种子。
+    强偏好只来自 accepted、显式 like 和 Navidrome starred；仅展示过的历史推荐不会反向喂给推荐器。
     推荐阶段只访问网易云的轻量 metadata API；Bilibili/yt-dlp 只允许由 wanted_worker.ps1
     在用户明确点红心后调用。
 .PARAMETER Count
@@ -36,8 +37,8 @@ $Headers = @{
 }
 $Accepted = Join-Path $Config.DataDir 'accepted.csv'
 $Blacklist = Join-Path $Config.DataDir 'rejected.csv'
-$History = Join-Path $Config.DataDir 'history.csv'
 $Report = Join-Path $Config.Root 'lyrics_report.csv'
+$RecommendationCooldownDays = 14
 
 function Write-Step([string]$Message) { Write-Host "`n>>> $Message" -ForegroundColor Cyan }
 
@@ -82,29 +83,31 @@ function Get-StarredTitles {
 
 function Get-SeedPool {
     $seeds = @()
+
+    # Downloaded/accepted tracks are durable positive feedback.
     if (Test-Path -LiteralPath $Accepted) {
         foreach ($row in @(Import-Csv -LiteralPath $Accepted -Encoding UTF8)) {
             if ($row.Title) {
-                $seeds += [pscustomobject]@{ Title = $row.Title; Artist = $row.Artist; Weight = 3; Source = 'accepted' }
+                $seeds += [pscustomobject]@{ Title = $row.Title; Artist = $row.Artist; Weight = 4; Source = 'accepted' }
             }
         }
     }
-    if (Test-Path -LiteralPath $History) {
-        foreach ($row in @(Import-Csv -LiteralPath $History -Encoding UTF8 | Where-Object { $_.Title })) {
-            $seeds += [pscustomobject]@{ Title = $row.Title; Artist = $row.Artist; Weight = 2; Source = 'legacy_history' }
-        }
+
+    # Crucial: merely being recommended is neutral. Only explicit likes become recommendation-history seeds.
+    foreach ($row in @(Read-StateCollection -Config $Config -Name recommendation_history | Where-Object { $_.title -and [bool](Get-OptionalProperty $_ 'liked' $false) })) {
+        $seeds += [pscustomobject]@{ Title = $row.title; Artist = $row.artist; Weight = 5; Source = 'explicit_like' }
     }
-    foreach ($row in @(Read-StateCollection -Config $Config -Name recommendation_history | Where-Object { $_.title })) {
-        $seeds += [pscustomobject]@{ Title = $row.title; Artist = $row.artist; Weight = 2; Source = 'recommendation_history' }
-    }
+
     $starred = @(Get-StarredTitles)
     foreach ($line in $starred) {
         $parts = [string]$line -split ' - ', 2
-        $seeds += [pscustomobject]@{ Title = $parts[0]; Artist = if ($parts.Count -gt 1) { $parts[1] } else { '' }; Weight = 3; Source = 'navidrome_star' }
+        $seeds += [pscustomobject]@{ Title = $parts[0]; Artist = if ($parts.Count -gt 1) { $parts[1] } else { '' }; Weight = 5; Source = 'navidrome_star' }
     }
+
+    # Library metadata is only a weak fallback for discovery diversity, not a replacement for explicit preference.
     if (Test-Path -LiteralPath $Report) {
         foreach ($row in @(Import-Csv -LiteralPath $Report -Encoding UTF8 | Where-Object { $_.Matched -and $_.Status -in @('OK','NO_LYRIC') })) {
-            $seeds += [pscustomobject]@{ Title = $row.Matched; Artist = $row.MatchedArtist; Weight = 1; Source = 'library' }
+            $seeds += [pscustomobject]@{ Title = $row.Matched; Artist = $row.MatchedArtist; Weight = 1; Source = 'library_fallback' }
         }
     }
 
@@ -116,10 +119,12 @@ function Get-SeedPool {
     foreach ($seed in @($expanded | Sort-Object { Get-Random })) {
         if (-not $seed.Title) { continue }
         $artistKey = Normalize-MusicText (($seed.Artist -split '[,，、]')[0])
-        if ($artists.ContainsKey($artistKey) -and $artists[$artistKey] -ge 3) { continue }
+        if ($artistKey -and $artists.ContainsKey($artistKey) -and $artists[$artistKey] -ge 3) { continue }
         if (@($picked | Where-Object { (Normalize-MusicText $_.Title) -eq (Normalize-MusicText $seed.Title) -and (Normalize-MusicText $_.Artist) -eq (Normalize-MusicText $seed.Artist) }).Count -gt 0) { continue }
         $picked += $seed
-        if ($artists.ContainsKey($artistKey)) { $artists[$artistKey]++ } else { $artists[$artistKey] = 1 }
+        if ($artistKey) {
+            if ($artists.ContainsKey($artistKey)) { $artists[$artistKey]++ } else { $artists[$artistKey] = 1 }
+        }
         if ($picked.Count -ge $SeedCount) { break }
     }
     return @($picked)
@@ -128,9 +133,9 @@ function Get-SeedPool {
 Write-Step '收集种子歌曲'
 $picked = @(Get-SeedPool)
 Write-Host "  本次选用种子：$($picked.Count)" -ForegroundColor Yellow
-foreach ($seed in $picked) { Write-Host "    - $($seed.Title) - $($seed.Artist)" -ForegroundColor DarkGray }
+foreach ($seed in $picked) { Write-Host "    - $($seed.Title) - $($seed.Artist) [$($seed.Source)]" -ForegroundColor DarkGray }
 
-Write-Step '建立排除集'
+Write-Step '建立排除集与近期推荐冷却'
 $exclude = New-Object System.Collections.Generic.HashSet[string]
 foreach ($file in @(Get-ChildItem -LiteralPath $Config.MusicDir -Filter '*.mp3' -File -Recurse -ErrorAction SilentlyContinue)) {
     [void]$exclude.Add((Normalize-MusicText $file.BaseName))
@@ -147,7 +152,17 @@ if (Test-Path -LiteralPath $Accepted) {
         if ($row.NeteaseId) { [void]$acceptedIds.Add([string]$row.NeteaseId) }
     }
 }
-Write-Host "  排除条目：$($exclude.Count)，已接受网易云 ID：$($acceptedIds.Count)" -ForegroundColor Yellow
+
+$cooldownCutoff = (Get-Date).Date.AddDays(-$RecommendationCooldownDays)
+$cooldownCount = 0
+foreach ($row in @(Read-StateCollection -Config $Config -Name recommendation_history)) {
+    $date = $null
+    if ([DateTime]::TryParse([string](Get-OptionalProperty $row 'date'), [ref]$date) -and $date.Date -ge $cooldownCutoff) {
+        $neteaseId = [string](Get-OptionalProperty $row 'netease_id')
+        if ($neteaseId -and $exclude.Add("netease:$neteaseId")) { $cooldownCount++ }
+    }
+}
+Write-Host "  排除条目：$($exclude.Count)，已接受网易云 ID：$($acceptedIds.Count)，近期冷却：$cooldownCount" -ForegroundColor Yellow
 
 Write-Step '从网易云生成相似歌曲 metadata'
 $candidateMap = @{}
@@ -157,7 +172,7 @@ foreach ($seed in $picked) {
     $similar = @(Get-SimiSongs -SongId ([long]$found[0].id) -Limit 10)
     foreach ($song in $similar) {
         $sid = [string]$song.id
-        if (-not $sid -or $acceptedIds.Contains($sid)) { continue }
+        if (-not $sid -or $acceptedIds.Contains($sid) -or $exclude.Contains("netease:$sid")) { continue }
         if ($candidateMap.ContainsKey($sid)) { $candidateMap[$sid].Score++; continue }
         $artist = (($song.artists | ForEach-Object { $_.name }) -join ',')
         $duration = [int]($song.duration / 1000)
@@ -168,7 +183,7 @@ foreach ($seed in $picked) {
         if ($exclude.Contains($key) -or $exclude.Contains((Normalize-MusicText $song.name))) { continue }
         $candidateMap[$sid] = [pscustomobject]@{
             NeteaseId = $sid; Title = [string]$song.name; Artist = $artist; Album = [string]$song.album.name
-            Duration = $duration; FromSeed = [string]$seed.Title; Score = 1; CoverUrl = [string]$song.album.picUrl
+            Duration = $duration; FromSeed = [string]$seed.Title; SeedSource = [string]$seed.Source; Score = 1; CoverUrl = [string]$song.album.picUrl
         }
     }
 }
@@ -178,9 +193,11 @@ $recos = @()
 $artists = @{}
 foreach ($candidate in $ranked) {
     $artistKey = Normalize-MusicText (($candidate.Artist -split '[,，、]')[0])
-    if ($artists.ContainsKey($artistKey) -and $artists[$artistKey] -ge 5) { continue }
+    if ($artistKey -and $artists.ContainsKey($artistKey) -and $artists[$artistKey] -ge 5) { continue }
     $recos += $candidate
-    if ($artists.ContainsKey($artistKey)) { $artists[$artistKey]++ } else { $artists[$artistKey] = 1 }
+    if ($artistKey) {
+        if ($artists.ContainsKey($artistKey)) { $artists[$artistKey]++ } else { $artists[$artistKey] = 1 }
+    }
     if ($recos.Count -ge $Count) { break }
 }
 
@@ -210,6 +227,7 @@ foreach ($candidate in $recos) {
         date = $today; track_id = $trackId; netease_id = $candidate.NeteaseId
         title = $candidate.Title; artist = $candidate.Artist; album = $candidate.Album
         duration = $candidate.Duration; rank = $rank; reason = "相似于：$($candidate.FromSeed)"
+        seed_source = $candidate.SeedSource
         playback_source = "netease:$($candidate.NeteaseId)"; preview_sources = $preview
         liked = $false; created_at = Get-NowIso; updated_at = Get-NowIso
     }
@@ -218,12 +236,12 @@ foreach ($candidate in $recos) {
 
 Write-Host "`n候选推荐：$($candidateMap.Count) 首，取前 $($recommendations.Count) 首" -ForegroundColor Green
 foreach ($r in $recommendations) {
-    Write-Host ("  {0,2}. {1} - {2} ({3}s) | {4}" -f $r.rank, $r.title, $r.artist, $r.duration, $r.playback_source) -ForegroundColor White
+    Write-Host ("  {0,2}. {1} - {2} ({3}s) | {4} | seed={5}" -f $r.rank, $r.title, $r.artist, $r.duration, $r.playback_source, $r.seed_source) -ForegroundColor White
 }
 
 if (-not $DryRun) {
     Save-DailyRecommendations -Config $Config -Recommendations $recommendations -Date $today
-    Write-StructuredEvent -Config $Config -Event 'RECOMMENDATIONS_GENERATED' -Result 'SUCCESS' -Message "count=$($recommendations.Count); download_calls=0"
+    Write-StructuredEvent -Config $Config -Event 'RECOMMENDATIONS_GENERATED' -Result 'SUCCESS' -Message "count=$($recommendations.Count); download_calls=0; feedback=explicit_only; cooldown_days=$RecommendationCooldownDays"
     Write-Host "`n已保存 CanonicalTrack、DailyRecommendation 和兼容 today.csv。" -ForegroundColor Green
 } else {
     Write-Host "`n【DryRun 模式，未写状态】" -ForegroundColor Magenta
