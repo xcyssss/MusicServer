@@ -42,6 +42,13 @@ $RecommendationCooldownDays = 14
 
 function Write-Step([string]$Message) { Write-Host "`n>>> $Message" -ForegroundColor Cyan }
 
+function Test-LikedValue {
+    param($Value)
+    if ($Value -is [bool]) { return [bool]$Value }
+    if ($null -eq $Value) { return $false }
+    return ([string]$Value -match '^(?i:true|1|yes)$')
+}
+
 function Search-Netease {
     param([string]$Keyword, [int]$Limit = 3)
     $url = "https://music.163.com/api/search/get?s=$([uri]::EscapeDataString($Keyword))&type=1&limit=$Limit"
@@ -94,7 +101,7 @@ function Get-SeedPool {
     }
 
     # Crucial: merely being recommended is neutral. Only explicit likes become recommendation-history seeds.
-    foreach ($row in @(Read-StateCollection -Config $Config -Name recommendation_history | Where-Object { $_.title -and [bool](Get-OptionalProperty $_ 'liked' $false) })) {
+    foreach ($row in @(Read-StateCollection -Config $Config -Name recommendation_history | Where-Object { $_.title -and (Test-LikedValue (Get-OptionalProperty $_ 'liked' $false)) })) {
         $seeds += [pscustomobject]@{ Title = $row.title; Artist = $row.artist; Weight = 5; Source = 'explicit_like' }
     }
 
@@ -156,8 +163,8 @@ if (Test-Path -LiteralPath $Accepted) {
 $cooldownCutoff = (Get-Date).Date.AddDays(-$RecommendationCooldownDays)
 $cooldownCount = 0
 foreach ($row in @(Read-StateCollection -Config $Config -Name recommendation_history)) {
-    $date = $null
-    if ([DateTime]::TryParse([string](Get-OptionalProperty $row 'date'), [ref]$date) -and $date.Date -ge $cooldownCutoff) {
+    [DateTime]$recommendationDate = [DateTime]::MinValue
+    if ([DateTime]::TryParse([string](Get-OptionalProperty $row 'date'), [ref]$recommendationDate) -and $recommendationDate.Date -ge $cooldownCutoff) {
         $neteaseId = [string](Get-OptionalProperty $row 'netease_id')
         if ($neteaseId -and $exclude.Add("netease:$neteaseId")) { $cooldownCount++ }
     }
