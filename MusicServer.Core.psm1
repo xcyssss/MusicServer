@@ -211,14 +211,14 @@ function Save-DailyRecommendations {
     $history += $recs
     Write-StateCollection -Config $Config -Name recommendation_history -Items $history
     $legacyPath = Join-Path $Config.DataDir 'today.csv'
-    $legacyRows = foreach ($r in $recs) {
+    $legacyRows = @(foreach ($r in $recs) {
         [pscustomobject]@{
             Date = $Date; TrackId = (Get-OptionalProperty $r 'track_id'); NeteaseId = (Get-OptionalProperty $r 'netease_id')
             Title = (Get-OptionalProperty $r 'title'); Artist = (Get-OptionalProperty $r 'artist'); Duration = (Get-OptionalProperty $r 'duration' 0)
             FromSeed = (Get-OptionalProperty $r 'reason'); Rank = (Get-OptionalProperty $r 'rank' 0); PlaybackSource = (Get-OptionalProperty $r 'playback_source')
             Liked = (Get-OptionalProperty $r 'liked' $false); Status = 'REMOTE'; File = ''
         }
-    }
+    })
     if ($legacyRows.Count -gt 0) { $legacyRows | Export-Csv -LiteralPath $legacyPath -NoTypeInformation -Encoding UTF8 }
 }
 
