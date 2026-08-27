@@ -1,0 +1,14 @@
+<service>
+  <id>Navidrome</id>
+  <name>Navidrome Music Server</name>
+  <description>Modern Music Server and Streamer compatible with Subsonic/Airsonic</description>
+  <executable>E:\Project\MusicServer\Navidrome\bin\navidrome.exe</executable>
+  <arguments>-c "E:\Project\MusicServer\Navidrome\navidrome.toml"</arguments>
+  <log mode="roll-by-size">
+    <sizeThreshold>10240</sizeThreshold>
+    <keepFiles>3</keepFiles>
+  </log>
+  <onstart>
+    <executable>cmd.exe</executable>
+  </onstart>
+</service>

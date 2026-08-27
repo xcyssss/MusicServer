@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0d1117" />
+    <title>MusicServer · 今日推荐</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand"><span class="brand-mark">♪</span><span>MusicServer</span></div>
+        <nav class="nav" aria-label="主导航">
+          <a class="nav-item" href="#library"><span>♫</span> 音乐库 <b id="library-nav-count">0</b></a>
+          <a class="nav-item active" href="#recommendations"><span>✦</span> 今日推荐</a>
+          <a class="nav-item" href="#wanted"><span>♥</span> Wanted Queue <b id="queue-count">0</b></a>
+        </nav>
+        <div class="sidebar-footer">
+          <div class="health-label"><span class="status-dot healthy"></span>服务在线</div>
+          <p>先试听，再决定是否下载。你的红心会立即进入后台队列。</p>
+        </div>
+      </aside>
+
+      <main class="main-content">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">MONDAY · MUSIC DISCOVERY</p>
+            <h1>今天，听点新的。</h1>
+          </div>
+          <div class="topbar-actions">
+            <span id="last-updated" class="muted">正在同步…</span>
+            <button id="refresh-button" class="icon-button" aria-label="刷新推荐">↻</button>
+          </div>
+        </header>
+
+        <div class="workspace-grid">
+          <section id="library" class="library-panel" aria-label="本地音乐库">
+            <div class="section-heading library-heading"><div><span class="section-kicker">YOUR LIBRARY</span><h2>音乐库</h2></div><span id="library-count" class="provider-summary">同步中…</span></div>
+            <div class="library-tools">
+              <label class="search-box"><span>⌕</span><input id="library-search" type="search" placeholder="搜索歌名、艺术家或专辑" autocomplete="off" /></label>
+              <div class="play-mode" aria-label="播放顺序">
+                <button class="mode-button active" data-mode="sequence">顺序</button>
+                <button id="shuffle-button" class="shuffle-button" type="button" aria-label="重新随机播放顺序">↻ 重新随机</button>
+              </div>
+            </div>
+            <div id="library-list" class="track-list library-list" aria-live="polite"></div>
+          </section>
+
+          <section id="recommendations" class="recommendation-panel" aria-label="今日推荐">
+            <section class="hero-card" aria-label="今日推荐概览">
+              <div class="hero-copy">
+                <span class="hero-kicker">DAILY MIX</span>
+                <h2>为你挑的 <span id="hero-count">20</span> 首歌</h2>
+                <p>在线试听，喜欢的歌曲再加入本地曲库。</p>
+                <button id="play-first" class="primary-button"><span>▶</span> 播放第一首</button>
+              </div>
+              <div class="hero-orbit" aria-hidden="true"><span>♪</span><i></i><b></b></div>
+            </section>
+
+            <section class="stats-row" aria-label="推荐统计">
+              <div class="stat-card"><span class="stat-label">今日推荐</span><strong id="recommendation-count">—</strong><small>首</small></div>
+              <div class="stat-card"><span class="stat-label">已喜欢</span><strong id="liked-count">—</strong><small>首</small></div>
+              <div class="stat-card"><span class="stat-label">本地曲库</span><strong id="local-count">—</strong><small>首</small></div>
+              <div class="stat-card accent"><span class="stat-label">下载队列</span><strong id="wanted-count">—</strong><small>首</small></div>
+            </section>
+
+            <section class="recommendation-section">
+              <div class="section-heading"><div><span class="section-kicker">DISCOVER MORE</span><h2>今日推荐</h2></div><span id="provider-summary" class="provider-summary">Provider 状态同步中</span></div>
+              <div id="error-banner" class="error-banner" hidden></div>
+              <div id="recommendation-list" class="track-list" aria-live="polite"></div>
+            </section>
+
+            <section id="wanted" class="wanted-callout">
+              <div class="callout-icon">♥</div>
+              <div><strong>喜欢的歌会自己回家</strong><p>点一下红心，后台会完成解析、下载、校验和 Navidrome 入库。页面会自动更新状态。</p></div>
+            </section>
+          </section>
+        </div>
+      </main>
+    </div>
+
+    <footer class="player-bar">
+      <div class="now-playing"><div id="player-art" class="player-art">♪</div><div><span class="now-label">正在播放</span><strong id="player-title">选择一首歌开始试听</strong><small id="player-artist">MusicServer</small></div></div>
+      <div class="player-controls" aria-label="播放控制">
+        <button id="previous-button" class="player-nav-button" type="button" aria-label="上一首" disabled>⏮</button>
+        <audio id="audio-player" controls preload="metadata"></audio>
+        <button id="next-button" class="player-nav-button" type="button" aria-label="下一首" disabled>⏭</button>
+      </div>
+      <button id="lyrics-toggle" class="lyrics-toggle" disabled>歌词</button>
+    </footer>
+    <aside id="lyrics-panel" class="lyrics-panel" hidden aria-label="歌词">
+      <div class="lyrics-heading"><div><span class="section-kicker">NOW PLAYING</span><h2>歌词</h2></div><button id="lyrics-close" class="icon-button" aria-label="关闭歌词">×</button></div>
+      <div id="lyrics-content" class="lyrics-content"><span class="muted">播放歌曲后加载歌词</span></div>
+    </aside>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="/app.js" defer></script>
+  </body>
+</html>

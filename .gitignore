@@ -1,0 +1,37 @@
+# Credentials and private authentication state
+cookies.txt
+*.cookie
+*.secret
+.env
+.env.*
+
+# Personal/runtime state
+DailyMix_data/
+lyrics_report.csv
+Navidrome/Data/
+Navidrome/*.log
+Navidrome/service_*.log
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+
+# Local media and generated playlists/lyrics
+Music/
+*.mp3
+*.flac
+*.wav
+*.m4a
+*.ogg
+*.lrc
+*.m3u
+
+# Bundled/local executables and machine-specific shortcuts
+Navidrome/bin/
+*.lnk
+*.lnk.*
+
+# Local tool state
+.mimocode/
+.DS_Store
+Thumbs.db

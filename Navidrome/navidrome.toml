@@ -1,0 +1,37 @@
+# Navidrome 配置文件
+# 文档: https://www.navidrome.org/docs/usage/configuration-options/
+
+# 音乐文件夹路径 (Windows 路径用单引号)
+MusicFolder = 'E:\Project\MusicServer\Music'
+
+# 数据文件夹 (数据库、缓存等)
+DataFolder = 'E:\Project\MusicServer\Navidrome\Data'
+
+# 日志级别 (info/debug/trace)
+LogLevel = 'info'
+
+# 日志文件路径
+LogFile = 'E:\Project\MusicServer\Navidrome\navidrome.log'
+
+# 服务器端口 (默认 4533)
+Port = 4533
+
+# 绑定地址 (0.0.0.0 = 所有网卡，方便手机局域网访问)
+Address = '0.0.0.0'
+
+# 扫描计划 (每 6 小时扫描一次新文件)
+Scanner.Schedule = '@every 6h'
+# 全量扫描时清理已经不存在的文件索引
+Scanner.PurgeMissing = 'full'
+
+# ffmpeg 路径 (用于转码)
+FFmpegPath = 'C:\Users\dell\AppData\Local\Microsoft\WinGet\Links\ffmpeg.exe'
+
+# 自动导入 m3u 播放列表
+AutoImportPlaylists = true
+
+# 歌词来源优先级 (外部 .lrc 文件优先于内嵌标签)
+LyricsPriority = '.lrc,.txt,embedded'
+
+# 关闭匿名数据收集
+EnableInsightsCollector = false
