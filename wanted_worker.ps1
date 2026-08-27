@@ -34,7 +34,6 @@ $OwnsWorkerMutex = $false
 try {
     $OwnsWorkerMutex = $WorkerMutex.WaitOne(0)
 } catch {
-    # Abandoned mutex 仍然代表当前进程已经取得锁，可以安全接管。
     $OwnsWorkerMutex = $true
 }
 if (-not $OwnsWorkerMutex) {
@@ -43,14 +42,45 @@ if (-not $OwnsWorkerMutex) {
     exit 0
 }
 
+function Get-LiveWanted {
+    param([psobject]$Wanted)
+    return @(Get-WantedTracks -Config $Config | Where-Object { [string]$_.id -eq [string]$Wanted.id } | Select-Object -First 1) | Select-Object -First 1
+}
+
+function Test-WantedCancellation {
+    param([psobject]$Wanted)
+    $live = Get-LiveWanted -Wanted $Wanted
+    if (-not $live) { return $true }
+    return ([string]$live.state -eq 'CANCEL_REQUESTED')
+}
+
+function Complete-WantedCancellation {
+    param([psobject]$Wanted, [string]$TemporaryPath = '')
+    if ($TemporaryPath -and (Test-Path -LiteralPath $TemporaryPath)) {
+        Remove-Item -LiteralPath $TemporaryPath -Force -ErrorAction SilentlyContinue
+        $tempLrc = [IO.Path]::ChangeExtension($TemporaryPath, '.lrc')
+        Remove-Item -LiteralPath $tempLrc -Force -ErrorAction SilentlyContinue
+    }
+    Remove-WantedTrack -Config $Config -WantedId ([string]$Wanted.id)
+    Reset-TrackToRemote -Config $Config -TrackId ([string]$Wanted.track_id) | Out-Null
+    Write-StructuredEvent -Config $Config -TrackId $Wanted.track_id -Event 'WANTED_CANCELLED' -Result 'SUCCESS' -Message 'user cancelled before localization completed'
+}
+
 function Set-QueueState {
     param([psobject]$Wanted, [string]$State, [string]$Error = '', [string]$NextRetryAt = '')
+    $live = Get-LiveWanted -Wanted $Wanted
+    if ($live -and [string]$live.state -eq 'CANCEL_REQUESTED' -and $State -ne 'CANCEL_REQUESTED') {
+        $Wanted.state = 'CANCEL_REQUESTED'
+        $Wanted.last_error = 'USER_CANCELLED'
+        return $false
+    }
     $from = [string]$Wanted.state
     $Wanted.state = $State
     $Wanted.last_error = $Error
     $Wanted.next_retry_at = if ($NextRetryAt) { $NextRetryAt } else { $null }
     Save-WantedTrack -Config $Config -Wanted $Wanted | Out-Null
     Write-StructuredEvent -Config $Config -TrackId $Wanted.track_id -Event 'STATE_TRANSITION' -FromState $from -ToState $State -Attempt ([int]$Wanted.attempts) -ErrorType $Error
+    return $true
 }
 
 function Get-RetryTime {
@@ -61,6 +91,19 @@ function Get-RetryTime {
     }
     $minutes = [Math]::Min(120, [Math]::Pow(2, [Math]::Max(0, [int]$Wanted.attempts - 1)) * 5)
     return [DateTime]::UtcNow.AddMinutes($minutes).ToString('o')
+}
+
+function Get-BilibiliBlockedUntil {
+    $blockedDates = @()
+    foreach ($provider in @('bilibili_search','bilibili_download')) {
+        $health = Get-ProviderHealth -Config $Config -Provider $provider
+        if ([string]$health.state -eq 'OPEN' -and $health.blocked_until) {
+            $date = Convert-ToUtcDateTime $health.blocked_until
+            if ($date) { $blockedDates += $date }
+        }
+    }
+    if ($blockedDates.Count -eq 0) { return '' }
+    return ($blockedDates | Sort-Object -Descending | Select-Object -First 1).ToString('o')
 }
 
 function Get-NeteaseIdFromTrack {
@@ -124,31 +167,44 @@ function Move-LegacyDailyMixToLibrary {
 
 function Bind-LocalTrack {
     param([psobject]$Track, [psobject]$Wanted, [string]$Path)
+    if (Test-WantedCancellation -Wanted $Wanted) { Complete-WantedCancellation -Wanted $Wanted; return }
     $Path = Move-LegacyDailyMixToLibrary -Path $Path
     $songId = Get-NavidromeSongIdForPath -Config $Config -Path $Path
     Set-TrackStatus -Config $Config -TrackId $Track.id -Status 'LOCAL' -LocalSongId $songId | Out-Null
     $Wanted.selected_candidate = [pscustomobject]@{ provider = 'local'; path = $Path }
-    Set-QueueState -Wanted $Wanted -State 'LOCAL'
+    [void](Set-QueueState -Wanted $Wanted -State 'LOCAL')
     Add-LegacyAcceptedRow -Track $Track -Path $Path
     Write-StructuredEvent -Config $Config -TrackId $Track.id -Provider 'local' -Event 'LOCAL_BOUND' -Result 'SUCCESS' -Message "path=$Path; navidrome_id=$songId"
 }
 
 function Complete-DownloadedTrack {
     param([psobject]$Track, [psobject]$Wanted, [string]$Path, [psobject]$Validation, [psobject]$Candidate, [psobject]$Score)
+    if (Test-WantedCancellation -Wanted $Wanted) { Complete-WantedCancellation -Wanted $Wanted -TemporaryPath $Path; return }
+
     $target = Join-Path $Config.MusicDir ([IO.Path]::GetFileName($Path))
     if ($Path -ne $target) {
-        if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue }
-        else { Move-Item -LiteralPath $Path -Destination $target -Force }
+        if (Test-Path -LiteralPath $target) {
+            $stem = [IO.Path]::GetFileNameWithoutExtension($target)
+            $target = Join-Path $Config.MusicDir "$stem [$($Track.id.Substring(6, 8))].mp3"
+        }
+        Move-Item -LiteralPath $Path -Destination $target -Force
         $oldLrc = [IO.Path]::ChangeExtension($Path, '.lrc')
         $newLrc = [IO.Path]::ChangeExtension($target, '.lrc')
         if (Test-Path -LiteralPath $oldLrc) { Move-Item -LiteralPath $oldLrc -Destination $newLrc -Force }
     } else { $target = $Path }
+
+    if (Test-WantedCancellation -Wanted $Wanted) {
+        Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
+        Complete-WantedCancellation -Wanted $Wanted
+        return
+    }
+
     [void](Write-TrackLyrics -Track $Track -AudioPath $target)
     Add-LegacyAcceptedRow -Track $Track -Path $target
     Set-TrackStatus -Config $Config -TrackId $Track.id -Status 'LOCAL' | Out-Null
     $Wanted.selected_candidate = [pscustomobject]@{ provider = $Candidate.provider; url = $Candidate.url; score = $Score.score }
-    Set-QueueState -Wanted $Wanted -State 'LOCAL'
-    Write-StructuredEvent -Config $Config -TrackId $Track.id -Provider $Candidate.provider -Event 'LOCAL' -Result 'SUCCESS' -Message "path=$target; duration=$($Validation.Duration); duration_diff=$($Validation.DurationDiff)"
+    [void](Set-QueueState -Wanted $Wanted -State 'LOCAL')
+    Write-StructuredEvent -Config $Config -TrackId $Track.id -Provider $Candidate.provider -Event 'LOCAL' -Result 'SUCCESS' -Message "path=$target; duration=$($Validation.Duration); duration_diff=$($Validation.DurationDiff); allowed_diff=$($Validation.AllowedDiff)"
     if ((Test-Path -LiteralPath $Config.NdExe) -and (Test-Path -LiteralPath $Config.NdConfig)) {
         & $Config.NdExe -c $Config.NdConfig scan --nobanner 2>$null | Out-Null
     }
@@ -170,10 +226,16 @@ function Complete-DownloadedTrack {
 
 function Process-WantedTrack {
     param([psobject]$Wanted)
+
+    if (Test-WantedCancellation -Wanted $Wanted) {
+        Complete-WantedCancellation -Wanted $Wanted
+        return
+    }
+
     $track = Get-CanonicalTrack -Config $Config -TrackId ([string]$Wanted.track_id)
     if (-not $track) {
         $Wanted.attempts = [int]$Wanted.attempts + 1
-        Set-QueueState -Wanted $Wanted -State 'UNAVAILABLE' -Error 'TRACK_NOT_FOUND'
+        [void](Set-QueueState -Wanted $Wanted -State 'UNAVAILABLE' -Error 'TRACK_NOT_FOUND')
         return
     }
     if ($DryRun) {
@@ -188,25 +250,30 @@ function Process-WantedTrack {
     }
 
     Set-TrackStatus -Config $Config -TrackId $track.id -Status 'RESOLVING' | Out-Null
-    Set-QueueState -Wanted $Wanted -State 'RESOLVING'
+    if (-not (Set-QueueState -Wanted $Wanted -State 'RESOLVING')) { Complete-WantedCancellation -Wanted $Wanted; return }
     $ranked = @(Resolve-DownloadCandidates -Config $Config -Track $track)
+
+    if (Test-WantedCancellation -Wanted $Wanted) { Complete-WantedCancellation -Wanted $Wanted; return }
+
     if ($ranked.Count -eq 0) {
         $Wanted.attempts = [int]$Wanted.attempts + 1
-        $health = Get-ProviderHealth -Config $Config -Provider 'bilibili'
-        if ([string]$health.state -eq 'OPEN') {
+        $blockedUntil = Get-BilibiliBlockedUntil
+        if ($blockedUntil) {
             Set-TrackStatus -Config $Config -TrackId $track.id -Status 'RETRY_WAIT' | Out-Null
-            Set-QueueState -Wanted $Wanted -State 'RETRY_WAIT' -Error 'BILIBILI_CIRCUIT_OPEN' -NextRetryAt (Convert-ToUtcIso $health.blocked_until)
+            [void](Set-QueueState -Wanted $Wanted -State 'RETRY_WAIT' -Error 'BILIBILI_CIRCUIT_OPEN' -NextRetryAt $blockedUntil)
         } elseif ([int]$Wanted.attempts -ge [int]$Wanted.max_attempts) {
             Set-TrackStatus -Config $Config -TrackId $track.id -Status 'UNAVAILABLE' | Out-Null
-            Set-QueueState -Wanted $Wanted -State 'UNAVAILABLE' -Error 'NO_CANDIDATE'
+            [void](Set-QueueState -Wanted $Wanted -State 'UNAVAILABLE' -Error 'NO_CANDIDATE')
         } else {
             Set-TrackStatus -Config $Config -TrackId $track.id -Status 'RETRY_WAIT' | Out-Null
-            Set-QueueState -Wanted $Wanted -State 'RETRY_WAIT' -Error 'NO_CANDIDATE' -NextRetryAt (Get-RetryTime -Wanted $Wanted)
+            [void](Set-QueueState -Wanted $Wanted -State 'RETRY_WAIT' -Error 'NO_CANDIDATE' -NextRetryAt (Get-RetryTime -Wanted $Wanted))
         }
         return
     }
 
     foreach ($entry in $ranked) {
+        if (Test-WantedCancellation -Wanted $Wanted) { Complete-WantedCancellation -Wanted $Wanted; return }
+
         $candidate = $entry.Candidate
         $score = $entry.Score
         $Wanted.selected_candidate = $candidate
@@ -217,13 +284,20 @@ function Process-WantedTrack {
         }
 
         Set-TrackStatus -Config $Config -TrackId $track.id -Status 'DOWNLOADING' | Out-Null
-        Set-QueueState -Wanted $Wanted -State 'DOWNLOADING'
+        if (-not (Set-QueueState -Wanted $Wanted -State 'DOWNLOADING')) { Complete-WantedCancellation -Wanted $Wanted; return }
+        if (Test-WantedCancellation -Wanted $Wanted) { Complete-WantedCancellation -Wanted $Wanted; return }
+
         $download = Invoke-BilibiliDownload -Config $Config -Track $track -Candidate $candidate
+        if (Test-WantedCancellation -Wanted $Wanted) {
+            Complete-WantedCancellation -Wanted $Wanted -TemporaryPath ([string]$download.Path)
+            return
+        }
+
         if (-not $download.Success) {
             if ($download.Blocked) {
                 $Wanted.attempts = [int]$Wanted.attempts + 1
                 Set-TrackStatus -Config $Config -TrackId $track.id -Status 'RETRY_WAIT' | Out-Null
-                Set-QueueState -Wanted $Wanted -State 'RETRY_WAIT' -Error $download.Error -NextRetryAt (Get-RetryTime -Wanted $Wanted -Provider 'bilibili')
+                [void](Set-QueueState -Wanted $Wanted -State 'RETRY_WAIT' -Error $download.Error -NextRetryAt (Get-RetryTime -Wanted $Wanted -Provider 'bilibili_download'))
                 return
             }
             Write-StructuredEvent -Config $Config -TrackId $track.id -Provider $candidate.provider -Event 'DOWNLOAD_FAILED' -Attempt ([int]$Wanted.attempts) -ErrorType $download.Error
@@ -231,9 +305,17 @@ function Process-WantedTrack {
         }
 
         Set-TrackStatus -Config $Config -TrackId $track.id -Status 'VALIDATING' | Out-Null
-        Set-QueueState -Wanted $Wanted -State 'VALIDATING'
+        if (-not (Set-QueueState -Wanted $Wanted -State 'VALIDATING')) {
+            Complete-WantedCancellation -Wanted $Wanted -TemporaryPath $download.Path
+            return
+        }
         $validation = Validate-DownloadedCandidate -Config $Config -Track $track -Path $download.Path
-        Write-StructuredEvent -Config $Config -TrackId $track.id -Provider $candidate.provider -Event 'VALIDATION' -Result $validation.Reason -Message "duration=$($validation.Duration); expected=$($track.duration); diff=$($validation.DurationDiff)"
+        Write-StructuredEvent -Config $Config -TrackId $track.id -Provider $candidate.provider -Event 'VALIDATION' -Result $validation.Reason -Message "duration=$($validation.Duration); expected=$($track.duration); diff=$($validation.DurationDiff); allowed=$($validation.AllowedDiff)"
+
+        if (Test-WantedCancellation -Wanted $Wanted) {
+            Complete-WantedCancellation -Wanted $Wanted -TemporaryPath $download.Path
+            return
+        }
         if (-not $validation.Valid) {
             Remove-Item -LiteralPath $download.Path -Force -ErrorAction SilentlyContinue
             if ($validation.Reason -eq 'WRONG_DURATION') { continue }
@@ -243,13 +325,14 @@ function Process-WantedTrack {
         return
     }
 
+    if (Test-WantedCancellation -Wanted $Wanted) { Complete-WantedCancellation -Wanted $Wanted; return }
     $Wanted.attempts = [int]$Wanted.attempts + 1
     if ([int]$Wanted.attempts -ge [int]$Wanted.max_attempts) {
         Set-TrackStatus -Config $Config -TrackId $track.id -Status 'UNAVAILABLE' | Out-Null
-        Set-QueueState -Wanted $Wanted -State 'UNAVAILABLE' -Error 'ALL_CANDIDATES_FAILED'
+        [void](Set-QueueState -Wanted $Wanted -State 'UNAVAILABLE' -Error 'ALL_CANDIDATES_FAILED')
     } else {
         Set-TrackStatus -Config $Config -TrackId $track.id -Status 'RETRY_WAIT' | Out-Null
-        Set-QueueState -Wanted $Wanted -State 'RETRY_WAIT' -Error 'ALL_CANDIDATES_FAILED' -NextRetryAt (Get-RetryTime -Wanted $Wanted)
+        [void](Set-QueueState -Wanted $Wanted -State 'RETRY_WAIT' -Error 'ALL_CANDIDATES_FAILED' -NextRetryAt (Get-RetryTime -Wanted $Wanted))
     }
 }
 
