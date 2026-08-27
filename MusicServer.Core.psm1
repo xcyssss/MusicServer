@@ -1,5 +1,27 @@
 ﻿Set-StrictMode -Version 3.0
 
+function Resolve-MusicServerExecutable {
+    param(
+        [Parameter(Mandatory)][string]$EnvironmentVariable,
+        [Parameter(Mandatory)][string[]]$Commands,
+        [string[]]$FallbackPaths = @()
+    )
+    $configured = [Environment]::GetEnvironmentVariable($EnvironmentVariable)
+    if (-not [string]::IsNullOrWhiteSpace($configured)) {
+        if (Test-Path -LiteralPath $configured -PathType Leaf) { return [IO.Path]::GetFullPath($configured) }
+        $resolvedConfigured = Get-Command $configured -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($resolvedConfigured) { return [string]$resolvedConfigured.Source }
+    }
+    foreach ($command in $Commands) {
+        $resolved = Get-Command $command -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($resolved) { return [string]$resolved.Source }
+    }
+    foreach ($fallback in $FallbackPaths) {
+        if ($fallback -and (Test-Path -LiteralPath $fallback -PathType Leaf)) { return [IO.Path]::GetFullPath($fallback) }
+    }
+    return [string]$Commands[0]
+}
+
 function New-MusicServerConfig {
     param([string]$Root = $PSScriptRoot)
 
@@ -13,11 +35,11 @@ function New-MusicServerConfig {
         NdDb       = Join-Path $rootPath 'Navidrome\Data\navidrome.db'
         NdExe      = Join-Path $rootPath 'Navidrome\bin\navidrome.exe'
         NdConfig   = Join-Path $rootPath 'Navidrome\navidrome.toml'
-        YtDlp      = 'C:\Users\dell\anaconda3\Scripts\yt-dlp.exe'
-        FFprobe    = 'C:\Users\dell\AppData\Local\Microsoft\WinGet\Links\ffprobe.exe'
-        FFmpeg     = 'C:\Users\dell\AppData\Local\Microsoft\WinGet\Links\ffmpeg.exe'
+        YtDlp      = Resolve-MusicServerExecutable -EnvironmentVariable 'MUSICSERVER_YTDLP' -Commands @('yt-dlp.exe','yt-dlp') -FallbackPaths @('C:\Users\dell\anaconda3\Scripts\yt-dlp.exe')
+        FFprobe    = Resolve-MusicServerExecutable -EnvironmentVariable 'MUSICSERVER_FFPROBE' -Commands @('ffprobe.exe','ffprobe') -FallbackPaths @('C:\Users\dell\AppData\Local\Microsoft\WinGet\Links\ffprobe.exe')
+        FFmpeg     = Resolve-MusicServerExecutable -EnvironmentVariable 'MUSICSERVER_FFMPEG' -Commands @('ffmpeg.exe','ffmpeg') -FallbackPaths @('C:\Users\dell\AppData\Local\Microsoft\WinGet\Links\ffmpeg.exe')
         CookieFile = Join-Path $rootPath 'cookies.txt'
-        Sqlite     = 'sqlite3'
+        Sqlite     = Resolve-MusicServerExecutable -EnvironmentVariable 'MUSICSERVER_SQLITE' -Commands @('sqlite3.exe','sqlite3') -FallbackPaths @('C:\Users\dell\anaconda3\Library\bin\sqlite3.exe')
     }
 }
 
@@ -231,7 +253,6 @@ function Save-DailyRecommendations {
     $history += $recs
     Write-StateCollection -Config $Config -Name recommendation_history -Items $history
 
-    # 保留旧脚本可以读取的 today.csv，但 File 留空，明确表示推荐尚未下载。
     $legacyPath = Join-Path $Config.DataDir 'today.csv'
     $legacyRows = foreach ($r in $recs) {
         [pscustomobject]@{
@@ -294,6 +315,15 @@ function Get-TodayRecommendations {
         Where-Object { [string]$_.date -eq $Date } | Sort-Object rank)
 }
 
+function Get-TrackLiked {
+    param([Parameter(Mandatory)][psobject]$Config, [Parameter(Mandatory)][string]$TrackId)
+    $current = @(Read-StateCollection -Config $Config -Name recommendations | Where-Object { [string]$_.track_id -eq $TrackId } | Select-Object -First 1)
+    if ($current) { return [bool](Get-OptionalProperty ($current | Select-Object -First 1) 'liked' $false) }
+    $history = @(Read-StateCollection -Config $Config -Name recommendation_history | Where-Object { [string]$_.track_id -eq $TrackId } | Sort-Object date -Descending | Select-Object -First 1)
+    if ($history) { return [bool](Get-OptionalProperty ($history | Select-Object -First 1) 'liked' $false) }
+    return $false
+}
+
 function Add-WantedTrack {
     param(
         [Parameter(Mandatory)][psobject]$Config,
@@ -303,7 +333,7 @@ function Add-WantedTrack {
     $items = @(Read-StateCollection -Config $Config -Name wanted)
     $existing = $items | Where-Object { [string]$_.track_id -eq $TrackId } | Select-Object -First 1
     if ($existing) {
-        if ([string]$existing.state -in @('UNAVAILABLE','LOCAL')) {
+        if ([string]$existing.state -in @('UNAVAILABLE','LOCAL','CANCEL_REQUESTED')) {
             $existing.state = 'WANTED'
             $existing.attempts = 0
             $existing.next_retry_at = $null
@@ -336,7 +366,7 @@ function Get-WantedTracks {
     if (-not $EligibleOnly) { return $items }
     $now = [DateTime]::UtcNow
     return @($items | Where-Object {
-        if ([string]$_.state -eq 'WANTED') { return $true }
+        if ([string]$_.state -in @('WANTED','CANCEL_REQUESTED')) { return $true }
         if ([string]$_.state -ne 'RETRY_WAIT') { return $false }
         if (-not $_.next_retry_at) { return $true }
         $retryAt = Convert-ToUtcDateTime $_.next_retry_at
@@ -356,6 +386,13 @@ function Save-WantedTrack {
     if (-not $found) { $items += $Wanted }
     Write-StateCollection -Config $Config -Name wanted -Items $items
     return $Wanted
+}
+
+function Remove-WantedTrack {
+    param([Parameter(Mandatory)][psobject]$Config, [Parameter(Mandatory)][string]$WantedId)
+    $items = @(Read-StateCollection -Config $Config -Name wanted)
+    $remaining = @($items | Where-Object { [string]$_.id -ne $WantedId })
+    if ($remaining.Count -ne $items.Count) { Write-StateCollection -Config $Config -Name wanted -Items $remaining }
 }
 
 function Set-TrackStatus {
@@ -393,18 +430,29 @@ function Set-TrackLike {
 
     $track = Get-CanonicalTrack -Config $Config -TrackId $TrackId
     if ($track) {
-        if ($Liked -and [string]$track.status -eq 'REMOTE') { $track.status = 'WANTED' }
-        if (-not $Liked -and [string]$track.status -eq 'WANTED') { $track.status = 'REMOTE' }
+        if ($Liked -and [string]$track.status -in @('REMOTE','UNAVAILABLE')) { $track.status = 'WANTED' }
+        if (-not $Liked -and [string]$track.status -in @('WANTED','RETRY_WAIT','UNAVAILABLE')) { $track.status = 'REMOTE' }
         Save-CanonicalTrack -Config $Config -Track $track | Out-Null
     }
 
-    $wanted = @(Read-StateCollection -Config $Config -Name wanted)
-    $existing = $wanted | Where-Object { [string]$_.track_id -eq $TrackId } | Select-Object -First 1
+    $wantedItems = @(Read-StateCollection -Config $Config -Name wanted)
+    $existing = $wantedItems | Where-Object { [string]$_.track_id -eq $TrackId } | Select-Object -First 1
     if ($Liked) {
         if (-not $existing) { $existing = Add-WantedTrack -Config $Config -TrackId $TrackId }
-    } elseif ($existing -and [string]$existing.state -in @('WANTED','RETRY_WAIT')) {
-        $wanted = @($wanted | Where-Object { [string]$_.id -ne [string]$existing.id })
-        Write-StateCollection -Config $Config -Name wanted -Items $wanted
+        elseif ([string]$existing.state -eq 'CANCEL_REQUESTED') {
+            $existing.state = 'WANTED'; $existing.next_retry_at = $null; $existing.last_error = ''
+            Save-WantedTrack -Config $Config -Wanted $existing | Out-Null
+        }
+    } elseif ($existing) {
+        if ([string]$existing.state -in @('WANTED','RETRY_WAIT','UNAVAILABLE')) {
+            Remove-WantedTrack -Config $Config -WantedId ([string]$existing.id)
+            $existing = $null
+        } elseif ([string]$existing.state -in @('RESOLVING','DOWNLOADING','VALIDATING')) {
+            $existing.state = 'CANCEL_REQUESTED'
+            $existing.next_retry_at = $null
+            $existing.last_error = 'USER_CANCELLED'
+            Save-WantedTrack -Config $Config -Wanted $existing | Out-Null
+        }
     }
     return [pscustomobject]@{ track_id = $TrackId; liked = $Liked; wanted = $existing }
 }
@@ -451,8 +499,6 @@ function Find-LocalTrack {
         $base = Normalize-MusicText $file.BaseName
         if (-not $base.Contains($titleKey)) { continue }
         if ($requiresStrictShortTitleMatch -and $base -ne $titleKey -and $base -ne $exact) { continue }
-        # A title alone is not enough: common titles and covers frequently share it.
-        # Require the complete normalized artist string whenever the track has one.
         if ($artistKey -and -not $base.Contains($artistKey)) { continue }
         $score = 50
         if ($base -eq $exact) { $score += 100 }
@@ -472,10 +518,18 @@ function Get-NavidromeSongIdForPath {
             $sidecar = "$($Config.NdDb)$ext"
             if (Test-Path -LiteralPath $sidecar) { Copy-Item -LiteralPath $sidecar -Destination "$tmp$ext" -Force -ErrorAction SilentlyContinue }
         }
+        $fullMusic = ([IO.Path]::GetFullPath($Config.MusicDir)).TrimEnd('\') + '\'
+        $fullPath = [IO.Path]::GetFullPath($Path)
+        if ($fullPath.StartsWith($fullMusic, [StringComparison]::OrdinalIgnoreCase)) {
+            $relative = $fullPath.Substring($fullMusic.Length).Replace('\','/').Replace("'", "''")
+            $query = "select id from media_file where replace(path, '\', '/') = '$relative' limit 1;"
+            $id = & $Config.Sqlite $tmp $query 2>$null | Select-Object -First 1
+            if ($id) { return [string]$id }
+        }
         $leaf = [IO.Path]::GetFileName($Path).Replace("'", "''")
-        $query = "select id from media_file where path like '%$leaf' limit 1;"
-        $id = & $Config.Sqlite $tmp $query 2>$null | Select-Object -First 1
-        return [string]$id
+        $fallbackQuery = "select case when count(*) = 1 then min(id) else '' end from media_file where path like '%$leaf';"
+        $fallbackId = & $Config.Sqlite $tmp $fallbackQuery 2>$null | Select-Object -First 1
+        return [string]$fallbackId
     } catch { return '' }
     finally { Remove-Item -LiteralPath "$tmp*" -Force -ErrorAction SilentlyContinue }
 }
