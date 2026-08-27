@@ -24,11 +24,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Pester 3.4
+      - name: Ensure Pester 3.4
         shell: powershell
         run: |
-          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
-          Install-Module Pester -RequiredVersion 3.4.0 -Scope CurrentUser -Force -SkipPublisherCheck
+          $pester = Get-Module -ListAvailable Pester | Where-Object { $_.Version -eq [Version]'3.4.0' } | Select-Object -First 1
+          if (-not $pester) {
+            Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+            Install-Module Pester -RequiredVersion 3.4.0 -Scope CurrentUser -Force -SkipPublisherCheck
+          }
 
       - name: Run core regression tests
         shell: powershell
