@@ -1,0 +1,38 @@
+name: MusicServer Core Tests
+
+on:
+  push:
+    branches:
+      - main
+      - 'review/**'
+    paths:
+      - '**/*.ps1'
+      - '**/*.psm1'
+      - 'web/**'
+      - '.github/workflows/core-tests.yml'
+  pull_request:
+    paths:
+      - '**/*.ps1'
+      - '**/*.psm1'
+      - 'web/**'
+      - '.github/workflows/core-tests.yml'
+
+jobs:
+  core-tests:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Pester 3.4
+        shell: powershell
+        run: |
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module Pester -RequiredVersion 3.4.0 -Scope CurrentUser -Force -SkipPublisherCheck
+
+      - name: Run core regression tests
+        shell: powershell
+        run: |
+          Import-Module Pester -RequiredVersion 3.4.0 -Force
+          $result = Invoke-Pester .\tests\MusicServer.Core.Tests.ps1 -PassThru
+          if ($result.FailedCount -gt 0) { exit 1 }
