@@ -179,12 +179,15 @@ Describe 'MusicServer Hardening v2 - SQLite State Layer' {
         $wanted = Add-WantedItemDb -TrackId $track.id
         $claim = Claim-WantedItemDb -TrackId $track.id -WorkerId 'worker_a'
         $claim.Success | Should Be $true
-        $wantedRev = $wanted.revision
+        $workerSnapshot = Get-WantedItemDb -TrackId $track.id
+        $wantedRev = $workerSnapshot.revision
         Request-WantedCancellationDb -TrackId $track.id | Out-Null
         $casResult = Update-WantedStateCasDb -TrackId $track.id -NewState 'RETRY_WAIT' -ExpectedRevision $wantedRev -WorkerId 'worker_a'
         $casResult.Success | Should Be $false
+        $casResult.AffectedRows | Should Be 0
         $item = Get-WantedItemDb -TrackId $track.id
         $item.state | Should Be 'CANCEL_REQUESTED'
+        $item.revision | Should Be ($wantedRev + 1)
     }
 
     # === Worker Claim / Lease Tests ===
@@ -216,10 +219,10 @@ Describe 'MusicServer Hardening v2 - SQLite State Layer' {
         Add-WantedItemDb -TrackId $track.id | Out-Null
         $claim = Claim-WantedItemDb -TrackId $track.id -WorkerId 'w1'
         $claim.Success | Should Be $true
-        $now = Get-NowIso
+        $expiredEpoch = [long][DateTimeOffset]::UtcNow.AddMinutes(-5).ToUnixTimeSeconds()
         Invoke-MusicServerParamNonQuery -Template @"
-UPDATE wanted_queue SET lease_expires_at = @exp WHERE track_id = @tid;
-"@ -Params @{ exp = ([DateTime]::UtcNow.AddMinutes(-5)).ToString('o'); tid = $track.id }
+UPDATE wanted_queue SET lease_expires_epoch = @exp WHERE track_id = @tid;
+"@ -Params @{ exp = $expiredEpoch; tid = $track.id }
         $recovered = Invoke-CrashRecoveryDb
         $recovered | Should Be 1
         $item = Get-WantedItemDb -TrackId $track.id
@@ -233,6 +236,8 @@ UPDATE wanted_queue SET lease_expires_at = @exp WHERE track_id = @tid;
         Add-WantedItemDb -TrackId $track.id | Out-Null
         $claim = Claim-WantedItemDb -TrackId $track.id -WorkerId 'w1'
         $claim.Success | Should Be $true
+        $item = Get-WantedItemDb -TrackId $track.id
+        ($item.lease_expires_epoch -gt [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) | Should Be $true
         $recovered = Invoke-CrashRecoveryDb
         $recovered | Should Be 0
         $item = Get-WantedItemDb -TrackId $track.id
@@ -246,10 +251,10 @@ UPDATE wanted_queue SET lease_expires_at = @exp WHERE track_id = @tid;
         $claim = Claim-WantedItemDb -TrackId $track.id -WorkerId 'w1'
         $claim.Success | Should Be $true
         Request-WantedCancellationDb -TrackId $track.id | Out-Null
-        $now = Get-NowIso
+        $expiredEpoch = [long][DateTimeOffset]::UtcNow.AddMinutes(-5).ToUnixTimeSeconds()
         Invoke-MusicServerParamNonQuery -Template @"
-UPDATE wanted_queue SET lease_expires_at = @exp WHERE track_id = @tid;
-"@ -Params @{ exp = ([DateTime]::UtcNow.AddMinutes(-5)).ToString('o'); tid = $track.id }
+UPDATE wanted_queue SET lease_expires_epoch = @exp WHERE track_id = @tid;
+"@ -Params @{ exp = $expiredEpoch; tid = $track.id }
         $recovered = Invoke-CrashRecoveryDb
         $recovered | Should Be 1
         $item = Get-WantedItemDb -TrackId $track.id
@@ -296,9 +301,10 @@ UPDATE wanted_queue SET lease_expires_at = @exp WHERE track_id = @tid;
         Add-WantedItemDb -TrackId $track.id | Out-Null
         Claim-WantedItemDb -TrackId $track.id -WorkerId 'w1' | Out-Null
         Update-WantedStateCasDb -TrackId $track.id -NewState 'DOWNLOADING' -ExpectedRevision 2 -WorkerId 'w1' | Out-Null
+        $expiredEpoch = [long][DateTimeOffset]::UtcNow.AddMinutes(-5).ToUnixTimeSeconds()
         Invoke-MusicServerParamNonQuery -Template @"
-UPDATE wanted_queue SET lease_expires_at = @exp WHERE track_id = @tid;
-"@ -Params @{ exp = ([DateTime]::UtcNow.AddMinutes(-5)).ToString('o'); tid = $track.id }
+UPDATE wanted_queue SET lease_expires_epoch = @exp WHERE track_id = @tid;
+"@ -Params @{ exp = $expiredEpoch; tid = $track.id }
         $recovered = Invoke-CrashRecoveryDb
         $recovered | Should Be 1
         $item = Get-WantedItemDb -TrackId $track.id
@@ -312,9 +318,12 @@ UPDATE wanted_queue SET lease_expires_at = @exp WHERE track_id = @tid;
         Claim-WantedItemDb -TrackId $track.id -WorkerId 'w1' | Out-Null
         Update-WantedStateCasDb -TrackId $track.id -NewState 'DOWNLOADING' -ExpectedRevision 2 -WorkerId 'w1' | Out-Null
         Update-WantedStateCasDb -TrackId $track.id -NewState 'VALIDATING' -ExpectedRevision 3 -WorkerId 'w1' | Out-Null
+        $beforeRecovery = Get-WantedItemDb -TrackId $track.id
+        $beforeRecovery.state | Should Be 'VALIDATING'
+        $expiredEpoch = [long][DateTimeOffset]::UtcNow.AddMinutes(-5).ToUnixTimeSeconds()
         Invoke-MusicServerParamNonQuery -Template @"
-UPDATE wanted_queue SET lease_expires_at = @exp WHERE track_id = @tid;
-"@ -Params @{ exp = ([DateTime]::UtcNow.AddMinutes(-5)).ToString('o'); tid = $track.id }
+UPDATE wanted_queue SET lease_expires_epoch = @exp WHERE track_id = @tid;
+"@ -Params @{ exp = $expiredEpoch; tid = $track.id }
         $recovered = Invoke-CrashRecoveryDb
         $recovered | Should Be 1
         $item = Get-WantedItemDb -TrackId $track.id
@@ -324,18 +333,23 @@ UPDATE wanted_queue SET lease_expires_at = @exp WHERE track_id = @tid;
     # === Encoding / SQL Safety Tests ===
 
     It 'handles Chinese title round-trip' {
-        $track = New-CanonicalTrack -Title '吹灭小山河' -Artist '国风堂,司南'
+        $title = -join @([char]0x5439, [char]0x706D, [char]0x5C0F, [char]0x5C71, [char]0x6CB3)
+        $artist = (-join @([char]0x56FD, [char]0x98CE, [char]0x5802)) + ',' + (-join @([char]0x53F8, [char]0x5357))
+        $track = New-CanonicalTrack -Title $title -Artist $artist
         Save-CanonicalTrackDb -Track $track | Out-Null
         $loaded = Get-CanonicalTrackDb -TrackId $track.id
-        $loaded.title | Should Be '吹灭小山河'
-        $loaded.artist | Should Be '国风堂,司南'
+        $loaded.title | Should Be $title
+        $loaded.artist | Should Be $artist
     }
 
     It 'handles Japanese title round-trip' {
-        $track = New-CanonicalTrack -Title '妄想感傷代償連盟' -Artist 'DECO*27,初音ミク'
+        $title = -join @([char]0x5984, [char]0x60F3, [char]0x611F, [char]0x50B7, [char]0x4EE3, [char]0x511F, [char]0x9023, [char]0x76DF)
+        $artist = 'DECO*27,' + (-join @([char]0x521D, [char]0x97F3, [char]0x30DF, [char]0x30AF))
+        $track = New-CanonicalTrack -Title $title -Artist $artist
         Save-CanonicalTrackDb -Track $track | Out-Null
         $loaded = Get-CanonicalTrackDb -TrackId $track.id
-        $loaded.title | Should Be '妄想感傷代償連盟'
+        $loaded.title | Should Be $title
+        $loaded.artist | Should Be $artist
     }
 
     It 'handles apostrophe in title' {

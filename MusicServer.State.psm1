@@ -7,7 +7,7 @@ Set-StrictMode -Version 3.0
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Database.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Core.psm1') -Force
 
-$script:SchemaVersion = 1
+$script:SchemaVersion = 2
 $script:LeaseMinutes = 30
 
 # ================================================================
@@ -77,10 +77,25 @@ CREATE TABLE IF NOT EXISTS wanted_queue (
     claimed_by TEXT NOT NULL DEFAULT '',
     claimed_at TEXT,
     lease_expires_at TEXT,
+    lease_expires_epoch INTEGER,
     revision INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL DEFAULT ''
 );
+"@
+    # CREATE TABLE IF NOT EXISTS does not add columns to an existing state DB.
+    # Keep this upgrade local and idempotent; the TEXT timestamp remains as a
+    # human-readable diagnostic while all lease decisions use the INTEGER.
+    $wantedColumns = @(Invoke-MusicServerSqlJson -Query 'PRAGMA table_info(wanted_queue);')
+    if (-not ($wantedColumns | Where-Object { [string]$_.name -eq 'lease_expires_epoch' })) {
+        Invoke-MusicServerSqlNonQuery -Query 'ALTER TABLE wanted_queue ADD COLUMN lease_expires_epoch INTEGER;'
+    }
+    Invoke-MusicServerSqlNonQuery -Query @"
+UPDATE wanted_queue
+SET lease_expires_epoch = CAST(strftime('%s', lease_expires_at) AS INTEGER)
+WHERE lease_expires_epoch IS NULL
+  AND lease_expires_at IS NOT NULL
+  AND lease_expires_at != '';
 "@
     Invoke-MusicServerSqlNonQuery -Query @"
 CREATE TABLE IF NOT EXISTS provider_health (
@@ -121,6 +136,7 @@ CREATE TABLE IF NOT EXISTS events (
     Invoke-MusicServerSqlNonQuery -Query @"
 CREATE INDEX IF NOT EXISTS idx_wanted_state ON wanted_queue(state);
 CREATE INDEX IF NOT EXISTS idx_wanted_lease ON wanted_queue(lease_expires_at);
+CREATE INDEX IF NOT EXISTS idx_wanted_lease_epoch ON wanted_queue(lease_expires_epoch);
 CREATE INDEX IF NOT EXISTS idx_events_track ON events(track_id);
 CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
 CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at);
@@ -163,21 +179,31 @@ function Save-CanonicalTrackDb {
             if ($oldRows.Count -gt 0) { $created = [string]$oldRows[0].created_at }
         }
         if (-not $created) { $created = $now }
-        Invoke-MusicServerParamNonQuery -Template @"
-UPDATE canonical_tracks SET
-    title = @title, artist = @artist, album = @album, duration = @duration,
-    cover_url = @cover_url, identifiers_json = @identifiers, preview_sources_json = @preview,
-    download_candidates_json = @candidates, local_song_id = @local_song_id,
-    status = @status, updated_at = @updated_at, revision = @revision
-WHERE id = @id;
-"@ -Params @{
+        $revisionPredicate = if ($CAS) { ' AND revision = @expected_revision' } else { '' }
+        $updateParams = @{
             id = [string]$Track.id; title = [string]$Track.title; artist = [string](Get-OptionalProperty $Track 'artist')
             album = [string](Get-OptionalProperty $Track 'album'); duration = [int](Get-OptionalProperty $Track 'duration')
             cover_url = [string](Get-OptionalProperty $Track 'cover_url'); identifiers = $identifiers
             preview = $preview; candidates = $candidates; local_song_id = [string](Get-OptionalProperty $Track 'local_song_id')
             status = [string](Get-OptionalProperty $Track 'status' 'REMOTE'); updated_at = $now; revision = $newRevision
         }
-        return @{ Success = $true; Revision = $newRevision }
+        if ($CAS) { $updateParams['expected_revision'] = $ExpectedRevision }
+        $affected = Invoke-MusicServerParamNonQuery -Template @"
+UPDATE canonical_tracks SET
+    title = @title, artist = @artist, album = @album, duration = @duration,
+    cover_url = @cover_url, identifiers_json = @identifiers, preview_sources_json = @preview,
+    download_candidates_json = @candidates, local_song_id = @local_song_id,
+    status = @status, updated_at = @updated_at, revision = @revision
+WHERE id = @id$revisionPredicate;
+"@ -Params $updateParams -ReturnChanges
+        if ($affected -ne 1) {
+            $latest = @(Invoke-MusicServerParamSql -Template 'SELECT revision FROM canonical_tracks WHERE id = @id LIMIT 1;' -Params @{ id = [string]$Track.id })
+            return @{
+                Success = $false; Reason = 'CAS_MISMATCH'; AffectedRows = [long]$affected
+                CurrentRevision = if ($latest.Count -gt 0) { [int]$latest[0].revision } else { -1 }
+            }
+        }
+        return @{ Success = $true; Revision = $newRevision; AffectedRows = [long]$affected }
     } else {
         $created = [string](Get-OptionalProperty $Track 'created_at' $now)
         Invoke-MusicServerParamNonQuery -Template @"
@@ -323,7 +349,9 @@ function Convert-DbWantedRow {
         max_attempts = [int]$Row.max_attempts; next_retry_at = [string]$Row.next_retry_at
         selected_candidate = $selected; last_error = [string]$Row.last_error
         claimed_by = [string]$Row.claimed_by; claimed_at = [string]$Row.claimed_at
-        lease_expires_at = [string]$Row.lease_expires_at; revision = [int]$Row.revision
+        lease_expires_at = [string]$Row.lease_expires_at
+        lease_expires_epoch = if ($null -eq $Row.lease_expires_epoch) { $null } else { [long]$Row.lease_expires_epoch }
+        revision = [int]$Row.revision
         created_at = [string]$Row.created_at; updated_at = [string]$Row.updated_at
     }
 }
@@ -376,21 +404,28 @@ function Claim-WantedItemDb {
         [Parameter(Mandatory)][string]$WorkerId,
         [int]$LeaseMinutes = 30
     )
-    $now = Get-NowIso
-    $leaseExpiry = [DateTime]::UtcNow.AddMinutes($LeaseMinutes).ToString('o')
-    $result = Invoke-MusicServerParamNonQuery -Template @"
+    $nowInstant = [DateTimeOffset]::UtcNow
+    $now = $nowInstant.UtcDateTime.ToString('o')
+    $nowEpoch = [long]$nowInstant.ToUnixTimeSeconds()
+    $leaseInstant = $nowInstant.AddMinutes($LeaseMinutes)
+    $leaseExpiry = $leaseInstant.UtcDateTime.ToString('o')
+    $leaseExpiryEpoch = [long]$leaseInstant.ToUnixTimeSeconds()
+    $affected = Invoke-MusicServerParamNonQuery -Template @"
 UPDATE wanted_queue SET
     state = 'RESOLVING', claimed_by = @worker, claimed_at = @now,
-    lease_expires_at = @lease, revision = revision + 1, updated_at = @now
+    lease_expires_at = @lease, lease_expires_epoch = @lease_epoch,
+    revision = revision + 1, updated_at = @now
 WHERE track_id = @tid
   AND state IN ('WANTED','RETRY_WAIT')
-  AND (claimed_by = '' OR lease_expires_at IS NULL OR lease_expires_at <= @now);
-"@ -Params @{ tid = $TrackId; worker = $WorkerId; now = $now; lease = $leaseExpiry }
-    $check = @(Invoke-MusicServerParamSql -Template 'SELECT state, claimed_by FROM wanted_queue WHERE track_id = @tid LIMIT 1;' -Params @{ tid = $TrackId })
-    if ($check.Count -gt 0 -and [string]$check[0].claimed_by -eq $WorkerId -and [string]$check[0].state -eq 'RESOLVING') {
-        return @{ Success = $true; LeaseExpiresAt = $leaseExpiry }
+  AND (claimed_by = '' OR lease_expires_epoch IS NULL OR lease_expires_epoch <= @now_epoch);
+"@ -Params @{
+        tid = $TrackId; worker = $WorkerId; now = $now; now_epoch = $nowEpoch
+        lease = $leaseExpiry; lease_epoch = $leaseExpiryEpoch
+    } -ReturnChanges
+    if ($affected -eq 1) {
+        return @{ Success = $true; LeaseExpiresAt = $leaseExpiry; AffectedRows = [long]$affected }
     }
-    return @{ Success = $false; Reason = 'CLAIM_CONFLICT' }
+    return @{ Success = $false; Reason = 'CLAIM_CONFLICT'; AffectedRows = [long]$affected }
 }
 
 function Update-WantedStateCasDb {
@@ -409,19 +444,28 @@ function Update-WantedStateCasDb {
     if ($LastError) { $setClauses += 'last_error = @err'; $params['err'] = $LastError }
     if ($NextRetryAt) { $setClauses += 'next_retry_at = @nrt'; $params['nrt'] = $NextRetryAt }
     if ($AttemptCount -ge 0) { $setClauses += 'attempt_count = @ac'; $params['ac'] = $AttemptCount }
-    if ($NewState -ne 'RESOLVING') { $setClauses += "claimed_by = ''"; $setClauses += 'lease_expires_at = NULL' }
+    if ($NewState -notin @('RESOLVING','DOWNLOADING','VALIDATING')) {
+        $setClauses += "claimed_by = ''"
+        $setClauses += 'lease_expires_at = NULL'
+        $setClauses += 'lease_expires_epoch = NULL'
+    }
     $setSql = ($setClauses -join ', ')
-    $result = Invoke-MusicServerParamNonQuery -Template @"
+    $affected = Invoke-MusicServerParamNonQuery -Template @"
 UPDATE wanted_queue SET $setSql
 WHERE track_id = @tid AND revision = @rev AND claimed_by = @worker;
-"@ -Params $params
-    $check = @(Invoke-MusicServerParamSql -Template 'SELECT revision, state FROM wanted_queue WHERE track_id = @tid LIMIT 1;' -Params @{ tid = $TrackId })
-    if ($check.Count -eq 0) { return @{ Success = $false; Reason = 'NOT_FOUND' } }
-    $newRevision = [int]$check[0].revision
-    if ($newRevision -eq $ExpectedRevision) {
-        return @{ Success = $false; Reason = 'CAS_FAILED' }
+"@ -Params $params -ReturnChanges
+    $current = @(Invoke-MusicServerParamSql -Template 'SELECT revision, state FROM wanted_queue WHERE track_id = @tid LIMIT 1;' -Params @{ tid = $TrackId })
+    if ($current.Count -eq 0) { return @{ Success = $false; Reason = 'NOT_FOUND'; AffectedRows = [long]$affected } }
+    if ($affected -eq 0) {
+        return @{
+            Success = $false; Reason = 'CAS_FAILED'; AffectedRows = [long]$affected
+            CurrentRevision = [int]$current[0].revision; CurrentState = [string]$current[0].state
+        }
     }
-    return @{ Success = $true; Revision = $newRevision; CurrentState = [string]$check[0].state }
+    return @{
+        Success = $true; Revision = [int]$current[0].revision; AffectedRows = [long]$affected
+        CurrentState = [string]$current[0].state
+    }
 }
 
 function Request-WantedCancellationDb {
@@ -450,14 +494,22 @@ WHERE id = @tid AND status != 'LOCAL';
     }
     if ([string]$item.state -in $activeStates) {
         $newRev = $item.revision + 1
-        Invoke-MusicServerParamNonQuery -Template @"
+        $affected = Invoke-MusicServerParamNonQuery -Template @"
 UPDATE wanted_queue SET state = 'CANCEL_REQUESTED', last_error = 'USER_CANCELLED',
-    revision = @rev, updated_at = @now, claimed_by = '', lease_expires_at = NULL
+    revision = @rev, updated_at = @now, claimed_by = '',
+    lease_expires_at = NULL, lease_expires_epoch = NULL
 WHERE track_id = @tid AND revision = @currev;
-"@ -Params @{ tid = $TrackId; rev = $newRev; now = $now; currev = $item.revision }
+"@ -Params @{ tid = $TrackId; rev = $newRev; now = $now; currev = $item.revision } -ReturnChanges
+        if ($affected -ne 1) {
+            $latest = Get-WantedItemDb -TrackId $TrackId
+            if ($latest -and [string]$latest.state -eq 'CANCEL_REQUESTED') {
+                return @{ Success = $true; Reason = 'ALREADY_CANCELLED'; AffectedRows = [long]$affected }
+            }
+            return @{ Success = $false; Reason = 'CAS_CONFLICT'; AffectedRows = [long]$affected }
+        }
         Write-FeedbackDb -TrackId $TrackId -FeedbackType 'UNLIKE'
         Write-MusicServerEventDb -EventType 'WANTED_CANCEL_REQUESTED' -TrackId $TrackId -Message "active item marked cancel; state=$($item.state)"
-        return @{ Success = $true; Reason = 'CANCEL_REQUESTED' }
+        return @{ Success = $true; Reason = 'CANCEL_REQUESTED'; AffectedRows = [long]$affected }
     }
     return @{ Success = $false; Reason = "UNKNOWN_STATE:$($item.state)" }
 }
@@ -489,11 +541,17 @@ function Renew-LeaseDb {
         [Parameter(Mandatory)][string]$WorkerId,
         [int]$LeaseMinutes = 30
     )
-    $leaseExpiry = [DateTime]::UtcNow.AddMinutes($LeaseMinutes).ToString('o')
-    Invoke-MusicServerParamNonQuery -Template @"
-UPDATE wanted_queue SET lease_expires_at = @lease, updated_at = @now
+    $nowInstant = [DateTimeOffset]::UtcNow
+    $leaseInstant = $nowInstant.AddMinutes($LeaseMinutes)
+    $leaseExpiry = $leaseInstant.UtcDateTime.ToString('o')
+    $leaseExpiryEpoch = [long]$leaseInstant.ToUnixTimeSeconds()
+    return Invoke-MusicServerParamNonQuery -Template @"
+UPDATE wanted_queue SET lease_expires_at = @lease, lease_expires_epoch = @lease_epoch, updated_at = @now
 WHERE track_id = @tid AND claimed_by = @worker AND state IN ('RESOLVING','DOWNLOADING','VALIDATING');
-"@ -Params @{ tid = $TrackId; worker = $WorkerId; lease = $leaseExpiry; now = (Get-NowIso) }
+"@ -Params @{
+        tid = $TrackId; worker = $WorkerId; lease = $leaseExpiry
+        lease_epoch = $leaseExpiryEpoch; now = $nowInstant.UtcDateTime.ToString('o')
+    } -ReturnChanges
 }
 
 # ================================================================
@@ -502,36 +560,53 @@ WHERE track_id = @tid AND claimed_by = @worker AND state IN ('RESOLVING','DOWNLO
 
 function Invoke-CrashRecoveryDb {
     $nowIso = Get-NowIso
-    $nowUnix = [long]([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())
-    $staleRows = @(Invoke-MusicServerParamSql -Template @"
-SELECT track_id, state, attempt_count, lease_expires_at FROM wanted_queue
-WHERE state IN ('RESOLVING','DOWNLOADING','VALIDATING')
-  AND lease_expires_at IS NOT NULL AND lease_expires_at != '';
-"@ -Params @{ })
+    $nowEpoch = [long][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     $recovered = 0
+
+    # Cancellation is a higher-priority terminal intent. Claim the cleanup with
+    # a revision-guarded DELETE so a concurrent state change cannot be erased.
+    $cancelRows = @(Invoke-MusicServerSqlJson -Query @"
+SELECT track_id, revision FROM wanted_queue WHERE state = 'CANCEL_REQUESTED';
+"@)
+    foreach ($row in $cancelRows) {
+        $tid = [string]$row.track_id
+        $deleted = Invoke-MusicServerParamNonQuery -Template @"
+DELETE FROM wanted_queue
+WHERE track_id = @tid AND state = 'CANCEL_REQUESTED' AND revision = @revision;
+"@ -Params @{ tid = $tid; revision = [int]$row.revision } -ReturnChanges
+        if ($deleted -ne 1) { continue }
+
+        Invoke-MusicServerParamNonQuery -Template @"
+UPDATE canonical_tracks SET status = 'REMOTE', updated_at = @now, revision = revision + 1
+WHERE id = @tid AND status != 'LOCAL';
+"@ -Params @{ tid = $tid; now = $nowIso }
+        Write-MusicServerEventDb -EventType 'WANTED_CANCELLED' -TrackId $tid -Message 'cancellation completed during recovery'
+        Write-MusicServerEventDb -EventType 'WANTED_LEASE_RECOVERED' -TrackId $tid -Message 'CANCEL_REQUESTED won recovery cleanup'
+        $recovered++
+    }
+
+    $staleRows = @(Invoke-MusicServerParamSql -Template @"
+SELECT track_id, state, attempt_count, revision FROM wanted_queue
+WHERE state IN ('RESOLVING','DOWNLOADING','VALIDATING')
+  AND lease_expires_epoch IS NOT NULL
+  AND lease_expires_epoch < @now_epoch;
+"@ -Params @{ now_epoch = $nowEpoch })
     foreach ($row in $staleRows) {
         $tid = [string]$row.track_id
         $state = [string]$row.state
-        $leaseExpiry = Convert-ToUtcDateTime ([string]$row.lease_expires_at)
-        if (-not $leaseExpiry) { continue }
-        $leaseTicks = $leaseExpiry.ToUniversalTime().Ticks
-        $leaseUnix = [long]($leaseTicks / 10000000 - 62135596800)
-        if ($leaseUnix -ge $nowUnix) { continue }
-        $cancelCheck = @(Invoke-MusicServerParamSql -Template 'SELECT state FROM wanted_queue WHERE track_id = @tid LIMIT 1;' -Params @{ tid = $tid })
-        if ($cancelCheck.Count -gt 0 -and [string]$cancelCheck[0].state -eq 'CANCEL_REQUESTED') {
-            Complete-WantedCancellationDb -TrackId $tid
-            Write-MusicServerEventDb -EventType 'WANTED_LEASE_RECOVERED' -TrackId $tid -Message "stale $state + CANCEL_REQUESTED -> cancel cleanup"
-            $recovered++
-            continue
-        }
         $newAttempts = [int]$row.attempt_count + 1
-        $nowUpdate = Get-NowIso
-        Invoke-MusicServerParamNonQuery -Template @"
+        $affected = Invoke-MusicServerParamNonQuery -Template @"
 UPDATE wanted_queue SET state = 'RETRY_WAIT', attempt_count = @ac, claimed_by = '',
-    lease_expires_at = NULL, last_error = 'STALE_LEASE_RECOVERY', updated_at = @now,
+    lease_expires_at = NULL, lease_expires_epoch = NULL,
+    last_error = 'STALE_LEASE_RECOVERY', updated_at = @now,
     revision = revision + 1
-WHERE track_id = @tid;
-"@ -Params @{ tid = $tid; ac = $newAttempts; now = $nowUpdate }
+WHERE track_id = @tid AND state = @state AND revision = @revision
+  AND lease_expires_epoch IS NOT NULL AND lease_expires_epoch < @now_epoch;
+"@ -Params @{
+            tid = $tid; state = $state; revision = [int]$row.revision
+            ac = $newAttempts; now = $nowIso; now_epoch = $nowEpoch
+        } -ReturnChanges
+        if ($affected -ne 1) { continue }
         Write-MusicServerEventDb -EventType 'WANTED_LEASE_RECOVERED' -TrackId $tid -Message "stale $state -> RETRY_WAIT; attempts=$newAttempts"
         $recovered++
     }
@@ -620,15 +695,18 @@ VALUES (@p, @state, @sc, @fc, @cf, @c412, @ls, @lf, @l412, @bu, @alm, @hpp, @err
 function Claim-HalfOpenProbeDb {
     param([Parameter(Mandatory)][string]$Provider)
     $now = Get-NowIso
-    $result = Invoke-MusicServerParamNonQuery -Template @"
-UPDATE provider_health SET half_open_probe_claimed = 1, revision = revision + 1, updated_at = @now
-WHERE provider = @p AND state = 'HALF_OPEN' AND half_open_probe_claimed = 0;
-"@ -Params @{ p = $Provider; now = $now }
-    $check = @(Invoke-MusicServerParamSql -Template 'SELECT half_open_probe_claimed FROM provider_health WHERE provider = @p LIMIT 1;' -Params @{ p = $Provider })
-    if ($check.Count -gt 0 -and [int]$check[0].half_open_probe_claimed -eq 1) {
-        return $true
-    }
-    return $false
+    $affected = Invoke-MusicServerParamNonQuery -Template @"
+UPDATE provider_health
+SET state = 'HALF_OPEN', half_open_probe_claimed = 1,
+    revision = revision + 1, updated_at = @now
+WHERE provider = @p
+  AND half_open_probe_claimed = 0
+  AND (
+      state = 'HALF_OPEN'
+      OR (state = 'OPEN' AND (blocked_until IS NULL OR blocked_until = '' OR blocked_until <= @now))
+  );
+"@ -Params @{ p = $Provider; now = $now } -ReturnChanges
+    return ($affected -eq 1)
 }
 
 function Get-ProviderStatusesDb {
