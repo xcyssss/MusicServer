@@ -25,9 +25,12 @@ $ProgressPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Core.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.State.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Providers.psm1') -Force
 $Config = New-MusicServerConfig -Root $Root
 Initialize-MusicServerState -Config $Config
+Initialize-MusicServerDatabase -DbPath (Join-Path $Config.StateDir 'musicserver.db') -SqliteExe $Config.Sqlite
+Initialize-MusicServerSchema
 Import-LegacyRecommendationState -Config $Config | Out-Null
 $WorkerMutex = [Threading.Mutex]::new($false, 'MusicServer_WantedWorker')
 $OwnsWorkerMutex = $false
@@ -40,6 +43,115 @@ if (-not $OwnsWorkerMutex) {
     Write-Host '已有 Wanted worker 正在运行，本次跳过，避免重复下载。' -ForegroundColor DarkYellow
     $WorkerMutex.Dispose()
     exit 0
+}
+
+# Worker identity used for owned leases and CAS writes in wanted_queue.
+# The INTEGER column lease_expires_epoch is the only machine comparison source
+# for lease validity; TEXT lease_expires_at is diagnostic and never compared here.
+$WorkerId = "wanted_worker_$([Environment]::MachineName)_$$"
+$ActiveQueueStates = @('RESOLVING','DOWNLOADING','VALIDATING')
+
+# Hardened helpers: wanted_queue (SQLite) is the concurrency authority. The legacy
+# JSON state stays the UI-facing record (music_api reads/writes it); every queue
+# transition below is mirrored into wanted_queue with a revision-guarded CAS so a
+# crashed/stale worker can never overwrite a cancel or steal a live lease.
+function Test-OwnsActiveLease {
+    param([psobject]$Wanted)
+    try {
+        $row = Get-WantedItemDb -TrackId ([string]$Wanted.track_id)
+        if ($null -ceq $row) { return $true }
+        if ([string]$row.state -ne 'CANCEL_REQUESTED' -and [string]$row.claimed_by -ceq $WorkerId) {
+            $epoch = $null
+            if ($row.PSObject.Properties['lease_expires_epoch']) {
+                $e = $row.lease_expires_epoch
+                if ($null -ne $e) { $epoch = [long]$e }
+            }
+            # Epoch is the sole lease clock; null epoch for an owned active row is treated as held.
+            if ($null -eq $epoch) { return $true }
+            return ($epoch -gt [long][DateTimeOffset]::UtcNow.ToUnixTimeSeconds())
+        }
+        return $false
+    } catch {
+        # DB unavailable: fall through to the legacy cancellation guards instead of dead-ending.
+        return $true
+    }
+}
+
+function Complete-CancellationInDb {
+    param([psobject]$Wanted, [string]$TemporaryPath = '')
+    try {
+        $tid = [string]$Wanted.track_id
+        $cur = $null
+        try { $cur = Get-WantedItemDb -TrackId $tid } catch {}
+        if ($null -ceq $cur) {
+            # Never resurrect a completed cancellation; keep the canonical track consistent.
+            Reset-TrackToRemote -Config $Config -TrackId $tid | Out-Null
+            return
+        }
+        if ([string]$cur.state -ne 'CANCEL_REQUESTED') {
+            # Active/idle row: mark CANCEL_REQUESTED (this also clears any lease we hold).
+            Request-WantedCancellationDb -TrackId $tid | Out-Null
+        }
+        # Finish: remove the queue row and reset the canonical track (guarded to LOCAL).
+        Complete-WantedCancellationDb -TrackId $tid -TemporaryPath $TemporaryPath | Out-Null
+    } catch {
+        Write-Host "  [warn] DB 取消同步失败：$_" -ForegroundColor DarkYellow
+    }
+}
+
+function Release-WantedLease {
+    param([psobject]$Wanted, [string]$State, [string]$Error = '', [string]$NextRetryAt = '', [int]$AttemptCount = -1)
+    try {
+        $tid = [string]$Wanted.track_id
+        $cur = Get-WantedItemDb -TrackId $tid
+        if ($null -ceq $cur) {
+            # Row already completed (e.g. cancellation cleanup): keep the canonical track consistent.
+            if ($State -ne 'LOCAL') { Reset-TrackToRemote -Config $Config -TrackId $tid | Out-Null }
+            return
+        }
+        $ok = Update-WantedStateCasDb -TrackId $tid -WorkerId $WorkerId -ExpectedRevision ([int]$cur.revision) `
+            -NewState $State -LastError $Error -NextRetryAt $NextRetryAt -AttemptCount $AttemptCount
+        if ($ok.Success) { return }
+        # Lost the CAS race (e.g. crash recovery reclaimed our expired lease): never
+        # let a stale writer force its own terminal state into the canonical track.
+        if ($State -ne 'LOCAL') { Reset-TrackToRemote -Config $Config -TrackId $tid | Out-Null }
+    } catch {
+        Write-Host "  [warn] DB 状态同步失败：$_" -ForegroundColor DarkYellow
+    }
+}
+
+function Reassert-WantedLease {
+    param([psobject]$Wanted)
+    try {
+        $tid = [string]$Wanted.track_id
+        $cur = Get-WantedItemDb -TrackId $tid
+        if ($null -ceq $cur) { return }
+        if ([string]$cur.state -ne 'CANCEL_REQUESTED' -and [string]$cur.claimed_by -ceq $WorkerId) {
+            return
+        }
+        # Crash recovery can reclaim an expired lease while we were blocked a long time.
+        # Re-claim against the current revision: this is a no-op if another worker took
+        # over the item in the meantime, and Test-OwnsActiveLease then stops this pass
+        # instead of letting a stale writer finish the job.
+        $nowInstant = [DateTimeOffset]::UtcNow
+        $leaseInstant = $nowInstant.AddMinutes(30)
+        $resumed = Invoke-MusicServerParamNonQuery -Template @"
+UPDATE wanted_queue SET state = 'RESOLVING', claimed_by = @me, claimed_at = @now,
+    lease_expires_at = @lease, lease_expires_epoch = @lease_epoch, updated_at = @now,
+    revision = revision + 1
+WHERE track_id = @tid AND state = 'RETRY_WAIT' AND claimed_by = ''
+  AND revision = @rev;
+"@ -Params @{
+            tid = $tid; me = $WorkerId; rev = [int]$cur.revision
+            now = $nowInstant.UtcDateTime.ToString('o')
+            lease = $leaseInstant.UtcDateTime.ToString('o')
+            lease_epoch = [long]$leaseInstant.ToUnixTimeSeconds()
+        } -ReturnChanges
+        if ([int]$resumed -ne 1) { return }
+        Renew-LeaseDb -TrackId $tid -WorkerId $WorkerId -LeaseMinutes 30 | Out-Null
+    } catch {
+        Write-Host "  [warn] 租约恢复失败：$_" -ForegroundColor DarkYellow
+    }
 }
 
 function Get-LiveWanted {
@@ -63,6 +175,7 @@ function Complete-WantedCancellation {
     }
     Remove-WantedTrack -Config $Config -WantedId ([string]$Wanted.id)
     Reset-TrackToRemote -Config $Config -TrackId ([string]$Wanted.track_id) | Out-Null
+    Complete-CancellationInDb -Wanted $Wanted -TemporaryPath $TemporaryPath
     Write-StructuredEvent -Config $Config -TrackId $Wanted.track_id -Event 'WANTED_CANCELLED' -Result 'SUCCESS' -Message 'user cancelled before localization completed'
 }
 
@@ -80,6 +193,7 @@ function Set-QueueState {
     $Wanted.next_retry_at = if ($NextRetryAt) { $NextRetryAt } else { $null }
     Save-WantedTrack -Config $Config -Wanted $Wanted | Out-Null
     Write-StructuredEvent -Config $Config -TrackId $Wanted.track_id -Event 'STATE_TRANSITION' -FromState $from -ToState $State -Attempt ([int]$Wanted.attempts) -ErrorType $Error
+    [void](Release-WantedLease -Wanted $Wanted -State $State -Error $Error -NextRetryAt $NextRetryAt)
     return $true
 }
 
@@ -168,6 +282,7 @@ function Move-LegacyDailyMixToLibrary {
 function Bind-LocalTrack {
     param([psobject]$Track, [psobject]$Wanted, [string]$Path)
     if (Test-WantedCancellation -Wanted $Wanted) { Complete-WantedCancellation -Wanted $Wanted; return }
+    if (-not (Test-OwnsActiveLease -Wanted $Wanted)) { Write-Host "  [abandon] $([string]$Wanted.title)：租约已丢失，放弃本次处理。" -ForegroundColor DarkYellow; return }
     $Path = Move-LegacyDailyMixToLibrary -Path $Path
     $songId = Get-NavidromeSongIdForPath -Config $Config -Path $Path
     Set-TrackStatus -Config $Config -TrackId $Track.id -Status 'LOCAL' -LocalSongId $songId | Out-Null
@@ -180,6 +295,7 @@ function Bind-LocalTrack {
 function Complete-DownloadedTrack {
     param([psobject]$Track, [psobject]$Wanted, [string]$Path, [psobject]$Validation, [psobject]$Candidate, [psobject]$Score)
     if (Test-WantedCancellation -Wanted $Wanted) { Complete-WantedCancellation -Wanted $Wanted -TemporaryPath $Path; return }
+    if (-not (Test-OwnsActiveLease -Wanted $Wanted)) { Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue; return }
 
     $target = Join-Path $Config.MusicDir ([IO.Path]::GetFileName($Path))
     if ($Path -ne $target) {
@@ -196,6 +312,10 @@ function Complete-DownloadedTrack {
     if (Test-WantedCancellation -Wanted $Wanted) {
         Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
         Complete-WantedCancellation -Wanted $Wanted
+        return
+    }
+    if (-not (Test-OwnsActiveLease -Wanted $Wanted)) {
+        Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
         return
     }
 
@@ -231,6 +351,10 @@ function Process-WantedTrack {
         Complete-WantedCancellation -Wanted $Wanted
         return
     }
+    if (-not (Test-OwnsActiveLease -Wanted $Wanted)) {
+        Write-Host "  [abandon] $([string]$Wanted.title)：租约已丢失，放弃本次处理。" -ForegroundColor DarkYellow
+        return
+    }
 
     $track = Get-CanonicalTrack -Config $Config -TrackId ([string]$Wanted.track_id)
     if (-not $track) {
@@ -251,9 +375,11 @@ function Process-WantedTrack {
 
     Set-TrackStatus -Config $Config -TrackId $track.id -Status 'RESOLVING' | Out-Null
     if (-not (Set-QueueState -Wanted $Wanted -State 'RESOLVING')) { Complete-WantedCancellation -Wanted $Wanted; return }
+    [void](Reassert-WantedLease -Wanted $Wanted)
     $ranked = @(Resolve-DownloadCandidates -Config $Config -Track $track)
 
     if (Test-WantedCancellation -Wanted $Wanted) { Complete-WantedCancellation -Wanted $Wanted; return }
+    if (-not (Test-OwnsActiveLease -Wanted $Wanted)) { Write-Host "  [abandon] $([string]$Wanted.title)：候选解析期间租约丢失，放弃本次处理。" -ForegroundColor DarkYellow; return }
 
     if ($ranked.Count -eq 0) {
         $Wanted.attempts = [int]$Wanted.attempts + 1
@@ -273,6 +399,7 @@ function Process-WantedTrack {
 
     foreach ($entry in $ranked) {
         if (Test-WantedCancellation -Wanted $Wanted) { Complete-WantedCancellation -Wanted $Wanted; return }
+        if (-not (Test-OwnsActiveLease -Wanted $Wanted)) { return }
 
         $candidate = $entry.Candidate
         $score = $entry.Score
@@ -286,10 +413,16 @@ function Process-WantedTrack {
         Set-TrackStatus -Config $Config -TrackId $track.id -Status 'DOWNLOADING' | Out-Null
         if (-not (Set-QueueState -Wanted $Wanted -State 'DOWNLOADING')) { Complete-WantedCancellation -Wanted $Wanted; return }
         if (Test-WantedCancellation -Wanted $Wanted) { Complete-WantedCancellation -Wanted $Wanted; return }
+        if (-not (Test-OwnsActiveLease -Wanted $Wanted)) { return }
+        [void](Reassert-WantedLease -Wanted $Wanted)
 
         $download = Invoke-BilibiliDownload -Config $Config -Track $track -Candidate $candidate
         if (Test-WantedCancellation -Wanted $Wanted) {
             Complete-WantedCancellation -Wanted $Wanted -TemporaryPath ([string]$download.Path)
+            return
+        }
+        if ($download.Success -and -not (Test-OwnsActiveLease -Wanted $Wanted)) {
+            Remove-Item -LiteralPath ([string]$download.Path) -Force -ErrorAction SilentlyContinue
             return
         }
 
@@ -309,6 +442,8 @@ function Process-WantedTrack {
             Complete-WantedCancellation -Wanted $Wanted -TemporaryPath $download.Path
             return
         }
+        if (-not (Test-OwnsActiveLease -Wanted $Wanted)) { Remove-Item -LiteralPath $download.Path -Force -ErrorAction SilentlyContinue; return }
+        [void](Reassert-WantedLease -Wanted $Wanted)
         $validation = Validate-DownloadedCandidate -Config $Config -Track $track -Path $download.Path
         Write-StructuredEvent -Config $Config -TrackId $track.id -Provider $candidate.provider -Event 'VALIDATION' -Result $validation.Reason -Message "duration=$($validation.Duration); expected=$($track.duration); diff=$($validation.DurationDiff); allowed=$($validation.AllowedDiff)"
 
@@ -316,6 +451,7 @@ function Process-WantedTrack {
             Complete-WantedCancellation -Wanted $Wanted -TemporaryPath $download.Path
             return
         }
+        if (-not (Test-OwnsActiveLease -Wanted $Wanted)) { Remove-Item -LiteralPath $download.Path -Force -ErrorAction SilentlyContinue; return }
         if (-not $validation.Valid) {
             Remove-Item -LiteralPath $download.Path -Force -ErrorAction SilentlyContinue
             if ($validation.Reason -eq 'WRONG_DURATION') { continue }
@@ -326,6 +462,7 @@ function Process-WantedTrack {
     }
 
     if (Test-WantedCancellation -Wanted $Wanted) { Complete-WantedCancellation -Wanted $Wanted; return }
+    if (-not (Test-OwnsActiveLease -Wanted $Wanted)) { return }
     $Wanted.attempts = [int]$Wanted.attempts + 1
     if ([int]$Wanted.attempts -ge [int]$Wanted.max_attempts) {
         Set-TrackStatus -Config $Config -TrackId $track.id -Status 'UNAVAILABLE' | Out-Null
@@ -337,13 +474,48 @@ function Process-WantedTrack {
 }
 
 function Invoke-WorkerPass {
+    # Crash recovery first: reclaim expired leases (lease_expires_epoch < now) and
+    # finish queued CANCEL_REQUESTED cleanups before anyone else touches the queue.
+    try { Invoke-CrashRecoveryDb | Out-Null } catch {
+        Write-Host "  [warn] 崩溃恢复跳过：$_" -ForegroundColor DarkYellow
+    }
     $queue = @(Get-WantedTracks -Config $Config -EligibleOnly)
     if ($queue.Count -eq 0) {
         Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Wanted Queue 为空。" -ForegroundColor DarkGray
         return
     }
-    $selected = @($queue | Select-Object -First $MaxItems)
-    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] 处理 Wanted Queue：$($selected.Count) 条" -ForegroundColor Cyan
+    $selected = @()
+    foreach ($wanted in $queue) {
+        if ($selected.Count -ge $MaxItems) { break }
+        [string]$tid = [string]$wanted.track_id
+        if ([string]$wanted.state -eq 'CANCEL_REQUESTED') {
+            # 取消收尾是幂等的，不需要持有租约，直接处理。
+            $selected += $wanted
+            continue
+        }
+        $claimed = $false
+        try {
+            [void](Add-WantedItemDb -TrackId $tid -MaxAttempts ([int]$wanted.max_attempts))
+            $claim = Claim-WantedItemDb -TrackId $tid -WorkerId $WorkerId
+            $claimed = [bool]$claim.Success
+        } catch {
+            Write-Host "  [warn] claim 失败（回退到旧的取消检查保护）：$_" -ForegroundColor DarkYellow
+        }
+        if (-not $claimed) {
+            if ($null -ne $claim) {
+                Write-Host "  [skip] $([string]$wanted.title)：claim 竞争失败（$($claim.Reason)），其他 worker 持有活跃租约。" -ForegroundColor DarkYellow
+            } else {
+                Write-Host "  [skip] $([string]$wanted.title)：claim 未取得，本轮跳过。" -ForegroundColor DarkYellow
+            }
+            continue
+        }
+        $selected += $wanted
+    }
+    if ($selected.Count -eq 0) {
+        Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Wanted Queue 无可处理条目（全部被其他 worker 持有租约）。" -ForegroundColor DarkGray
+        return
+    }
+    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] 处理 Wanted Queue：$($selected.Count) 条（worker=$WorkerId）" -ForegroundColor Cyan
     foreach ($wanted in $selected) { Process-WantedTrack -Wanted $wanted }
 }
 

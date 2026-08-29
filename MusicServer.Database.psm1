@@ -183,7 +183,12 @@ function Invoke-MusicServerSqliteScript {
         $startInfo = [Diagnostics.ProcessStartInfo]::new()
         $startInfo.FileName = $script:SqliteExe
         $jsonArgument = if ($Json) { '-json ' } else { '' }
-        $startInfo.Arguments = "$jsonArgument`"$($script:DbPath)`" `".read $tmpFile`""
+        # Every invocation is a fresh sqlite3 process, so a PRAGMA set during
+        # Initialize-MusicServerDatabase does not survive here. `.timeout` must
+        # ride along with every execution: without it, concurrent workers hit a
+        # hard "database is locked" error instead of waiting for the other
+        # writer to commit and then losing the claim race gracefully.
+        $startInfo.Arguments = "$jsonArgument`"$($script:DbPath)`" `".timeout 5000`" `".read $tmpFile`""
         $startInfo.UseShellExecute = $false
         $startInfo.CreateNoWindow = $true
         $startInfo.RedirectStandardOutput = $true
