@@ -212,8 +212,8 @@ Describe 'MusicServer canonical state and queue' {
 
     It 'does not feed neutral recommendation history back as seeds' {
         $source = Get-Content -LiteralPath (Join-Path $ProjectRoot 'daily_recommend.ps1') -Raw
-        $source | Should Match "recommendation_history.*liked"
-        $source | Should Not Match "Source = 'legacy_history'"
+        $source | Should Match 'Get-RecommendationSeedCandidatesDb'
+        $source | Should Not Match 'Import-LegacyRecommendationState|Read-StateCollection|recommendation_history\.json'
         $source | Should Match 'RecommendationCooldownDays = 14'
     }
 

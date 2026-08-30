@@ -231,6 +231,23 @@ function Initialize-MusicServerDatabase {
     }
 }
 
+function Connect-MusicServerDatabase {
+    <#
+      Bind the database helpers to an existing database without changing it.
+      This is intentionally separate from Initialize-MusicServerDatabase so
+      read-only migration previews can inspect a pre-Phase-4 database.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$DbPath,
+        [string]$SqliteExe = 'sqlite3.exe'
+    )
+    if (-not (Test-Path -LiteralPath $DbPath -PathType Leaf)) {
+        throw "Database does not exist: $DbPath"
+    }
+    $script:DbPath = [IO.Path]::GetFullPath($DbPath)
+    $script:SqliteExe = $SqliteExe
+}
+
 function Get-MusicServerDbPath {
     return $script:DbPath
 }

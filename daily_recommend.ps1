@@ -1,25 +1,32 @@
-﻿<#
+﻿<##
 .SYNOPSIS
     每日音乐推荐：只生成远程推荐和试听元数据，不下载音频。
 .DESCRIPTION
-    兼容现有 accepted.csv、lyrics_report.csv 和 Navidrome 本地库作为推荐种子。
-    强偏好只来自 accepted、显式 like 和 Navidrome starred；仅展示过的历史推荐不会反向喂给推荐器。
-    推荐阶段只访问网易云的轻量 metadata API；Bilibili/yt-dlp 只允许由 wanted_worker.ps1
-    在用户明确点红心后调用。
+    推荐运行时只从 SQLite 读取/写入 recommendation state。首次非 DryRun
+    执行可以通过 migration marker 导入 legacy JSON/CSV；marker 写入后，
+    legacy 文件不再参与 seed、cooldown 或 recommendation 决策。
+    Navidrome starred 仍是外部动态偏好；本阶段不把 Navidrome DB 改成
+    MusicServer 的状态源。
 .PARAMETER Count
     目标推荐数量，默认 20。
 .PARAMETER DryRun
-    只打印推荐，不写 JSON/CSV 状态。
+    只打印推荐，不写 recommendation state，也不触发 migration。
+.PARAMETER MigrateLegacy
+    显式执行一次 legacy JSON/CSV 到 SQLite 的迁移；默认不自动激活生产迁移。
 .PARAMETER SeedCount
     使用的种子数量，默认 25。
 .PARAMETER Root
     项目根目录；默认当前脚本所在目录，主要用于测试和迁移。
-#>
+.PARAMETER RandomSeed
+    可选测试随机种子；默认使用正常随机行为。
+##>
 param(
     [int]$Count = 20,
     [switch]$DryRun,
     [int]$SeedCount = 25,
-    [string]$Root = $PSScriptRoot
+    [string]$Root = $PSScriptRoot,
+    [int]$RandomSeed = -1,
+    [switch]$MigrateLegacy
 )
 
 $ErrorActionPreference = 'Continue'
@@ -27,27 +34,31 @@ $ProgressPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Core.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Database.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.State.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Migration.psm1') -Force
+
 $Config = New-MusicServerConfig -Root $Root
 Initialize-MusicServerState -Config $Config
-Import-LegacyRecommendationState -Config $Config | Out-Null
+$dbPath = Join-Path $Config.StateDir 'musicserver.db'
+Initialize-MusicServerDatabase -DbPath $dbPath -SqliteExe $Config.Sqlite
+Initialize-MusicServerSchema
+
+# Legacy import is an explicit activation step. DryRun never opens the
+# JSON/CSV migration input path, and a normal scheduled run cannot silently
+# activate production migration by itself.
+if ($MigrateLegacy -and -not $DryRun) {
+    $migration = Invoke-MusicServerMigration -Config $Config
+    if ([string]$migration.status -eq 'FAILED') { throw "Recommendation state migration failed: $($migration.error)" }
+}
 
 $Headers = @{
     'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36'
     'Referer'    = 'https://music.163.com/'
 }
-$Accepted = Join-Path $Config.DataDir 'accepted.csv'
-$Blacklist = Join-Path $Config.DataDir 'rejected.csv'
-$Report = Join-Path $Config.Root 'lyrics_report.csv'
 $RecommendationCooldownDays = 14
 
 function Write-Step([string]$Message) { Write-Host "`n>>> $Message" -ForegroundColor Cyan }
-
-function Test-LikedValue {
-    param($Value)
-    if ($Value -is [bool]) { return [bool]$Value }
-    if ($null -eq $Value) { return $false }
-    return ([string]$Value -match '^(?i:true|1|yes)$')
-}
 
 function Search-Netease {
     param([string]$Keyword, [int]$Limit = 3)
@@ -89,85 +100,36 @@ function Get-StarredTitles {
 }
 
 function Get-SeedPool {
-    $seeds = @()
-
-    # Downloaded/accepted tracks are durable positive feedback.
-    if (Test-Path -LiteralPath $Accepted) {
-        foreach ($row in @(Import-Csv -LiteralPath $Accepted -Encoding UTF8)) {
-            if ($row.Title) {
-                $seeds += [pscustomobject]@{ Title = $row.Title; Artist = $row.Artist; Weight = 4; Source = 'accepted' }
-            }
-        }
-    }
-
-    # Crucial: merely being recommended is neutral. Only explicit likes become recommendation-history seeds.
-    foreach ($row in @(Read-StateCollection -Config $Config -Name recommendation_history | Where-Object { $_.title -and (Test-LikedValue (Get-OptionalProperty $_ 'liked' $false)) })) {
-        $seeds += [pscustomobject]@{ Title = $row.title; Artist = $row.artist; Weight = 5; Source = 'explicit_like' }
-    }
-
     $starred = @(Get-StarredTitles)
-    foreach ($line in $starred) {
-        $parts = [string]$line -split ' - ', 2
-        $seeds += [pscustomobject]@{ Title = $parts[0]; Artist = if ($parts.Count -gt 1) { $parts[1] } else { '' }; Weight = 5; Source = 'navidrome_star' }
-    }
-
-    # Library metadata is only a weak fallback for discovery diversity, not a replacement for explicit preference.
-    if (Test-Path -LiteralPath $Report) {
-        foreach ($row in @(Import-Csv -LiteralPath $Report -Encoding UTF8 | Where-Object { $_.Matched -and $_.Status -in @('OK','NO_LYRIC') })) {
-            $seeds += [pscustomobject]@{ Title = $row.Matched; Artist = $row.MatchedArtist; Weight = 1; Source = 'library_fallback' }
-        }
-    }
-
-    $expanded = foreach ($seed in $seeds) {
-        for ($i = 0; $i -lt [Math]::Max(1, [int]$seed.Weight); $i++) { $seed }
-    }
-    $picked = @()
-    $artists = @{}
-    foreach ($seed in @($expanded | Sort-Object { Get-Random })) {
-        if (-not $seed.Title) { continue }
-        $artistKey = Normalize-MusicText (($seed.Artist -split '[,，、]')[0])
-        if ($artistKey -and $artists.ContainsKey($artistKey) -and $artists[$artistKey] -ge 3) { continue }
-        if (@($picked | Where-Object { (Normalize-MusicText $_.Title) -eq (Normalize-MusicText $seed.Title) -and (Normalize-MusicText $_.Artist) -eq (Normalize-MusicText $seed.Artist) }).Count -gt 0) { continue }
-        $picked += $seed
-        if ($artistKey) {
-            if ($artists.ContainsKey($artistKey)) { $artists[$artistKey]++ } else { $artists[$artistKey] = 1 }
-        }
-        if ($picked.Count -ge $SeedCount) { break }
-    }
-    return @($picked)
+    return @(Get-RecommendationSeedCandidatesDb -SeedCount $SeedCount -NavidromeStars $starred -RandomSeed $RandomSeed)
 }
 
-Write-Step '收集种子歌曲'
+Write-Step '收集 SQLite 种子歌曲'
 $picked = @(Get-SeedPool)
 Write-Host "  本次选用种子：$($picked.Count)" -ForegroundColor Yellow
-foreach ($seed in $picked) { Write-Host "    - $($seed.Title) - $($seed.Artist) [$($seed.Source)]" -ForegroundColor DarkGray }
+foreach ($seed in $picked) { Write-Host "    - $($seed.Title) - $($seed.Artist) [$($seed.Source), weight=$($seed.Weight)]" -ForegroundColor DarkGray }
 
-Write-Step '建立排除集与近期推荐冷却'
+Write-Step '建立 SQLite 排除集与近期推荐冷却'
 $exclude = New-Object System.Collections.Generic.HashSet[string]
 foreach ($file in @(Get-ChildItem -LiteralPath $Config.MusicDir -Filter '*.mp3' -File -Recurse -ErrorAction SilentlyContinue)) {
     [void]$exclude.Add((Normalize-MusicText $file.BaseName))
 }
-if (Test-Path -LiteralPath $Blacklist) {
-    foreach ($row in @(Import-Csv -LiteralPath $Blacklist -Encoding UTF8)) {
-        if ($row.Title) { [void]$exclude.Add((Normalize-MusicText $row.Title)) }
-        if ($row.NeteaseId) { [void]$exclude.Add("netease:$($row.NeteaseId)") }
-    }
+foreach ($row in @(Get-RecommendationExcludedKeysDb)) {
+    if ($row.Title) { [void]$exclude.Add((Normalize-MusicText $row.Title)) }
+    if ($row.NeteaseId) { [void]$exclude.Add("netease:$($row.NeteaseId)") }
+    if ($row.TrackId) { [void]$exclude.Add("track:$($row.TrackId)") }
 }
 $acceptedIds = New-Object System.Collections.Generic.HashSet[string]
-if (Test-Path -LiteralPath $Accepted) {
-    foreach ($row in @(Import-Csv -LiteralPath $Accepted -Encoding UTF8)) {
-        if ($row.NeteaseId) { [void]$acceptedIds.Add([string]$row.NeteaseId) }
-    }
+foreach ($row in @(Get-RecommendationExcludedKeysDb | Where-Object { [string]$_.FeedbackType -eq 'ACCEPTED' })) {
+    if ($row.NeteaseId) { [void]$acceptedIds.Add([string]$row.NeteaseId) }
 }
 
-$cooldownCutoff = (Get-Date).Date.AddDays(-$RecommendationCooldownDays)
+$today = Get-TodayDate
+$cooldownRows = @(Get-RecommendationCooldownTrackIdsDb -AsOfDate $today -CooldownDays $RecommendationCooldownDays)
 $cooldownCount = 0
-foreach ($row in @(Read-StateCollection -Config $Config -Name recommendation_history)) {
-    [DateTime]$recommendationDate = [DateTime]::MinValue
-    if ([DateTime]::TryParse([string](Get-OptionalProperty $row 'date'), [ref]$recommendationDate) -and $recommendationDate.Date -ge $cooldownCutoff) {
-        $neteaseId = [string](Get-OptionalProperty $row 'netease_id')
-        if ($neteaseId -and $exclude.Add("netease:$neteaseId")) { $cooldownCount++ }
-    }
+foreach ($row in $cooldownRows) {
+    if ($row.netease_id -and $exclude.Add("netease:$($row.netease_id)")) { $cooldownCount++ }
+    if ($row.track_id) { [void]$exclude.Add("track:$($row.track_id)") }
 }
 Write-Host "  排除条目：$($exclude.Count)，已接受网易云 ID：$($acceptedIds.Count)，近期冷却：$cooldownCount" -ForegroundColor Yellow
 
@@ -179,9 +141,11 @@ foreach ($seed in $picked) {
     $similar = @(Get-SimiSongs -SongId ([long]$found[0].id) -Limit 10)
     foreach ($song in $similar) {
         $sid = [string]$song.id
-        if (-not $sid -or $acceptedIds.Contains($sid) -or $exclude.Contains("netease:$sid")) { continue }
-        if ($candidateMap.ContainsKey($sid)) { $candidateMap[$sid].Score++; continue }
         $artist = (($song.artists | ForEach-Object { $_.name }) -join ',')
+        $candidateTrackId = ''
+        if ($song.name -and $artist) { $candidateTrackId = Get-CanonicalTrackId -Title ([string]$song.name) -Artist $artist }
+        if (-not $sid -or $acceptedIds.Contains($sid) -or $exclude.Contains("netease:$sid") -or ($candidateTrackId -and $exclude.Contains("track:$candidateTrackId"))) { continue }
+        if ($candidateMap.ContainsKey($sid)) { $candidateMap[$sid].Score++; continue }
         $duration = [int]($song.duration / 1000)
         if ($duration -lt 60 -or $duration -gt 600) { continue }
         if ($song.name -match '合集|串烧|伴奏|instrumental|纯音乐|Cover |cover版|铃声|remix版|片段|试听|DJ版|女声版|男声版|慢搖|抖音版|加速版|减速版|清唱') { continue }
@@ -196,21 +160,16 @@ foreach ($seed in $picked) {
 }
 
 $ranked = @($candidateMap.Values | Sort-Object @{Expression = {$_.Score}; Descending = $true}, @{Expression = { Get-Random }})
-$recos = @()
-$artists = @{}
+$recos = @(); $artists = @{}
 foreach ($candidate in $ranked) {
     $artistKey = Normalize-MusicText (($candidate.Artist -split '[,，、]')[0])
     if ($artistKey -and $artists.ContainsKey($artistKey) -and $artists[$artistKey] -ge 5) { continue }
     $recos += $candidate
-    if ($artistKey) {
-        if ($artists.ContainsKey($artistKey)) { $artists[$artistKey]++ } else { $artists[$artistKey] = 1 }
-    }
+    if ($artistKey) { if ($artists.ContainsKey($artistKey)) { $artists[$artistKey]++ } else { $artists[$artistKey] = 1 } }
     if ($recos.Count -ge $Count) { break }
 }
 
-$today = Get-TodayDate
-$recommendations = @()
-$rank = 0
+$recommendations = @(); $tracks = @(); $rank = 0
 foreach ($candidate in $recos) {
     $rank++
     $trackId = Get-CanonicalTrackId -Title $candidate.Title -Artist $candidate.Artist
@@ -229,6 +188,7 @@ foreach ($candidate in $recos) {
     $track = New-CanonicalTrack -TrackId $trackId -Title $candidate.Title -Artist $candidate.Artist -Album $candidate.Album `
         -Duration $candidate.Duration -CoverUrl $candidate.CoverUrl -Identifiers $identifiers `
         -PreviewSources $preview -DownloadCandidates $downloadCandidates -Status 'REMOTE'
+    $tracks += $track
     $recommendations += [pscustomobject]@{
         id = "rec_${today}_${rank}_$($trackId.Substring(6, 12))"
         date = $today; track_id = $trackId; netease_id = $candidate.NeteaseId
@@ -238,7 +198,6 @@ foreach ($candidate in $recos) {
         playback_source = "netease:$($candidate.NeteaseId)"; preview_sources = $preview
         liked = $false; created_at = Get-NowIso; updated_at = Get-NowIso
     }
-    if (-not $DryRun) { Save-CanonicalTrack -Config $Config -Track $track | Out-Null }
 }
 
 Write-Host "`n候选推荐：$($candidateMap.Count) 首，取前 $($recommendations.Count) 首" -ForegroundColor Green
@@ -247,10 +206,10 @@ foreach ($r in $recommendations) {
 }
 
 if (-not $DryRun) {
-    Save-DailyRecommendations -Config $Config -Recommendations $recommendations -Date $today
-    Write-StructuredEvent -Config $Config -Event 'RECOMMENDATIONS_GENERATED' -Result 'SUCCESS' -Message "count=$($recommendations.Count); download_calls=0; feedback=explicit_only; cooldown_days=$RecommendationCooldownDays"
-    Write-Host "`n已保存 CanonicalTrack、DailyRecommendation 和兼容 today.csv。" -ForegroundColor Green
+    $saveResult = Save-DailyRecommendationsDb -Recommendations $recommendations -Tracks $tracks -Date $today
+    Write-MusicServerEventDb -EventType 'RECOMMENDATIONS_GENERATED' -Result 'SUCCESS' -Message "count=$($recommendations.Count); download_calls=0; feedback=explicit_only; cooldown_days=$RecommendationCooldownDays"
+    Write-Host "`n已原子保存 SQLite CanonicalTrack、DailyRecommendation 和 DISPLAY。" -ForegroundColor Green
 } else {
-    Write-Host "`n【DryRun 模式，未写状态】" -ForegroundColor Magenta
+    Write-Host "`n【DryRun 模式，未写 recommendation 状态】" -ForegroundColor Magenta
 }
 Write-Host '推荐阶段不会调用 yt-dlp、Bilibili 下载、ffprobe、歌词下载或 Navidrome 扫描。' -ForegroundColor Cyan

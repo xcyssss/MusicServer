@@ -7,7 +7,7 @@
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Database.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Core.psm1') -Force
 
-$script:SchemaVersion = 2
+$script:SchemaVersion = 3
 $script:LeaseMinutes = 30
 
 # ================================================================
@@ -62,6 +62,13 @@ CREATE TABLE IF NOT EXISTS recommendation_feedback (
     source TEXT NOT NULL DEFAULT '',
     value TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
+);
+"@
+    Invoke-MusicServerSqlNonQuery -Query @"
+CREATE TABLE IF NOT EXISTS migration_markers (
+    source_key TEXT PRIMARY KEY,
+    imported_at TEXT NOT NULL,
+    result_json TEXT NOT NULL DEFAULT ''
 );
 "@
     Invoke-MusicServerSqlNonQuery -Query @"
@@ -143,6 +150,7 @@ CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at);
 CREATE INDEX IF NOT EXISTS idx_daily_date ON daily_recommendations(date);
 CREATE INDEX IF NOT EXISTS idx_feedback_track ON recommendation_feedback(track_id);
 "@
+    Set-SchemaVersion -Version $script:SchemaVersion
 }
 
 # ================================================================
@@ -246,50 +254,280 @@ function Convert-DbTrackRow {
 # Daily Recommendations
 # ================================================================
 
-function Save-DailyRecommendationsDb {
+function Invoke-StateAtomicSql {
+    [CmdletBinding()]
     param(
-        [Parameter(Mandatory)][object[]]$Recommendations,
-        [string]$Date = (Get-TodayDate),
-        [switch]$DryRun
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$Statements,
+        [int]$FailAfterStep = 0
     )
-    if ($DryRun) { return }
-    foreach ($rec in $Recommendations) {
-        $preview = ConvertTo-Json -InputObject @(Get-OptionalProperty $rec 'preview_sources' @()) -Compress -Depth 10
-        $liked = if (Get-OptionalProperty $rec 'liked' $false) { 1 } else { 0 }
-        $recId = [string](Get-OptionalProperty $rec 'id')
-        $trackId = [string](Get-OptionalProperty $rec 'track_id')
-        $existing = @(Invoke-MusicServerParamSql -Template 'SELECT rec_id FROM daily_recommendations WHERE date = @d AND rank = @r LIMIT 1;' -Params @{ d = $Date; r = [int](Get-OptionalProperty $rec 'rank') })
-        if ($existing.Count -gt 0) {
-            Invoke-MusicServerParamNonQuery -Template @"
-UPDATE daily_recommendations SET rec_id = @rec_id, track_id = @track_id, netease_id = @nid,
-    title = @title, artist = @artist, album = @album, duration = @dur,
-    reason = @reason, seed_source = @ss, playback_source = @ps,
-    preview_sources_json = @preview, liked = @liked, updated_at = @now
-WHERE date = @d AND rank = @r;
-"@ -Params @{
-                d = $Date; r = [int](Get-OptionalProperty $rec 'rank'); rec_id = $recId; track_id = $trackId
-                nid = [string](Get-OptionalProperty $rec 'netease_id'); title = [string](Get-OptionalProperty $rec 'title')
-                artist = [string](Get-OptionalProperty $rec 'artist'); album = [string](Get-OptionalProperty $rec 'album')
-                dur = [int](Get-OptionalProperty $rec 'duration'); reason = [string](Get-OptionalProperty $rec 'reason')
-                ss = [string](Get-OptionalProperty $rec 'seed_source'); ps = [string](Get-OptionalProperty $rec 'playback_source')
-                preview = $preview; liked = $liked; now = (Get-NowIso)
-            }
+
+    $sb = New-Object Text.StringBuilder
+    [void]$sb.AppendLine('.bail on')
+    [void]$sb.AppendLine('BEGIN IMMEDIATE;')
+    $step = 0
+    foreach ($raw in @($Statements)) {
+        if ($null -eq $raw) { continue }
+        $stmt = ([string]$raw).Trim()
+        if ([string]::IsNullOrWhiteSpace($stmt)) { continue }
+        while ($stmt.EndsWith(';')) { $stmt = $stmt.Substring(0, $stmt.Length - 1) }
+        $step++
+        [void]$sb.AppendLine("$stmt;")
+        if ($FailAfterStep -gt 0 -and $step -eq $FailAfterStep) {
+            [void]$sb.AppendLine('INSERT INTO ms_injected_state_failure_probe (x) VALUES (1);')
+        }
+    }
+    [void]$sb.AppendLine('COMMIT;')
+    Invoke-MusicServerSqliteScript -Sql $sb.ToString() | Out-Null
+    return $step
+}
+
+function Test-RecommendationPositiveValue {
+    param([AllowNull()]$Value)
+    if ($Value -is [bool]) { return [bool]$Value }
+    if ($null -eq $Value) { return $false }
+    return ([string]$Value -match '^(?i:true|1|yes)$')
+}
+
+function Convert-RecommendationFeedbackValue {
+    param([AllowNull()][string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
+    try { return ConvertFrom-Json -InputObject $Value } catch { return $null }
+}
+
+function Get-RecommendationFeedbackDb {
+    param(
+        [string]$TrackId = '',
+        [string]$FeedbackType = ''
+    )
+    $where = @()
+    $params = @{}
+    if ($TrackId) { $where += 'track_id = @tid'; $params.tid = $TrackId }
+    if ($FeedbackType) { $where += 'feedback_type = @ft'; $params.ft = $FeedbackType }
+    $predicate = if ($where.Count -gt 0) { ' WHERE ' + ($where -join ' AND ') } else { '' }
+    return @(Invoke-MusicServerParamSql -Template ("SELECT * FROM recommendation_feedback$predicate ORDER BY id;" ) -Params $params)
+}
+
+function Get-RecommendationSeedCandidatesDb {
+    [CmdletBinding()]
+    param(
+        [int]$SeedCount = 25,
+        [AllowEmptyCollection()][object[]]$NavidromeStars = @(),
+        [int]$RandomSeed = -1
+    )
+
+    if ($RandomSeed -ge 0) { Get-Random -SetSeed $RandomSeed | Out-Null }
+    $signals = @{}
+    $feedback = @(Get-RecommendationFeedbackDb)
+    $latestExplicit = @{}
+    $latestStars = @{}
+
+    foreach ($row in $feedback) {
+        $trackId = [string](Get-OptionalProperty $row 'track_id')
+        if (-not $trackId) { continue }
+        $type = ([string](Get-OptionalProperty $row 'feedback_type')).ToUpperInvariant()
+        if ($type -in @('LIKE','UNLIKE')) { $latestExplicit[$trackId] = $row; continue }
+        if ($type -eq 'NAVIDROME_STAR') { $latestStars[$trackId] = $row; continue }
+        if ($type -notin @('ACCEPTED','LIBRARY_FALLBACK')) { continue }
+
+        $positive = $false
+        $valueObject = Convert-RecommendationFeedbackValue -Value ([string](Get-OptionalProperty $row 'value'))
+        if ($type -eq 'ACCEPTED' -or $type -eq 'LIBRARY_FALLBACK') {
+            $positive = $true
         } else {
-            Invoke-MusicServerParamNonQuery -Template @"
-INSERT INTO daily_recommendations (date, rank, rec_id, track_id, netease_id, title, artist,
-    album, duration, reason, seed_source, playback_source, preview_sources_json, liked, created_at, updated_at)
-VALUES (@d, @r, @rec_id, @track_id, @nid, @title, @artist,
-    @album, @dur, @reason, @ss, @ps, @preview, @liked, @now, @now);
-"@ -Params @{
-                d = $Date; r = [int](Get-OptionalProperty $rec 'rank'); rec_id = $recId; track_id = $trackId
-                nid = [string](Get-OptionalProperty $rec 'netease_id'); title = [string](Get-OptionalProperty $rec 'title')
-                artist = [string](Get-OptionalProperty $rec 'artist'); album = [string](Get-OptionalProperty $rec 'album')
-                dur = [int](Get-OptionalProperty $rec 'duration'); reason = [string](Get-OptionalProperty $rec 'reason')
-                ss = [string](Get-OptionalProperty $rec 'seed_source'); ps = [string](Get-OptionalProperty $rec 'playback_source')
-                preview = $preview; liked = $liked; now = (Get-NowIso)
+            $positive = Test-RecommendationPositiveValue (Get-OptionalProperty $row 'value')
+        }
+        if (-not $positive) { continue }
+        $canonical = Get-CanonicalTrackDb -TrackId $trackId
+        $title = if ($canonical) { [string]$canonical.title } elseif ($valueObject) { [string](Get-OptionalProperty $valueObject 'title') } else { '' }
+        $artist = if ($canonical) { [string]$canonical.artist } elseif ($valueObject) { [string](Get-OptionalProperty $valueObject 'artist') } else { '' }
+        if (-not $title) { continue }
+        $weight = if ($type -eq 'ACCEPTED') { 4 } else { 1 }
+        $source = if ($type -eq 'ACCEPTED') { 'accepted' } else { 'library_fallback' }
+        $key = if ($canonical) { $trackId } else { "text:$(Normalize-MusicText $title)|$(Normalize-MusicText $artist)" }
+        if (-not $signals.ContainsKey($key) -or [int]$signals[$key].Weight -lt $weight) {
+            $signals[$key] = [pscustomobject]@{ TrackId = $trackId; Title = $title; Artist = $artist; Weight = $weight; Source = $source }
+        }
+    }
+
+    foreach ($trackId in @($latestExplicit.Keys)) {
+        $row = $latestExplicit[$trackId]
+        $explicitType = ([string](Get-OptionalProperty $row 'feedback_type')).ToUpperInvariant()
+        $explicitValue = [string](Get-OptionalProperty $row 'value')
+        $explicitObject = Convert-RecommendationFeedbackValue -Value $explicitValue
+        $isPositiveLike = (Test-RecommendationPositiveValue $explicitValue)
+        if (-not $isPositiveLike -and $explicitObject) { $isPositiveLike = (Test-RecommendationPositiveValue (Get-OptionalProperty $explicitObject 'positive' $false)) }
+        if ($explicitType -ne 'LIKE' -or -not $isPositiveLike) { continue }
+        $canonical = Get-CanonicalTrackDb -TrackId $trackId
+        $title = if ($canonical) { [string]$canonical.title } elseif ($explicitObject) { [string](Get-OptionalProperty $explicitObject 'title') } else { '' }
+        $artist = if ($canonical) { [string]$canonical.artist } elseif ($explicitObject) { [string](Get-OptionalProperty $explicitObject 'artist') } else { '' }
+        if (-not $title) { continue }
+        $key = $trackId
+        $signals[$key] = [pscustomobject]@{ TrackId = $trackId; Title = $title; Artist = $artist; Weight = 5; Source = 'explicit_like' }
+    }
+
+    foreach ($trackId in @($latestStars.Keys)) {
+        $row = $latestStars[$trackId]
+        if (-not (Test-RecommendationPositiveValue (Get-OptionalProperty $row 'value'))) { continue }
+        $canonical = Get-CanonicalTrackDb -TrackId $trackId
+        if (-not $canonical -or -not $canonical.title) { continue }
+        $key = $trackId
+        if (-not $signals.ContainsKey($key) -or [int]$signals[$key].Weight -lt 5) {
+            $signals[$key] = [pscustomobject]@{ TrackId = $trackId; Title = [string]$canonical.title; Artist = [string]$canonical.artist; Weight = 5; Source = 'navidrome_star' }
+        }
+    }
+
+    foreach ($star in @($NavidromeStars)) {
+        $title = ''; $artist = ''; $trackId = ''
+        if ($star -is [string]) {
+            $parts = [string]$star -split ' - ', 2
+            $title = [string]$parts[0]; if ($parts.Count -gt 1) { $artist = [string]$parts[1] }
+        } else {
+            $title = [string](Get-OptionalProperty $star 'Title' (Get-OptionalProperty $star 'title'))
+            $artist = [string](Get-OptionalProperty $star 'Artist' (Get-OptionalProperty $star 'artist'))
+            $trackId = [string](Get-OptionalProperty $star 'TrackId' (Get-OptionalProperty $star 'track_id'))
+        }
+        if (-not $title) { continue }
+        if (-not $trackId) { $trackId = Get-CanonicalTrackId -Title $title -Artist $artist }
+        $key = "text:$(Normalize-MusicText $title)|$(Normalize-MusicText $artist)"
+        $signals[$key] = [pscustomobject]@{ TrackId = $trackId; Title = $title; Artist = $artist; Weight = 5; Source = 'navidrome_star' }
+    }
+
+    $expanded = foreach ($seed in @($signals.Values)) {
+        for ($i = 0; $i -lt [Math]::Max(1, [int]$seed.Weight); $i++) { $seed }
+    }
+    $picked = @(); $artists = @{}
+    foreach ($seed in @($expanded | Sort-Object { Get-Random })) {
+        if (-not $seed.Title) { continue }
+        $artistKey = Normalize-MusicText (([string]$seed.Artist -split '[,，、]')[0])
+        if ($artistKey -and $artists.ContainsKey($artistKey) -and $artists[$artistKey] -ge 3) { continue }
+        if (@($picked | Where-Object { (Normalize-MusicText $_.Title) -eq (Normalize-MusicText $seed.Title) -and (Normalize-MusicText $_.Artist) -eq (Normalize-MusicText $seed.Artist) }).Count -gt 0) { continue }
+        $picked += $seed
+        if ($artistKey) { if ($artists.ContainsKey($artistKey)) { $artists[$artistKey]++ } else { $artists[$artistKey] = 1 } }
+        if ($picked.Count -ge $SeedCount) { break }
+    }
+    return @($picked)
+}
+
+function Get-RecommendationCooldownTrackIdsDb {
+    param(
+        [string]$AsOfDate = (Get-TodayDate),
+        [int]$CooldownDays = 14
+    )
+    $asOf = [DateTime]::ParseExact($AsOfDate, 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture)
+    $cutoff = $asOf.AddDays(-$CooldownDays).ToString('yyyy-MM-dd')
+    return @(Invoke-MusicServerParamSql -Template @"
+SELECT DISTINCT track_id, netease_id, date, rank, rec_id
+FROM daily_recommendations
+WHERE date >= @cutoff AND date <= @asof
+ORDER BY date, rank;
+"@ -Params @{ cutoff = $cutoff; asof = $AsOfDate })
+}
+
+function Get-RecommendationExcludedKeysDb {
+    $rows = @(Invoke-MusicServerParamSql -Template "SELECT track_id, feedback_type, value FROM recommendation_feedback WHERE feedback_type IN ('ACCEPTED','REJECTED') ORDER BY id;" -Params @{})
+    $result = @()
+    foreach ($row in $rows) {
+        $valueObject = Convert-RecommendationFeedbackValue -Value ([string](Get-OptionalProperty $row 'value'))
+        $result += [pscustomobject]@{
+            TrackId = [string](Get-OptionalProperty $row 'track_id')
+            NeteaseId = if ($valueObject) { [string](Get-OptionalProperty $valueObject 'netease_id' (Get-OptionalProperty $valueObject 'NeteaseId')) } else { '' }
+            Title = if ($valueObject) { [string](Get-OptionalProperty $valueObject 'title' (Get-OptionalProperty $valueObject 'Title')) } else { '' }
+            FeedbackType = [string](Get-OptionalProperty $row 'feedback_type')
+        }
+    }
+    return @($result)
+}
+
+function Write-RecommendationDisplayFeedbackDb {
+    param(
+        [Parameter(Mandatory)][string]$TrackId,
+        [Parameter(Mandatory)][string]$Date,
+        [int]$Rank = 0,
+        [string]$RecommendationId = '',
+        [string]$Source = 'daily_recommendation'
+    )
+    $value = "display:$Date`:$Rank`:$RecommendationId"
+    Invoke-MusicServerParamNonQuery -Template @"
+INSERT INTO recommendation_feedback (track_id, feedback_type, source, value, created_at)
+SELECT @tid, 'DISPLAY', @src, @val, @now
+WHERE NOT EXISTS (
+    SELECT 1 FROM recommendation_feedback
+    WHERE track_id = @tid AND feedback_type = 'DISPLAY' AND source = @src AND value = @val
+);
+"@ -Params @{ tid = $TrackId; src = $Source; val = $value; now = (Get-NowIso) }
+}
+
+function Save-DailyRecommendationsDb {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyCollection()][object[]]$Recommendations = @(),
+        [AllowEmptyCollection()][object[]]$Tracks = @(),
+        [string]$Date = (Get-TodayDate),
+        [switch]$DryRun,
+        [int]$FailAfterStep = 0
+    )
+    if ($DryRun) { return [pscustomobject]@{ Date = $Date; Count = @($Recommendations).Count; DryRun = $true } }
+
+    $recs = @($Recommendations)
+    $rankSet = New-Object System.Collections.Generic.HashSet[int]
+    foreach ($rec in $recs) {
+        $rank = [int](Get-OptionalProperty $rec 'rank' 0)
+        if ($rank -le 0 -or -not $rankSet.Add($rank)) { throw "Duplicate or invalid recommendation rank: $rank" }
+    }
+    $trackMap = @{}
+    foreach ($track in @($Tracks)) {
+        $trackId = [string](Get-OptionalProperty $track 'id' (Get-OptionalProperty $track 'track_id'))
+        if ($trackId) { $trackMap[$trackId] = $track }
+    }
+    foreach ($rec in $recs) {
+        $trackId = [string](Get-OptionalProperty $rec 'track_id')
+        if (-not $trackId) { throw 'Recommendation track_id is required.' }
+        if (-not $trackMap.ContainsKey($trackId)) {
+            $trackMap[$trackId] = [pscustomobject]@{
+                id = $trackId; title = [string](Get-OptionalProperty $rec 'title'); artist = [string](Get-OptionalProperty $rec 'artist')
+                album = [string](Get-OptionalProperty $rec 'album'); duration = [int](Get-OptionalProperty $rec 'duration' 0); cover_url = ''
+                identifiers = @(); preview_sources = @(Get-OptionalProperty $rec 'preview_sources' @()); download_candidates = @()
+                local_song_id = ''; status = 'REMOTE'; created_at = [string](Get-OptionalProperty $rec 'created_at' (Get-NowIso)); updated_at = [string](Get-OptionalProperty $rec 'updated_at' (Get-NowIso))
             }
         }
     }
+
+    $now = Get-NowIso
+    $statements = New-Object System.Collections.Generic.List[string]
+    [void]$statements.Add(("DELETE FROM daily_recommendations WHERE date = " + (ConvertTo-MusicServerSqlLiteral $Date)))
+    [void]$statements.Add(("DELETE FROM recommendation_feedback WHERE feedback_type = 'DISPLAY' AND source = 'daily_recommendation' AND value LIKE " + (ConvertTo-MusicServerSqlLiteral "display:${Date}:%")))
+    [void]$statements.Add(("DELETE FROM events WHERE event_type = 'RECOMMENDATION_DISPLAY' AND message LIKE " + (ConvertTo-MusicServerSqlLiteral "date=${Date};rank=%")))
+    foreach ($track in @($trackMap.Values)) {
+        $trackId = [string](Get-OptionalProperty $track 'id')
+        $identifiers = ConvertTo-Json -InputObject @(Get-OptionalProperty $track 'identifiers' @()) -Compress -Depth 10
+        $preview = ConvertTo-Json -InputObject @(Get-OptionalProperty $track 'preview_sources' @()) -Compress -Depth 10
+        $candidates = ConvertTo-Json -InputObject @(Get-OptionalProperty $track 'download_candidates' @()) -Compress -Depth 10
+        $lit = @{
+            id = ConvertTo-MusicServerSqlLiteral $trackId; title = ConvertTo-MusicServerSqlLiteral ([string](Get-OptionalProperty $track 'title'))
+            artist = ConvertTo-MusicServerSqlLiteral ([string](Get-OptionalProperty $track 'artist')); album = ConvertTo-MusicServerSqlLiteral ([string](Get-OptionalProperty $track 'album'))
+            dur = ConvertTo-MusicServerSqlLiteral ([int](Get-OptionalProperty $track 'duration' 0)); cover = ConvertTo-MusicServerSqlLiteral ([string](Get-OptionalProperty $track 'cover_url'))
+            ident = ConvertTo-MusicServerSqlLiteral $identifiers; prev = ConvertTo-MusicServerSqlLiteral $preview; cand = ConvertTo-MusicServerSqlLiteral $candidates
+            local = ConvertTo-MusicServerSqlLiteral ([string](Get-OptionalProperty $track 'local_song_id')); status = ConvertTo-MusicServerSqlLiteral ([string](Get-OptionalProperty $track 'status' 'REMOTE'))
+            created = ConvertTo-MusicServerSqlLiteral ([string](Get-OptionalProperty $track 'created_at' $now)); updated = ConvertTo-MusicServerSqlLiteral $now
+        }
+        [void]$statements.Add("INSERT INTO canonical_tracks (id,title,artist,album,duration,cover_url,identifiers_json,preview_sources_json,download_candidates_json,local_song_id,status,created_at,updated_at,revision) VALUES ($($lit.id),$($lit.title),$($lit.artist),$($lit.album),$($lit.dur),$($lit.cover),$($lit.ident),$($lit.prev),$($lit.cand),$($lit.local),$($lit.status),$($lit.created),$($lit.updated),1) ON CONFLICT(id) DO UPDATE SET title=excluded.title, artist=excluded.artist, album=excluded.album, duration=excluded.duration, cover_url=excluded.cover_url, identifiers_json=excluded.identifiers_json, preview_sources_json=excluded.preview_sources_json, download_candidates_json=excluded.download_candidates_json, local_song_id=CASE WHEN canonical_tracks.local_song_id IS NULL OR canonical_tracks.local_song_id='' THEN excluded.local_song_id ELSE canonical_tracks.local_song_id END, status=CASE WHEN canonical_tracks.status='REMOTE' THEN excluded.status ELSE canonical_tracks.status END, created_at=canonical_tracks.created_at, updated_at=excluded.updated_at, revision=canonical_tracks.revision")
+    }
+    foreach ($rec in @($recs | Sort-Object { [int](Get-OptionalProperty $_ 'rank') })) {
+        $preview = ConvertTo-Json -InputObject @(Get-OptionalProperty $rec 'preview_sources' @()) -Compress -Depth 10
+        $lit = @{
+            d = ConvertTo-MusicServerSqlLiteral $Date; r = ConvertTo-MusicServerSqlLiteral ([int](Get-OptionalProperty $rec 'rank')); rid = ConvertTo-MusicServerSqlLiteral ([string](Get-OptionalProperty $rec 'id'))
+            tid = ConvertTo-MusicServerSqlLiteral ([string](Get-OptionalProperty $rec 'track_id')); nid = ConvertTo-MusicServerSqlLiteral ([string](Get-OptionalProperty $rec 'netease_id'))
+            title = ConvertTo-MusicServerSqlLiteral ([string](Get-OptionalProperty $rec 'title')); artist = ConvertTo-MusicServerSqlLiteral ([string](Get-OptionalProperty $rec 'artist')); album = ConvertTo-MusicServerSqlLiteral ([string](Get-OptionalProperty $rec 'album'))
+            dur = ConvertTo-MusicServerSqlLiteral ([int](Get-OptionalProperty $rec 'duration' 0)); reason = ConvertTo-MusicServerSqlLiteral ([string](Get-OptionalProperty $rec 'reason')); ss = ConvertTo-MusicServerSqlLiteral ([string](Get-OptionalProperty $rec 'seed_source')); ps = ConvertTo-MusicServerSqlLiteral ([string](Get-OptionalProperty $rec 'playback_source')); prev = ConvertTo-MusicServerSqlLiteral $preview; now = ConvertTo-MusicServerSqlLiteral $now
+        }
+        [void]$statements.Add("INSERT INTO daily_recommendations (date,rank,rec_id,track_id,netease_id,title,artist,album,duration,reason,seed_source,playback_source,preview_sources_json,liked,created_at,updated_at) VALUES ($($lit.d),$($lit.r),$($lit.rid),$($lit.tid),$($lit.nid),$($lit.title),$($lit.artist),$($lit.album),$($lit.dur),$($lit.reason),$($lit.ss),$($lit.ps),$($lit.prev),0,$($lit.now),$($lit.now))")
+        $displayValue = "display:$Date`:$([int](Get-OptionalProperty $rec 'rank'))`:$([string](Get-OptionalProperty $rec 'id'))"
+        [void]$statements.Add("INSERT INTO recommendation_feedback (track_id,feedback_type,source,value,created_at) VALUES ($($lit.tid),'DISPLAY','daily_recommendation',$(ConvertTo-MusicServerSqlLiteral $displayValue),$($lit.now))")
+        $displayMessage = "date=${Date};rank=$([int](Get-OptionalProperty $rec 'rank'));rec_id=$([string](Get-OptionalProperty $rec 'id'))"
+        [void]$statements.Add("INSERT INTO events (event_type,track_id,result,message,created_at) VALUES ('RECOMMENDATION_DISPLAY',$($lit.tid),'SUCCESS',$(ConvertTo-MusicServerSqlLiteral $displayMessage),$($lit.now))")
+    }
+    $steps = Invoke-StateAtomicSql -Statements $statements.ToArray() -FailAfterStep $FailAfterStep
+    return [pscustomobject]@{ Date = $Date; Count = $recs.Count; Steps = $steps; DryRun = $false }
 }
 
 function Get-TodayRecommendationsDb {
