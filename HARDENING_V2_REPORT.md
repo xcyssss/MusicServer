@@ -4,7 +4,7 @@
 
 - Branch: `review/musicserver-hardening-v2`
 - Base SHA: `fbfd5b5a2fdfe9770e109735df7f078a6b1f79f9`
-- Final code checkpoint SHA: recorded in the final handoff after the correctness follow-up commit
+- Final code checkpoint SHA: `8b87799649408db5953058d511b9e0e03e0e0cfb`
 - PowerShell 7: local validation
 - Windows PowerShell 5.1: local validation
 - SQLite: repository-resolved `sqlite3.exe`
@@ -213,8 +213,8 @@ Navidrome DB modification was performed.
 
 - Phase 4 implementation checkpoint: `d40d2c17fcea77824ad609215f1d760b05ce3bf4`
   (`Integrate SQLite recommendation state`)
-- Correctness follow-up checkpoint: recorded in the final handoff after the
-  staged review fixes
+- Correctness follow-up checkpoint: `8b87799649408db5953058d511b9e0e03e0e0cfb`
+  (`Harden recommendation migration boundaries`)
 - Changed source/test/docs files: `.github/workflows/core-tests.yml`,
   `MusicServer.Database.psm1`, `MusicServer.Migration.psm1`,
   `MusicServer.State.psm1`, `daily_recommend.ps1`, `music_api.ps1`,
