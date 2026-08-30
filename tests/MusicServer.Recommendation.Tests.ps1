@@ -63,6 +63,9 @@ function Get-SeedForTrack {
 }
 
 function Get-RecommendationTestPowerShell {
+    if ($PSVersionTable.PSEdition -eq 'Desktop') {
+        return (Get-Command powershell.exe -ErrorAction Stop).Source
+    }
     $pwsh = Get-Command pwsh -ErrorAction SilentlyContinue
     if ($pwsh) { return $pwsh.Source }
     return (Get-Command powershell.exe -ErrorAction Stop).Source
@@ -236,6 +239,18 @@ Describe 'MusicServer Hardening v2 - Recommendation State' {
         @(Get-RecommendationSeedCandidatesDb -SeedCount 25) | Where-Object { $_.TrackId -eq $track.id } | Should BeNullOrEmpty
     }
 
+    It 'uses feedback event time rather than insertion order for latest explicit state' {
+        $track = New-RecommendationTestTrack -Title 'Out Of Order Facts'
+        Save-CanonicalTrackDb -Track $track | Out-Null
+        Invoke-MusicServerParamSql -Template 'INSERT INTO recommendation_feedback (track_id,feedback_type,source,value,created_at) VALUES (@tid,@type,@src,@value,@at);' -Params @{ tid = $track.id; type = 'UNLIKE'; src = 'music_api'; value = 'false'; at = '2026-08-29T00:00:00.0000000Z' } | Out-Null
+        Invoke-MusicServerParamSql -Template 'INSERT INTO recommendation_feedback (track_id,feedback_type,source,value,created_at) VALUES (@tid,@type,@src,@value,@at);' -Params @{ tid = $track.id; type = 'LIKE'; src = 'legacy_json'; value = 'true'; at = '2026-08-01T00:00:00.0000000Z' } | Out-Null
+        (Get-LatestRecommendationFeedbackDb -TrackId $track.id) | Should Be 'UNLIKE'
+        Write-RecommendationDisplayFeedbackDb -TrackId $track.id -Date '2026-08-30' -Rank 1 -RecommendationId 'display_after_unlike' | Out-Null
+        (Get-LatestRecommendationFeedbackDb -TrackId $track.id) | Should Be 'UNLIKE'
+        $seed = Get-SeedForTrack -TrackId $track.id
+        $seed | Should Be $null
+    }
+
     It 'excludes recent recommendation rows and keeps the correct identity' {
         $track = New-RecommendationTestTrack -Title 'Recent Cooldown'
         $row = New-RecommendationTestRow -Track $track -Date '2026-08-17' -Rank 1 -NeteaseId 'cool_recent'
@@ -407,6 +422,18 @@ Describe 'MusicServer Hardening v2 - Recommendation State' {
         (Get-WantedItemDb -TrackId $track.id) | Should Be $null
     }
 
+    It 'does not activate legacy migration during API startup' {
+        $track = New-RecommendationTestTrack -Title 'API Does Not Migrate'
+        Write-StateCollection -Config $script:RecommendationTestConfig -Name tracks -Items @($track)
+        Write-StateCollection -Config $script:RecommendationTestConfig -Name recommendations -Items @(New-RecommendationTestRow -Track $track -Date '2026-08-30' -Rank 1)
+        $null = Start-RecommendationTestApi -Root $script:RecommendationTestRoot
+        $marker = @(Invoke-MusicServerParamSql -Template 'SELECT COUNT(*) AS cnt FROM migration_markers;' -Params @{})
+        [int]$marker[0].cnt | Should Be 0
+        $daily = @(Invoke-MusicServerParamSql -Template 'SELECT COUNT(*) AS cnt FROM daily_recommendations;' -Params @{})
+        [int]$daily[0].cnt | Should Be 0
+        @(Get-ChildItem -LiteralPath $script:RecommendationTestConfig.StateDir -Filter 'migration_backup_*' -ErrorAction SilentlyContinue).Count | Should Be 0
+    }
+
     It 'imports recommendation display, explicit like, accepted, and rejected facts' {
         $track = New-RecommendationTestTrack -Title '迁移歌曲' -Artist '移行 कलाकार'
         Write-StateCollection -Config $script:RecommendationTestConfig -Name tracks -Items @($track)
@@ -453,6 +480,54 @@ Describe 'MusicServer Hardening v2 - Recommendation State' {
         $report.status | Should Be 'SUCCESS'
         (Get-CanonicalTrackDb -TrackId $track.id).title | Should Be $track.title
         @(Get-TodayRecommendationsDb -Date '2026-08-29').Count | Should Be 1
+    }
+
+    It 'reports a daily rank conflict without replacing the SQLite row' {
+        $existingTrack = New-RecommendationTestTrack -Title 'Existing Recommendation'
+        $existingRow = New-RecommendationTestRow -Track $existingTrack -Date '2026-08-29' -Rank 1 -NeteaseId 'sqlite_existing'
+        Save-DailyRecommendationsDb -Recommendations @($existingRow) -Tracks @($existingTrack) -Date '2026-08-29' | Out-Null
+        $legacyRow = New-RecommendationTestRow -Track $existingTrack -Date '2026-08-29' -Rank 1 -NeteaseId 'legacy_conflict'
+        $legacyRow.title = 'Legacy Divergent Title'
+        $legacyRow.artist = 'Legacy Divergent Artist'
+        $legacyRow.liked = $true
+        Write-StateCollection -Config $script:RecommendationTestConfig -Name recommendations -Items @($legacyRow)
+        $report = Invoke-MusicServerMigration -Config $script:RecommendationTestConfig
+        $report.status | Should Be 'SUCCESS'
+        $report.imported.recommendations | Should Be 0
+        $report.conflicts | Should BeGreaterThan 0
+        $report.conflict_details -contains 'daily:2026-08-29:1' | Should Be $true
+        (Get-TodayRecommendationsDb -Date '2026-08-29')[0].netease_id | Should Be 'sqlite_existing'
+        (Get-CanonicalTrackDb -TrackId $existingTrack.id).title | Should Be 'Existing Recommendation'
+        @(Get-RecommendationFeedbackDb -TrackId $existingTrack.id -FeedbackType 'LIKE').Count | Should Be 1
+    }
+
+    It 'reports existing canonical and wanted rows as skipped in DryRun' {
+        $track = New-RecommendationTestTrack -Title 'Existing DryRun State'
+        Save-CanonicalTrackDb -Track $track | Out-Null
+        Add-WantedItemDb -TrackId $track.id | Out-Null
+        Write-StateCollection -Config $script:RecommendationTestConfig -Name tracks -Items @($track)
+        Write-StateCollection -Config $script:RecommendationTestConfig -Name wanted -Items @([pscustomobject]@{ track_id = $track.id; id = 'wanted_existing'; state = 'WANTED' })
+        $report = Invoke-MusicServerMigration -Config $script:RecommendationTestConfig -DryRun
+        $report.status | Should Be 'DRY_RUN'
+        $report.imported.tracks | Should Be 0
+        $report.imported.wanted | Should Be 0
+        $report.skipped | Should BeGreaterThan 1
+        $report.conflict_details -contains "canonical:$($track.id)" | Should Be $true
+        $report.conflict_details -contains "wanted:$($track.id)" | Should Be $true
+    }
+
+    It 'does not overwrite an existing provider health row during migration' {
+        Invoke-MusicServerParamSql -Template "INSERT INTO provider_health (provider,state,failure_count,consecutive_failures,consecutive_412,last_error,revision,updated_at) VALUES ('bilibili_search','OPEN',9,4,2,'keep-me',7,'2026-08-29T00:00:00Z');" -Params @{} | Out-Null
+        Write-StateCollection -Config $script:RecommendationTestConfig -Name providers -Items @([pscustomobject]@{ provider='bilibili_search'; state='CLOSED'; success_count=99; failure_count=0; consecutive_failures=0; consecutive_412=0; average_latency_ms=1 })
+        $report = Invoke-MusicServerMigration -Config $script:RecommendationTestConfig
+        $report.status | Should Be 'SUCCESS'
+        $report.imported.providers | Should Be 0
+        $report.skipped | Should BeGreaterThan 0
+        $health = @(Invoke-MusicServerParamSql -Template 'SELECT state,failure_count,last_error,revision FROM provider_health WHERE provider = @provider;' -Params @{ provider = 'bilibili_search' })[0]
+        $health.state | Should Be 'OPEN'
+        [int]$health.failure_count | Should Be 9
+        $health.last_error | Should Be 'keep-me'
+        [int]$health.revision | Should Be 7
     }
 
     It 'reports invalid numeric legacy fields without aborting migration' {

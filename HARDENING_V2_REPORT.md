@@ -4,7 +4,7 @@
 
 - Branch: `review/musicserver-hardening-v2`
 - Base SHA: `fbfd5b5a2fdfe9770e109735df7f078a6b1f79f9`
-- Final SHA: recorded in the final handoff after the checkpoint commit
+- Final code checkpoint SHA: recorded in the final handoff after the correctness follow-up commit
 - PowerShell 7: local validation
 - Windows PowerShell 5.1: local validation
 - SQLite: repository-resolved `sqlite3.exe`
@@ -20,7 +20,8 @@ download, provider, ffprobe, or lyrics-download code.
 Only an explicit `daily_recommend.ps1 -MigrateLegacy` run may perform the
 one-time legacy import. A committed `recommendation_state_v2` migration marker
 prevents subsequent runs from rereading legacy files. Normal scheduled runs
-and DryRun do not trigger migration.
+and DryRun do not trigger migration; DryRun requires an existing SQLite
+database and does not initialize or upgrade the target database.
 
 ## Feedback Semantics
 
@@ -75,9 +76,9 @@ cleanup dependencies.
 Migration covers canonical tracks, daily recommendation rows, display history,
 legacy explicit likes, accepted rows, rejected rows, library fallback rows,
 wanted items, provider health, and legacy events. It is non-destructive, uses a
-transaction, reports malformed/ignored rows, preserves conflicts, creates a
-timestamped backup, and is idempotent through a SQLite marker. Legacy source
-files are not deleted.
+transaction, reports malformed/ignored rows and daily/provider conflicts,
+preserves existing SQLite daily/provider state, creates a timestamped backup,
+and is idempotent through a SQLite marker. Legacy source files are not deleted.
 
 ## Compatibility
 
@@ -98,12 +99,34 @@ The complete local regression and integration runs are green:
 | WorkerConcurrency | 4/4 | 4/4 |
 | ApiTransaction | 17/17 | 17/17 |
 | ApiRuntime | 5/5 | not required |
-| Recommendation | 33/33 | 33/33 |
+| Recommendation | 38/38 | 38/38 |
 | Web | 2/2 | not required |
 
-PS7 state-group total: 99/99 (Core, Database, V2, WorkerConcurrency,
+PS7 state-group total: 104/104 (Core, Database, V2, WorkerConcurrency,
 Recommendation, Web). PS7 API total: 22/22 (ApiTransaction, ApiRuntime).
-PS5.1 required Phase 4 total: 114/114.
+PS5.1 required Phase 4 total: 119/119 (102 state-group tests plus 17
+ApiTransaction tests; ApiRuntime is not required on PS5.1).
+
+Reproducible validation command record (run from the repository root):
+
+```powershell
+# PS7 state group: Core, Database, V2, WorkerConcurrency, Recommendation, Web
+pwsh -NoProfile -ExecutionPolicy Bypass -Command "Import-Module Pester -RequiredVersion 3.4.0 -Force; `$files=@('.\\tests\\MusicServer.Core.Tests.ps1','.\\tests\\MusicServer.Database.Tests.ps1','.\\tests\\MusicServer.V2.Tests.ps1','.\\tests\\MusicServer.WorkerConcurrency.Tests.ps1','.\\tests\\MusicServer.Recommendation.Tests.ps1','.\\tests\\MusicServer.Web.Tests.ps1'); `$total=0; `$passed=0; `$failed=0; foreach(`$file in `$files){ `$r=if(`$file -like '*Web*'){Invoke-Pester `$file -PassThru -ExcludeTag RequiresLocalRuntime}else{Invoke-Pester `$file -PassThru}; `$total += `$r.TotalCount; `$passed += `$r.PassedCount; `$failed += `$r.FailedCount }; \"PS7 state TOTAL=`$total PASSED=`$passed FAILED=`$failed\""
+
+# PS7 API group
+pwsh -NoProfile -ExecutionPolicy Bypass -Command "Import-Module Pester -RequiredVersion 3.4.0 -Force; `$total=0; `$passed=0; `$failed=0; foreach(`$file in @('.\\tests\\MusicServer.ApiTransaction.Tests.ps1','.\\tests\\MusicServer.ApiRuntime.Tests.ps1')){ `$r=Invoke-Pester `$file -PassThru; `$total += `$r.TotalCount; `$passed += `$r.PassedCount; `$failed += `$r.FailedCount }; \"PS7 API TOTAL=`$total PASSED=`$passed FAILED=`$failed\""
+
+# Windows PowerShell 5.1 required group: state group without Web plus ApiTransaction
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Import-Module Pester -RequiredVersion 3.4.0 -Force; `$files=@('.\\tests\\MusicServer.Core.Tests.ps1','.\\tests\\MusicServer.Database.Tests.ps1','.\\tests\\MusicServer.V2.Tests.ps1','.\\tests\\MusicServer.WorkerConcurrency.Tests.ps1','.\\tests\\MusicServer.Recommendation.Tests.ps1','.\\tests\\MusicServer.ApiTransaction.Tests.ps1'); `$total=0; `$passed=0; `$failed=0; foreach(`$file in `$files){ `$r=Invoke-Pester `$file -PassThru; `$total += `$r.TotalCount; `$passed += `$r.PassedCount; `$failed += `$r.FailedCount }; \"PS5.1 required TOTAL=`$total PASSED=`$passed FAILED=`$failed\""
+```
+
+Captured totals: PS7 state `TOTAL=104 PASSED=104 FAILED=0`, PS7 API
+`TOTAL=22 PASSED=22 FAILED=0`, and PS5.1 required
+`TOTAL=119 PASSED=119 FAILED=0`. The Recommendation command separately
+returned `TOTAL=38 PASSED=38 FAILED=0` on both shells. The same validation run
+included the real scratch HTTP API integration, a zero-count recommendation
+DryRun with an unchanged database hash, and the production
+`Invoke-MusicServerMigration -DryRun` read-only audit.
 
 ## API Integration
 
@@ -111,7 +134,9 @@ Scratch HTTP integration result: PASS. The Recommendation suite generated a
 SQLite daily set, served it through the real API, confirmed rank/metadata,
 posted LIKE, observed SQLite explicit_like and WANTED, deleted the LIKE, and
 confirmed REMOTE with no wanted row. The ApiTransaction/ApiRuntime suites also
-cover the active-lease cancellation and server-restart paths.
+cover the active-lease cancellation and server-restart paths. API startup does
+not import `MusicServer.Migration.psm1`, create a migration marker, or rewrite
+legacy recommendation files.
 
 ## Recommendation Feedback E2E
 
@@ -162,12 +187,13 @@ rejected rows, 164 lyrics-report rows, 2 wanted rows, and 2 provider rows.
 Read-only `Invoke-MusicServerMigration -DryRun` reported source counts of
 tracks=101, recommendations=20, history=101, events=40, accepted=5,
 rejected=140, lyrics_report=164, wanted=2, and providers=2. Its preview
-reported imports of tracks=101, recommendations=20, history=101, events=40,
-accepted=5, rejected=140, lyrics_fallback=140, wanted=2, providers=2,
-display=121, explicit_likes=2, skipped=0, and conflicts=162. The existing DB
+reported imports of tracks=20, recommendations=20, history=0, events=40,
+accepted=5, rejected=140, lyrics_fallback=140, wanted=0, providers=0,
+display=20, explicit_likes=2, skipped=85, and conflicts=186. The existing DB
 counts were canonical=81, daily=81, feedback=0, wanted=2, provider=1, and
 events=1. `legacy_ignored` recorded 24 invalid lyrics rows and one legacy
-`bilibili` provider. It created no backup and performed no writes.
+`bilibili` provider. It created no backup and performed no writes; the
+conflict report retained existing SQLite daily/provider state.
 No production DB write, runtime activation, JSON deletion, music deletion, or
 Navidrome DB modification was performed.
 
@@ -185,11 +211,13 @@ Navidrome DB modification was performed.
 
 ## Changes Made
 
-- Phase 4 checkpoint commit: `Integrate SQLite recommendation state` (SHA in
-  final handoff)
+- Phase 4 implementation checkpoint: `d40d2c17fcea77824ad609215f1d760b05ce3bf4`
+  (`Integrate SQLite recommendation state`)
+- Correctness follow-up checkpoint: recorded in the final handoff after the
+  staged review fixes
 - Changed source/test/docs files: `.github/workflows/core-tests.yml`,
   `MusicServer.Database.psm1`, `MusicServer.Migration.psm1`,
-  `MusicServer.State.psm1`, `daily_recommend.ps1`,
+  `MusicServer.State.psm1`, `daily_recommend.ps1`, `music_api.ps1`,
   `tests/MusicServer.Core.Tests.ps1`,
   `tests/MusicServer.Recommendation.Tests.ps1`,
   `HARDENING_V2_REPORT.md`, `RUNTIME_JSON_DEPENDENCY_AUDIT.md`

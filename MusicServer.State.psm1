@@ -317,7 +317,10 @@ function Get-RecommendationSeedCandidatesDb {
 
     if ($RandomSeed -ge 0) { Get-Random -SetSeed $RandomSeed | Out-Null }
     $signals = @{}
-    $feedback = @(Get-RecommendationFeedbackDb)
+    # Temporal facts must be folded by their event time, not merely by the
+    # SQLite insertion id. Legacy migration can append an older LIKE/UNLIKE
+    # after a newer API fact already exists in the database.
+    $feedback = @(Invoke-MusicServerParamSql -Template 'SELECT * FROM recommendation_feedback ORDER BY created_at ASC, id ASC;' -Params @{})
     $latestExplicit = @{}
     $latestStars = @{}
 
@@ -990,7 +993,7 @@ function Get-EventsDb {
 
 function Get-LatestRecommendationFeedbackDb {
     param([Parameter(Mandatory)][string]$TrackId)
-    $rows = @(Invoke-MusicServerParamSql -Template 'SELECT feedback_type FROM recommendation_feedback WHERE track_id = @tid ORDER BY id DESC LIMIT 1;' -Params @{ tid = $TrackId })
+    $rows = @(Invoke-MusicServerParamSql -Template "SELECT feedback_type FROM recommendation_feedback WHERE track_id = @tid AND feedback_type IN ('LIKE','UNLIKE') ORDER BY created_at DESC, id DESC LIMIT 1;" -Params @{ tid = $TrackId })
     if ($rows.Count -eq 0) { return $null }
     return [string]$rows[0].feedback_type
 }

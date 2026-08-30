@@ -24,6 +24,8 @@ present, recommendation runtime code must not consult those legacy files.
 the daily recommendation script no longer reads it on every run. Migration
 activation is explicit: only `daily_recommend.ps1 -MigrateLegacy` invokes the
 one-time importer; normal scheduled runs and `-DryRun` do not activate it.
+`music_api.ps1` does not import the migration module or activate migration at
+startup; API restart is therefore not a legacy-state write boundary.
 
 ## Inventory
 

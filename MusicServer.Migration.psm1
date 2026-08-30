@@ -133,6 +133,34 @@ function Add-MigrationFeedbackStatement {
     [void]$Statements.Add("INSERT INTO recommendation_feedback (track_id,feedback_type,source,value,created_at) SELECT $litTid,$litType,$litSource,$litValue,$litCreated WHERE NOT EXISTS (SELECT 1 FROM recommendation_feedback WHERE track_id=$litTid AND feedback_type=$litType AND source=$litSource AND value=$litValue)")
 }
 
+function Add-MigrationConflictReport {
+    param(
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Report,
+        [Parameter(Mandatory)][string]$Detail
+    )
+    $Report['conflicts'] = [int]$Report['conflicts'] + 1
+    $details = @($Report['conflict_details'])
+    if ($details.Count -lt 25 -and $details -notcontains $Detail) {
+        $Report['conflict_details'] = @($details + $Detail)
+    }
+}
+
+function Test-MigrationDailyConflict {
+    param(
+        [Parameter(Mandatory)][string]$Date,
+        [Parameter(Mandatory)][int]$Rank,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$SeenDailyKeys
+    )
+    $key = "$Date`:$Rank"
+    if ($SeenDailyKeys.Contains($key)) { return $true }
+    $SeenDailyKeys[$key] = $true
+    try {
+        return (@(Invoke-MusicServerParamSql -Template 'SELECT rec_id FROM daily_recommendations WHERE date = @date AND rank = @rank LIMIT 1;' -Params @{ date = $Date; rank = $Rank }).Count -gt 0)
+    } catch {
+        return $false
+    }
+}
+
 function Add-MigrationEventStatement {
     param(
         [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[string]]$Statements,
@@ -198,7 +226,8 @@ function Add-MigrationDailyRecommendationStatement {
         [Parameter(Mandatory)][AllowEmptyCollection()][System.Collections.Generic.List[string]]$Statements,
         [Parameter(Mandatory)][psobject]$Row,
         [Parameter(Mandatory)][System.Collections.IDictionary]$Report,
-        [string]$FallbackDate = ''
+        [string]$FallbackDate = '',
+        [AllowNull()][System.Collections.IDictionary]$SeenDailyKeys = $null
     )
     $title = [string](Get-OptionalProperty $Row 'title' (Get-OptionalProperty $Row 'Title'))
     $artist = [string](Get-OptionalProperty $Row 'artist' (Get-OptionalProperty $Row 'Artist'))
@@ -214,7 +243,21 @@ function Add-MigrationDailyRecommendationStatement {
         $Report.legacy_ignored += "malformed recommendation row: invalid rank for $title"
         return $false
     }
+    $dailyConflict = $false
+    if ($SeenDailyKeys) {
+        $dailyConflict = Test-MigrationDailyConflict -Date $date -Rank $rank -SeenDailyKeys $SeenDailyKeys
+        if ($dailyConflict) { Add-MigrationConflictReport -Report $Report -Detail "daily:$date`:$rank" }
+    }
     $neteaseId = [string](Get-OptionalProperty $Row 'netease_id' (Get-OptionalProperty $Row 'NeteaseId'))
+    $liked = if (Test-LegacyPositive (Get-OptionalProperty $Row 'liked' (Get-OptionalProperty $Row 'Liked' $false))) { 1 } else { 0 }
+    if ($dailyConflict) {
+        if ($liked -eq 1) {
+            $likeValue = New-LegacyMetadataValue -LegacyKey "legacy_like:$date`:$rank`:$trackId" -Title $title -Artist $artist -NeteaseId $neteaseId -Positive $true
+            Add-MigrationFeedbackStatement -Statements $Statements -TrackId $trackId -FeedbackType 'LIKE' -Source 'legacy_json' -Value $likeValue -CreatedAt (Get-OptionalProperty $Row 'created_at' (Get-OptionalProperty $Row 'CreatedAt' (Get-NowIso)))
+            $Report.imported.explicit_likes++
+        }
+        return [pscustomobject]@{ Valid = $true; Conflict = $true; Date = $date; Rank = $rank }
+    }
     $album = [string](Get-OptionalProperty $Row 'album' (Get-OptionalProperty $Row 'Album'))
     $duration = Convert-LegacyInt -Value (Get-OptionalProperty $Row 'duration' (Get-OptionalProperty $Row 'Duration' 0)) -Report $Report -Label "recommendation duration for $title"
     $reason = [string](Get-OptionalProperty $Row 'reason' (Get-OptionalProperty $Row 'Reason' (Get-OptionalProperty $Row 'FromSeed')))
@@ -226,7 +269,6 @@ function Add-MigrationDailyRecommendationStatement {
     if (-not $createdAt) { $createdAt = Get-NowIso }
     $updatedAt = [string](Get-OptionalProperty $Row 'updated_at' (Get-OptionalProperty $Row 'UpdatedAt' $createdAt))
     $preview = ConvertTo-Json -InputObject @(Get-OptionalProperty $Row 'preview_sources' (Get-OptionalProperty $Row 'PreviewSources' @())) -Compress -Depth 10
-    $liked = if (Test-LegacyPositive (Get-OptionalProperty $Row 'liked' (Get-OptionalProperty $Row 'Liked' $false))) { 1 } else { 0 }
     $identifiers = if ($neteaseId) { ConvertTo-Json -InputObject @([pscustomobject]@{ type = 'netease'; value = $neteaseId }) -Compress -Depth 10 } else { '[]' }
     $params = @{
         d = ConvertTo-MusicServerSqlLiteral $date; r = ConvertTo-MusicServerSqlLiteral $rank; rid = ConvertTo-MusicServerSqlLiteral $recId
@@ -247,7 +289,7 @@ function Add-MigrationDailyRecommendationStatement {
         Add-MigrationFeedbackStatement -Statements $Statements -TrackId $trackId -FeedbackType 'LIKE' -Source 'legacy_json' -Value $likeValue -CreatedAt $createdAt
         $Report.imported.explicit_likes++
     }
-    return $true
+    return [pscustomobject]@{ Valid = $true; Conflict = $dailyConflict; Date = $date; Rank = $rank }
 }
 
 function Invoke-MusicServerMigration {
@@ -342,8 +384,15 @@ function Invoke-MusicServerMigration {
         }
         $report.imported = @{ tracks = 0; recommendations = 0; history = 0; wanted = 0; providers = 0; events = 0; accepted = 0; rejected = 0; lyrics_fallback = 0; display = 0; explicit_likes = 0 }
         $previewStatements = New-Object System.Collections.Generic.List[string]
-        foreach ($rec in $jsonRecs) { if (Add-MigrationDailyRecommendationStatement -Statements $previewStatements -Row $rec -Report $report) { $report.imported.recommendations++; $report.imported.display++ } }
-        foreach ($hist in $jsonHistory) { if (Add-MigrationDailyRecommendationStatement -Statements $previewStatements -Row $hist -Report $report) { $report.imported.history++; $report.imported.display++ } }
+        $seenDailyKeys = @{}
+        foreach ($rec in $jsonRecs) {
+            $result = Add-MigrationDailyRecommendationStatement -Statements $previewStatements -Row $rec -Report $report -SeenDailyKeys $seenDailyKeys
+            if ($result -and $result.Valid -and -not $result.Conflict) { $report.imported.recommendations++; $report.imported.display++ }
+        }
+        foreach ($hist in $jsonHistory) {
+            $result = Add-MigrationDailyRecommendationStatement -Statements $previewStatements -Row $hist -Report $report -SeenDailyKeys $seenDailyKeys
+            if ($result -and $result.Valid -and -not $result.Conflict) { $report.imported.history++; $report.imported.display++ }
+        }
         foreach ($row in $acceptedRows) {
             $title = [string](Get-OptionalProperty $row 'Title'); $neteaseId = [string](Get-OptionalProperty $row 'NeteaseId')
             if (-not $title -and -not $neteaseId) { $report.legacy_ignored += 'malformed accepted.csv row: title and NeteaseId missing'; continue }
@@ -360,33 +409,46 @@ function Invoke-MusicServerMigration {
             if ($matched -and $status -in @('OK','NO_LYRIC')) { $report.imported.lyrics_fallback++ } else { $invalidLyrics++ }
         }
         if ($invalidLyrics -gt 0) { $report.legacy_ignored += "ignored lyrics_report rows: $invalidLyrics" }
+        $seenTrackIds = @{}
         foreach ($track in $jsonTracks) {
-            if ([string](Get-OptionalProperty $track 'id')) { $report.imported.tracks++ } else { $report.legacy_ignored += 'malformed tracks.json row: id missing' }
+            $trackId = [string](Get-OptionalProperty $track 'id')
+            if (-not $trackId) { $report.legacy_ignored += 'malformed tracks.json row: id missing'; continue }
+            $trackConflict = $seenTrackIds.ContainsKey($trackId)
+            if (-not $trackConflict) {
+                $seenTrackIds[$trackId] = $true
+                try { $trackConflict = @(Invoke-MusicServerParamSql -Template 'SELECT id FROM canonical_tracks WHERE id = @id LIMIT 1;' -Params @{ id = $trackId }).Count -gt 0 } catch {}
+            }
+            if ($trackConflict) { $report.skipped++; Add-MigrationConflictReport -Report $report -Detail "canonical:$trackId" } else { $report.imported.tracks++ }
         }
+        $seenWantedIds = @{}
         foreach ($wanted in $jsonWanted) {
-            if ([string](Get-OptionalProperty $wanted 'track_id')) { $report.imported.wanted++ } else { $report.legacy_ignored += 'malformed wanted.json row: track_id missing' }
+            $wantedTrackId = [string](Get-OptionalProperty $wanted 'track_id')
+            if (-not $wantedTrackId) { $report.legacy_ignored += 'malformed wanted.json row: track_id missing'; continue }
+            $wantedConflict = $seenWantedIds.ContainsKey($wantedTrackId)
+            if (-not $wantedConflict) {
+                $seenWantedIds[$wantedTrackId] = $true
+                try { $wantedConflict = @(Invoke-MusicServerParamSql -Template 'SELECT track_id FROM wanted_queue WHERE track_id = @tid LIMIT 1;' -Params @{ tid = $wantedTrackId }).Count -gt 0 } catch {}
+            }
+            if ($wantedConflict) { $report.skipped++; Add-MigrationConflictReport -Report $report -Detail "wanted:$wantedTrackId" } else { $report.imported.wanted++ }
         }
+        $seenProviderNames = @{}
         foreach ($prov in $jsonProviders) {
             $providerName = [string](Get-OptionalProperty $prov 'provider')
-            if ($providerName -in @('local','bilibili_search','bilibili_download','bilibili')) { $report.imported.providers++ }
-            else { $report.legacy_ignored += "unknown provider: $providerName" }
-            if ($providerName -eq 'bilibili') { $report.legacy_ignored += 'legacy provider: bilibili' }
+            if ($providerName -eq 'bilibili') { $report.legacy_ignored += 'legacy provider: bilibili'; $providerName = 'bilibili_search' }
+            if ($providerName -in @('local','bilibili_search','bilibili_download')) {
+                $providerConflict = $seenProviderNames.ContainsKey($providerName)
+                if (-not $providerConflict) {
+                    $seenProviderNames[$providerName] = $true
+                    try { $providerConflict = @(Invoke-MusicServerParamSql -Template 'SELECT provider FROM provider_health WHERE provider = @provider LIMIT 1;' -Params @{ provider = $providerName }).Count -gt 0 } catch {}
+                }
+                if ($providerConflict) {
+                    $report.skipped++
+                    Add-MigrationConflictReport -Report $report -Detail "provider:$providerName"
+                } else { $report.imported.providers++ }
+            } else { $report.legacy_ignored += "unknown provider: $providerName" }
         }
         foreach ($event in $legacyEvents) { if (Add-MigrationEventStatement -Statements $previewStatements -Event $event -Report $report) { $report.imported.events++ } }
         $report.imported.explicit_likes = [int]$report.imported.explicit_likes
-        $conflictDetails = New-Object System.Collections.Generic.List[string]
-        foreach ($track in $jsonTracks) {
-            $trackId = [string](Get-OptionalProperty $track 'id')
-            if (-not $trackId) { continue }
-            try { if (@(Invoke-MusicServerParamSql -Template 'SELECT id FROM canonical_tracks WHERE id = @id LIMIT 1;' -Params @{ id = $trackId }).Count -gt 0) { $report.conflicts++; if ($conflictDetails.Count -lt 25) { [void]$conflictDetails.Add("canonical:$trackId") } } } catch {}
-        }
-        foreach ($rec in @($jsonRecs) + @($jsonHistory)) {
-            $date = [string](Get-OptionalProperty $rec 'date' (Get-OptionalProperty $rec 'Date'))
-            $rank = Convert-LegacyInt -Value (Get-OptionalProperty $rec 'rank' (Get-OptionalProperty $rec 'Rank' 0)) -Default 0
-            if (-not $date -or $rank -le 0) { continue }
-            try { if (@(Invoke-MusicServerParamSql -Template 'SELECT rec_id FROM daily_recommendations WHERE date = @date AND rank = @rank LIMIT 1;' -Params @{ date = $date; rank = $rank }).Count -gt 0) { $report.conflicts++; if ($conflictDetails.Count -lt 25) { [void]$conflictDetails.Add("daily:$date`:$rank") } } } catch {}
-        }
-        $report.conflict_details = @($conflictDetails)
         return $report
     }
 
@@ -408,14 +470,19 @@ function Invoke-MusicServerMigration {
     $importedAccepted = 0; $importedRejected = 0; $importedLyrics = 0; $importedEvents = 0; $displayCount = 0; $skipped = 0; $conflicts = 0
     $report.imported = @{ tracks = 0; recommendations = 0; history = 0; wanted = 0; providers = 0; events = 0; accepted = 0; rejected = 0; lyrics_fallback = 0; display = 0; explicit_likes = 0 }
 
+    $seenTrackIds = @{}
     foreach ($track in $jsonTracks) {
         $trackId = [string](Get-OptionalProperty $track 'id')
         if (-not $trackId) { $report.legacy_ignored += 'malformed tracks.json row: id missing'; continue }
         $identifiers = ConvertTo-Json -InputObject @(Get-OptionalProperty $track 'identifiers' @()) -Compress -Depth 10
         $preview = ConvertTo-Json -InputObject @(Get-OptionalProperty $track 'preview_sources' @()) -Compress -Depth 10
         $candidates = ConvertTo-Json -InputObject @(Get-OptionalProperty $track 'download_candidates' @()) -Compress -Depth 10
-        $existing = @(Invoke-MusicServerParamSql -Template 'SELECT id FROM canonical_tracks WHERE id = @id LIMIT 1;' -Params @{ id = $trackId })
-        if ($existing.Count -gt 0) { $skipped++; $conflicts++; continue }
+        $trackConflict = $seenTrackIds.ContainsKey($trackId)
+        if (-not $trackConflict) {
+            $seenTrackIds[$trackId] = $true
+            $trackConflict = @(Invoke-MusicServerParamSql -Template 'SELECT id FROM canonical_tracks WHERE id = @id LIMIT 1;' -Params @{ id = $trackId }).Count -gt 0
+        }
+        if ($trackConflict) { $skipped++; Add-MigrationConflictReport -Report $report -Detail "canonical:$trackId"; continue }
         $now = Get-NowIso
         $p = @{
             id = ConvertTo-MusicServerSqlLiteral $trackId; title = ConvertTo-MusicServerSqlLiteral ([string](Get-OptionalProperty $track 'title')); artist = ConvertTo-MusicServerSqlLiteral ([string](Get-OptionalProperty $track 'artist')); album = ConvertTo-MusicServerSqlLiteral ([string](Get-OptionalProperty $track 'album')); dur = ConvertTo-MusicServerSqlLiteral (Convert-LegacyInt -Value (Get-OptionalProperty $track 'duration' 0) -Report $report -Label "track duration for $trackId"); cover = ConvertTo-MusicServerSqlLiteral ([string](Get-OptionalProperty $track 'cover_url')); ident = ConvertTo-MusicServerSqlLiteral $identifiers; preview = ConvertTo-MusicServerSqlLiteral $preview; candidates = ConvertTo-MusicServerSqlLiteral $candidates; local = ConvertTo-MusicServerSqlLiteral ([string](Get-OptionalProperty $track 'local_song_id')); status = ConvertTo-MusicServerSqlLiteral ([string](Get-OptionalProperty $track 'status' 'REMOTE')); created = ConvertTo-MusicServerSqlLiteral ([string](Get-OptionalProperty $track 'created_at' $now)); updated = ConvertTo-MusicServerSqlLiteral ([string](Get-OptionalProperty $track 'updated_at' $now))
@@ -424,8 +491,15 @@ function Invoke-MusicServerMigration {
         $importedTracks++
     }
 
-    foreach ($rec in $jsonRecs) { if (Add-MigrationDailyRecommendationStatement -Statements $statements -Row $rec -Report $report) { $importedRecs++; $displayCount++ } }
-    foreach ($hist in $jsonHistory) { if (Add-MigrationDailyRecommendationStatement -Statements $statements -Row $hist -Report $report) { $importedHistory++; $displayCount++ } }
+    $seenDailyKeys = @{}
+    foreach ($rec in $jsonRecs) {
+        $result = Add-MigrationDailyRecommendationStatement -Statements $statements -Row $rec -Report $report -SeenDailyKeys $seenDailyKeys
+        if ($result -and $result.Valid -and -not $result.Conflict) { $importedRecs++; $displayCount++ }
+    }
+    foreach ($hist in $jsonHistory) {
+        $result = Add-MigrationDailyRecommendationStatement -Statements $statements -Row $hist -Report $report -SeenDailyKeys $seenDailyKeys
+        if ($result -and $result.Valid -and -not $result.Conflict) { $importedHistory++; $displayCount++ }
+    }
 
     foreach ($row in $acceptedRows) {
         $title = [string](Get-OptionalProperty $row 'Title'); $artist = [string](Get-OptionalProperty $row 'Artist'); $neteaseId = [string](Get-OptionalProperty $row 'NeteaseId'); $file = [string](Get-OptionalProperty $row 'File'); $at = [string](Get-OptionalProperty $row 'AcceptedAt')
@@ -457,11 +531,16 @@ function Invoke-MusicServerMigration {
         $importedLyrics++
     }
 
+    $seenWantedIds = @{}
     foreach ($w in $jsonWanted) {
         $trackId = [string](Get-OptionalProperty $w 'track_id')
         if (-not $trackId) { $report.legacy_ignored += 'malformed wanted.json row: track_id missing'; continue }
-        $existing = @(Invoke-MusicServerParamSql -Template 'SELECT track_id FROM wanted_queue WHERE track_id = @tid LIMIT 1;' -Params @{ tid = $trackId })
-        if ($existing.Count -gt 0) { $skipped++; $conflicts++; continue }
+        $wantedConflict = $seenWantedIds.ContainsKey($trackId)
+        if (-not $wantedConflict) {
+            $seenWantedIds[$trackId] = $true
+            $wantedConflict = @(Invoke-MusicServerParamSql -Template 'SELECT track_id FROM wanted_queue WHERE track_id = @tid LIMIT 1;' -Params @{ tid = $trackId }).Count -gt 0
+        }
+        if ($wantedConflict) { $skipped++; Add-MigrationConflictReport -Report $report -Detail "wanted:$trackId"; continue }
         $selected = ''; $selectedValue = Get-OptionalProperty $w 'selected_candidate' $null
         if ($null -ne $selectedValue) { $selected = ConvertTo-Json -InputObject $selectedValue -Compress -Depth 10 }
         $p = @{
@@ -472,15 +551,26 @@ function Invoke-MusicServerMigration {
     }
 
     $validProviders = @('local','bilibili_search','bilibili_download')
+    $seenProviderNames = @{}
     foreach ($prov in $jsonProviders) {
         $pname = [string]$prov.provider
         if ($pname -eq 'bilibili') { $report.legacy_ignored += 'legacy provider: bilibili (HALF_OPEN); merged into bilibili_search'; $pname = 'bilibili_search' }
         if ($pname -notin $validProviders) { $report.legacy_ignored += "unknown provider: $pname"; continue }
+        $providerConflict = $seenProviderNames.ContainsKey($pname)
+        if (-not $providerConflict) {
+            $seenProviderNames[$pname] = $true
+            try { $providerConflict = @(Invoke-MusicServerParamSql -Template 'SELECT provider FROM provider_health WHERE provider = @provider LIMIT 1;' -Params @{ provider = $pname }).Count -gt 0 } catch {}
+        }
+        if ($providerConflict) {
+            $skipped++
+            Add-MigrationConflictReport -Report $report -Detail "provider:$pname"
+            continue
+        }
         $probeValue = if (Get-OptionalProperty $prov 'probe_pending' $false) { 1 } else { 0 }
         $p = @{
             provider = ConvertTo-MusicServerSqlLiteral $pname; state = ConvertTo-MusicServerSqlLiteral ([string](Get-OptionalProperty $prov 'state' 'CLOSED')); success = ConvertTo-MusicServerSqlLiteral (Convert-LegacyInt -Value (Get-OptionalProperty $prov 'success_count' 0) -Report $report -Label "provider success_count for $pname"); failure = ConvertTo-MusicServerSqlLiteral (Convert-LegacyInt -Value (Get-OptionalProperty $prov 'failure_count' 0) -Report $report -Label "provider failure_count for $pname"); cf = ConvertTo-MusicServerSqlLiteral (Convert-LegacyInt -Value (Get-OptionalProperty $prov 'consecutive_failures' 0) -Report $report -Label "provider consecutive_failures for $pname"); c412 = ConvertTo-MusicServerSqlLiteral (Convert-LegacyInt -Value (Get-OptionalProperty $prov 'consecutive_412' 0) -Report $report -Label "provider consecutive_412 for $pname"); ls = ConvertTo-MusicServerSqlLiteral ([string](Get-OptionalProperty $prov 'last_success')); lf = ConvertTo-MusicServerSqlLiteral ([string](Get-OptionalProperty $prov 'last_failure')); l412 = ConvertTo-MusicServerSqlLiteral ([string](Get-OptionalProperty $prov 'last_412_at')); blocked = ConvertTo-MusicServerSqlLiteral ([string](Get-OptionalProperty $prov 'blocked_until')); latency = ConvertTo-MusicServerSqlLiteral (Convert-LegacyDouble -Value (Get-OptionalProperty $prov 'average_latency_ms' 0) -Report $report -Label "provider average_latency_ms for $pname"); probe = ConvertTo-MusicServerSqlLiteral $probeValue; now = ConvertTo-MusicServerSqlLiteral (Get-NowIso)
         }
-        [void]$statements.Add("INSERT OR REPLACE INTO provider_health (provider,state,success_count,failure_count,consecutive_failures,consecutive_412,last_success,last_failure,last_412_at,blocked_until,average_latency_ms,half_open_probe_claimed,last_error,revision,updated_at) VALUES ($($p.provider),$($p.state),$($p.success),$($p.failure),$($p.cf),$($p.c412),$($p.ls),$($p.lf),$($p.l412),$($p.blocked),$($p.latency),$($p.probe),'',1,$($p.now))")
+        [void]$statements.Add("INSERT OR IGNORE INTO provider_health (provider,state,success_count,failure_count,consecutive_failures,consecutive_412,last_success,last_failure,last_412_at,blocked_until,average_latency_ms,half_open_probe_claimed,last_error,revision,updated_at) VALUES ($($p.provider),$($p.state),$($p.success),$($p.failure),$($p.cf),$($p.c412),$($p.ls),$($p.lf),$($p.l412),$($p.blocked),$($p.latency),$($p.probe),'',1,$($p.now))")
         $importedProviders++
     }
     foreach ($event in $legacyEvents) {
@@ -495,7 +585,7 @@ function Invoke-MusicServerMigration {
     try {
         [void](Invoke-StateAtomicSql -Statements $statements.ToArray() -FailAfterStep $FailAfterStep)
         $report.imported = @{ tracks = $importedTracks; recommendations = $importedRecs; history = $importedHistory; wanted = $importedWanted; providers = $importedProviders; events = $importedEvents; accepted = $importedAccepted; rejected = $importedRejected; lyrics_fallback = $importedLyrics; display = $displayCount; explicit_likes = [int]$report.imported.explicit_likes }
-        $report.skipped = $skipped; $report.conflicts = $conflicts; $report.status = 'SUCCESS'
+        $report.skipped = $skipped; $report.conflicts = [int]$report.conflicts + $conflicts; $report.status = 'SUCCESS'
     } catch {
         $report.status = 'FAILED'; $report.error = $_.Exception.Message
     }

@@ -31,13 +31,14 @@ $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 try { Add-Type -AssemblyName System.Web -ErrorAction SilentlyContinue } catch {}
 
-# 固定启动顺序：Core -> Providers -> Database -> State -> Migration。
+# 固定启动顺序：Core -> Providers -> Database -> State。
 # 所有 -Force 导入必须在 Initialize-MusicServerDatabase 之前完成（模块实例重置律）。
+# Legacy migration is an explicit maintenance action owned by daily_recommend.ps1;
+# API startup must never import or rewrite legacy recommendation state.
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Core.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Providers.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Database.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.State.psm1') -Force
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.Migration.psm1') -Force
 
 $Config = New-MusicServerConfig -Root $Root
 Initialize-MusicServerState -Config $Config
@@ -59,8 +60,7 @@ if (-not (Test-Path -LiteralPath $SqliteExe) -and -not (Get-Command $SqliteExe -
 }
 Initialize-MusicServerDatabase -DbPath $DbPath -SqliteExe $SqliteExe
 Initialize-MusicServerSchema
-$migration = Invoke-MusicServerMigration -Config $Config
-Write-Host ("API v2 ready | db={0} | migration={1}" -f $DbPath, [string]$migration.status) -ForegroundColor Green
+Write-Host ("API v2 ready | db={0} | migration=NOT_REQUESTED" -f $DbPath) -ForegroundColor Green
 
 function Send-Json([psobject]$Context) {
     $body = $Context.Body

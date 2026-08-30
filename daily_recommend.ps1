@@ -39,10 +39,17 @@ Import-Module (Join-Path $PSScriptRoot 'MusicServer.State.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Migration.psm1') -Force
 
 $Config = New-MusicServerConfig -Root $Root
-Initialize-MusicServerState -Config $Config
 $dbPath = Join-Path $Config.StateDir 'musicserver.db'
-Initialize-MusicServerDatabase -DbPath $dbPath -SqliteExe $Config.Sqlite
-Initialize-MusicServerSchema
+if ($DryRun) {
+    if (-not (Test-Path -LiteralPath $dbPath -PathType Leaf)) {
+        throw "DryRun requires an existing SQLite database: $dbPath"
+    }
+    Connect-MusicServerDatabase -DbPath $dbPath -SqliteExe $Config.Sqlite
+} else {
+    Initialize-MusicServerState -Config $Config
+    Initialize-MusicServerDatabase -DbPath $dbPath -SqliteExe $Config.Sqlite
+    Initialize-MusicServerSchema
+}
 
 # Legacy import is an explicit activation step. DryRun never opens the
 # JSON/CSV migration input path, and a normal scheduled run cannot silently
