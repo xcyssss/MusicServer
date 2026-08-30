@@ -1,4 +1,4 @@
-Set-StrictMode -Version 3.0
+﻿Set-StrictMode -Version 3.0
 
 # MusicServer.State.psm1 - Transactional state layer backed by SQLite
 # Provides: schema, migration, CAS, worker claim/lease, crash recovery,
@@ -750,6 +750,13 @@ function Get-EventsDb {
 # Stats / Counts
 # ================================================================
 
+function Get-LatestRecommendationFeedbackDb {
+    param([Parameter(Mandatory)][string]$TrackId)
+    $rows = @(Invoke-MusicServerParamSql -Template 'SELECT feedback_type FROM recommendation_feedback WHERE track_id = @tid ORDER BY id DESC LIMIT 1;' -Params @{ tid = $TrackId })
+    if ($rows.Count -eq 0) { return $null }
+    return [string]$rows[0].feedback_type
+}
+
 function Get-DbStats {
     $stats = @{}
     foreach ($table in @('canonical_tracks','daily_recommendations','recommendation_feedback','wanted_queue','provider_health','events')) {
@@ -764,6 +771,229 @@ function Get-DbStats {
         } else { $stats[$table] = 0 }
     }
     return $stats
+}
+
+# ====================================================================
+# Phase 3 - API Atomic Transactions
+# ====================================================================
+# These functions implement the API-facing LIKE/UNLIKE state changes as
+# TRUE SQLite transactions: a single `BEGIN ... COMMIT` script executed
+# in one sqlite3 process (Invoke-MusicServerSqliteScript), so the
+# canonical status, wanted_queue, feedback and event audit rows all land
+# atomically.  Decision logic lives here (State layer); music_api.ps1
+# only maps the returned result object to HTTP responses.
+#
+# Failure-injection: pass -FailAfterStep N (N>=1) and the script embeds
+# a guaranteed "no such table" statement right after the Nth statement;
+# `.bail on` aborts the script, sqlite3 exits non-zero, and the open
+# transaction is rolled back on process exit.  Used by the ApiTransaction
+# rollback tests only.
+
+function Invoke-ApiAtomicSql {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$Statements,
+        [int]$FailAfterStep = 0
+    )
+
+    $sb = New-Object Text.StringBuilder
+    [void]$sb.AppendLine('.bail on')
+    [void]$sb.AppendLine('BEGIN;')
+    $step = 0
+    foreach ($raw in @($Statements)) {
+        if ($null -eq $raw) { continue }
+        $stmt = ([string]$raw).Trim()
+        if ([string]::IsNullOrWhiteSpace($stmt)) { continue }
+        while ($stmt.EndsWith(';')) { $stmt = $stmt.Substring(0, $stmt.Length - 1) }
+        $step++
+        [void]$sb.AppendLine("$stmt;")
+        if ($FailAfterStep -gt 0 -and $step -eq $FailAfterStep) {
+            [void]$sb.AppendLine("INSERT INTO ms_injected_api_failure_probe (x) VALUES (1);")
+        }
+    }
+    [void]$sb.AppendLine('COMMIT;')
+    Invoke-MusicServerSqliteScript -Sql $sb.ToString() | Out-Null
+    return $step
+}
+
+function Invoke-LikeTrackTransactionDb {
+    <#
+    .SYNOPSIS
+      Atomic LIKE: canonical status -> WANTED + wanted_queue upsert +
+      'LIKE' feedback + TRACK_LIKED event, in ONE SQLite transaction.
+    .NOTES
+      Idempotent: repeated LIKE on an active queue row only writes
+      feedback + event (no queue reset, no attempt/lease reset, no
+      status/revision churn).  Re-queues from CANCEL_REQUESTED /
+      UNAVAILABLE (attempt_count reset).  LOCAL tracks are preference
+      only.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$TrackId,
+        [int]$MaxAttempts = 5,
+        [string]$Source = 'music_api',
+        [int]$FailAfterStep = 0
+    )
+
+    $canonical = Get-CanonicalTrackDb -TrackId $TrackId
+    if ($null -eq $canonical) {
+        throw "TRACK_NOT_FOUND: $TrackId"
+    }
+    $queue = Get-WantedItemDb -TrackId $TrackId
+
+    $fromStatus = [string]$canonical.status
+    $fromQueue = $null
+    if ($queue) {
+        $fromQueue = [string]$queue.state
+    }
+
+    $toStatus = $fromStatus
+    $toQueue = $fromQueue
+
+    $statements = [System.Collections.Generic.List[string]]::new()
+    if ($fromStatus -eq 'LOCAL' -or ($fromQueue -eq 'LOCAL')) {
+        $action = 'PREFERENCE_ONLY'
+    } elseif ($fromQueue -in @('WANTED','RETRY_WAIT','RESOLVING','DOWNLOADING','VALIDATING')) {
+        $action = 'ALREADY_QUEUED'
+    } elseif ($fromQueue -in @('CANCEL_REQUESTED','UNAVAILABLE')) {
+        $action = 'REQUEUED'
+        $toStatus = 'WANTED'
+        $toQueue = 'WANTED'
+    } elseif ($null -eq $fromQueue) {
+        $action = 'QUEUED'
+        $toStatus = 'WANTED'
+        $toQueue = 'WANTED'
+    } else {
+        $action = 'PREFERENCE_ONLY'
+    }
+
+    $now = Get-NowIso
+    $litTid = ConvertTo-MusicServerSqlLiteral $TrackId
+    $litNow = ConvertTo-MusicServerSqlLiteral $now
+    $litSrc = ConvertTo-MusicServerSqlLiteral $Source
+
+    if ($action -eq 'QUEUED') {
+        [void]$statements.Add("UPDATE canonical_tracks SET status = 'WANTED', updated_at = $litNow, revision = revision + 1 WHERE id = $litTid AND status IN ('REMOTE','RETRY_WAIT','UNAVAILABLE')")
+        $wantedId = "wanted_$([guid]::NewGuid().ToString('N'))"
+        $litWid = ConvertTo-MusicServerSqlLiteral $wantedId
+        [void]$statements.Add("INSERT INTO wanted_queue (track_id, wanted_id, state, attempt_count, max_attempts, revision, created_at, updated_at) VALUES ($litTid, $litWid, 'WANTED', 0, $MaxAttempts, 1, $litNow, $litNow)")
+    }
+    if ($action -eq 'REQUEUED') {
+        [void]$statements.Add("UPDATE wanted_queue SET state = 'WANTED', attempt_count = 0, next_retry_at = NULL, last_error = '', claimed_by = '', claimed_at = NULL, lease_expires_at = NULL, lease_expires_epoch = NULL, revision = revision + 1, updated_at = $litNow WHERE track_id = $litTid AND state IN ('CANCEL_REQUESTED','UNAVAILABLE')")
+        [void]$statements.Add("UPDATE canonical_tracks SET status = 'WANTED', updated_at = $litNow, revision = revision + 1 WHERE id = $litTid AND status IN ('REMOTE','RETRY_WAIT','UNAVAILABLE','CANCEL_REQUESTED')")
+    }
+
+    [void]$statements.Add("INSERT INTO recommendation_feedback (track_id, feedback_type, source, value, created_at) VALUES ($litTid, 'LIKE', $litSrc, 'true', $litNow)")
+    $evtMsg = "action=$action; queue=$fromQueue; status=$fromStatus -> $toStatus"
+    # events.to_state is NOT NULL: normalize queue-state audit columns to ''.
+    $litToQueue = ConvertTo-MusicServerSqlLiteral ([string]$toQueue)
+    [void]$statements.Add("INSERT INTO events (event_type, track_id, provider, from_state, to_state, attempt, duration_ms, result, error_type, http_status, message, created_at) VALUES ('TRACK_LIKED', $litTid, '', $(ConvertTo-MusicServerSqlLiteral ([string]$fromQueue)), $litToQueue, 0, 0.0, 'SUCCESS', '', 0, $(ConvertTo-MusicServerSqlLiteral $evtMsg), $litNow)")
+
+    Invoke-ApiAtomicSql -Statements $statements.ToArray() -FailAfterStep $FailAfterStep | Out-Null
+
+    $cAfter = Get-CanonicalTrackDb -TrackId $TrackId
+    $qAfter = Get-WantedItemDb -TrackId $TrackId
+    [pscustomobject]@{
+        track_id         = $TrackId
+        liked            = $true
+        action           = $action
+        from_status      = $fromStatus
+        to_status        = if ($cAfter) { [string]$cAfter.status } else { '' }
+        from_queue       = $fromQueue
+        to_queue         = if ($qAfter) { [string]$qAfter.state } else { $null }
+        queue_revision   = if ($qAfter) { [int]$qAfter.revision } else { 0 }
+    }
+}
+
+function Invoke-UnlikeTrackTransactionDb {
+    <#
+    .SYNOPSIS
+      Atomic UNLIKE in ONE SQLite transaction, branching on the
+      CURRENT queue state (single source of truth: SQLite):
+        - LOCAL               -> preference only (feedback + event).
+                                 Never deletes MP3, never touches Navidrome identity.
+        - WANTED/RETRY_WAIT/UNAVAILABLE (idle)
+                              -> DELETE queue row + canonical -> REMOTE +
+                                 UNLIKE feedback + TRACK_UNLIKED event.
+        - RESOLVING/DOWNLOADING/VALIDATING (active)
+                              -> CANCEL_REQUESTED + revision+1 + lease cleared +
+                                 UNLIKE feedback + TRACK_UNLIKED +
+                                 WANTED_CANCEL_REQUESTED event.  A stale worker
+                                 CAS afterwards must fail with changes()=0.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$TrackId,
+        [string]$Source = 'music_api',
+        [int]$FailAfterStep = 0
+    )
+
+    $canonical = Get-CanonicalTrackDb -TrackId $TrackId
+    if ($null -eq $canonical) {
+        throw "TRACK_NOT_FOUND: $TrackId"
+    }
+    $queue = Get-WantedItemDb -TrackId $TrackId
+
+    $fromStatus = [string]$canonical.status
+    $fromQueue = $null
+    if ($queue) {
+        $fromQueue = [string]$queue.state
+    }
+
+    $toStatus = $fromStatus
+    $toQueue = $fromQueue
+
+    if ($fromStatus -eq 'LOCAL' -or ($fromQueue -eq 'LOCAL')) {
+        $action = 'PREFERENCE_ONLY'
+    } elseif ($fromQueue -in @('RESOLVING','DOWNLOADING','VALIDATING')) {
+        $action = 'CANCEL_REQUESTED'
+        $toQueue = 'CANCEL_REQUESTED'
+    } else {
+        $action = 'IDLE_REMOVED'
+        $toStatus = 'REMOTE'
+        $toQueue = $null
+    }
+
+    $now = Get-NowIso
+    $litTid = ConvertTo-MusicServerSqlLiteral $TrackId
+    $litNow = ConvertTo-MusicServerSqlLiteral $now
+    $litSrc = ConvertTo-MusicServerSqlLiteral $Source
+
+    $statements = [System.Collections.Generic.List[string]]::new()
+    if ($action -eq 'CANCEL_REQUESTED') {
+        [void]$statements.Add("UPDATE wanted_queue SET state = 'CANCEL_REQUESTED', last_error = 'USER_CANCELLED', claimed_by = '', claimed_at = NULL, lease_expires_at = NULL, lease_expires_epoch = NULL, revision = revision + 1, updated_at = $litNow WHERE track_id = $litTid AND state IN ('RESOLVING','DOWNLOADING','VALIDATING')")
+    }
+    if ($action -eq 'IDLE_REMOVED') {
+        [void]$statements.Add("DELETE FROM wanted_queue WHERE track_id = $litTid AND state IN ('WANTED','RETRY_WAIT','UNAVAILABLE','CANCEL_REQUESTED')")
+        [void]$statements.Add("UPDATE canonical_tracks SET status = 'REMOTE', updated_at = $litNow, revision = revision + 1 WHERE id = $litTid AND status IN ('WANTED','RETRY_WAIT','UNAVAILABLE','CANCEL_REQUESTED')")
+    }
+
+    $evtMsg = "action=$action; queue=$fromQueue; status=$fromStatus"
+    [void]$statements.Add("INSERT INTO recommendation_feedback (track_id, feedback_type, source, value, created_at) VALUES ($litTid, 'UNLIKE', $litSrc, 'false', $litNow)")
+    if ($action -eq 'CANCEL_REQUESTED') {
+        [void]$statements.Add("INSERT INTO events (event_type, track_id, provider, from_state, to_state, attempt, duration_ms, result, error_type, http_status, message, created_at) VALUES ('TRACK_UNLIKED', $litTid, '', $(ConvertTo-MusicServerSqlLiteral ([string]$fromQueue)), 'CANCEL_REQUESTED', 0, 0.0, 'SUCCESS', '', 0, $(ConvertTo-MusicServerSqlLiteral $evtMsg), $litNow)")
+        [void]$statements.Add("INSERT INTO events (event_type, track_id, provider, from_state, to_state, attempt, duration_ms, result, error_type, http_status, message, created_at) VALUES ('WANTED_CANCEL_REQUESTED', $litTid, '', $(ConvertTo-MusicServerSqlLiteral ([string]$fromQueue)), 'CANCEL_REQUESTED', 0, 0.0, 'SUCCESS', '', 0, $(ConvertTo-MusicServerSqlLiteral $evtMsg), $litNow)")
+    } else {
+        $toQueueLiteral = ConvertTo-MusicServerSqlLiteral ([string]$toQueue)
+        if ($action -eq 'IDLE_REMOVED') { $toQueueLiteral = '''' + 'REMOVED' + '''' }
+        [void]$statements.Add("INSERT INTO events (event_type, track_id, provider, from_state, to_state, attempt, duration_ms, result, error_type, http_status, message, created_at) VALUES ('TRACK_UNLIKED', $litTid, '', $(ConvertTo-MusicServerSqlLiteral ([string]$fromQueue)), $toQueueLiteral, 0, 0.0, 'SUCCESS', '', 0, $(ConvertTo-MusicServerSqlLiteral $evtMsg), $litNow)")
+    }
+
+    Invoke-ApiAtomicSql -Statements $statements.ToArray() -FailAfterStep $FailAfterStep | Out-Null
+
+    $cAfter = Get-CanonicalTrackDb -TrackId $TrackId
+    $qAfter = Get-WantedItemDb -TrackId $TrackId
+    [pscustomobject]@{
+        track_id         = $TrackId
+        liked            = $false
+        action           = $action
+        from_status      = $fromStatus
+        to_status        = if ($cAfter) { [string]$cAfter.status } else { '' }
+        from_queue       = $fromQueue
+        to_queue         = if ($qAfter) { [string]$qAfter.state } else { $null }
+        queue_revision   = if ($qAfter) { [int]$qAfter.revision } else { 0 }
+    }
 }
 
 Export-ModuleMember -Function *

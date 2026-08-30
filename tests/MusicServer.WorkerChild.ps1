@@ -76,6 +76,13 @@ try {
             $affected = Renew-LeaseDb -TrackId $TrackId -WorkerId $WorkerId
             Write-Result @{ Success = ([int]$affected -eq 1); Affected = [int]$affected }
         }
+        'like' {
+            $res = Invoke-LikeTrackTransactionDb -TrackId $TrackId -Source 'worker_child'
+            Write-Result @{
+                Success = $true; Action = [string]$res.action
+                Queue = $(if ($res.to_queue) { [string]$res.to_queue } else { 'NONE' }); QueueRev = [int]$res.queue_revision
+            }
+}
         default {
             Write-Result @{ Success = $false; Reason = "UNKNOWN_ACTION:$Action" }
         }

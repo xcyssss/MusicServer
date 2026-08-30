@@ -1,9 +1,15 @@
 # MusicServer - Agent Guide
 
-Local music server: Bilibili audio downloads + Navidrome streaming + automated daily recommendations. Not a git repo.
+Local music server: Bilibili audio downloads + Navidrome streaming + automated daily recommendations.
+
+Git repo. Branches: `main` (released), `review/musicserver-hardening-v1`, `review/musicserver-hardening-v2` (active — SQLite as sole runtime truth + atomic API transactions).
 
 ## Stack
 
+- **PowerShell modules** — `MusicServer.Core` / `.Database` / `.State` / `.Migration` / `.Providers` / `.DesiredStateWorker`
+- **music_api.ps1** — HTTP listener on `http://127.0.0.1:8787/`, front-end agnostic JSON API
+- **web/** — `index.html` + `app.js` + `styles.css`
+- **SQLite** — sole runtime source of truth. JSON files are migration input / backups only
 - **Navidrome** v0.63.2 — music server, Subsonic-compatible, runs as Windows service or standalone
 - **yt-dlp** — Bilibili audio extraction (via `C:\Users\dell\anaconda3\Scripts\yt-dlp.exe`)
 - **ffmpeg/ffprobe** — transcoding, tag rewriting, duration validation (`C:\Users\dell\AppData\Local\Microsoft\WinGet\Links\ffmpeg.exe`)
@@ -37,6 +43,40 @@ E:\Project\MusicServer/
 | `fix_tags.ps1` | Rewrite ID3 tags, set album="B站收藏" | None |
 | `start_navidrome.ps1` | Start server (service or standalone) | `-Port`, `-NoBrowser` |
 | `lib_playlist.ps1` | Shared m3u writer (sourced by recommend/cleanup) | N/A (dot-sourced) |
+| `music_api.ps1` | HTTP API server (v2) | `-Prefix`, `-Once`, `-Root` |
+| `wanted_worker.ps1` | Background download worker | see module docs |
+| `start_musicserver.cmd` / `.vbs` | Launch API + worker hidden | None |
+
+## Tests & CI
+
+Formal suites live in `tests/` and are named `MusicServer.*.Tests.ps1` (Pester 3.4, Windows PowerShell 5.1-compatible). Anything else in `tests/` is a throwaway probe and is git-ignored.
+
+```powershell
+Import-Module Pester -RequiredVersion 3.4.0 -Force
+Invoke-Pester .\tests\MusicServer.Core.Tests.ps1 -PassThru
+```
+
+CI (`.github/workflows/core-tests.yml`, windows-latest + Windows PowerShell 5.1) runs on push to `main` and `review/**`. It splits suites across two parallel jobs so neither hits the job timeout:
+
+| Job | Suites |
+|-----|--------|
+| `state` | Core, Database, V2, WorkerConcurrency, Web |
+| `api` | ApiTransaction, ApiRuntime |
+
+Measured locally on PS 5.1: ApiTransaction ≈ 334s, ApiRuntime ≈ 152s, the other four ≈ 480s combined. Serial is ~16 min, so keep the split.
+
+Two things CI needs that a fresh runner does not have:
+
+- **sqlite3** — `MusicServer.Database.psm1` resolves `sqlite3.exe` from PATH with no fallback path. CI installs it via `choco install sqlite`. Without it every DB-backed suite fails.
+- **Pester 3.4.0** — installed on demand from PSGallery.
+
+Suites that assert against a **live** MusicServer (running API, local library, `lyrics_report.csv` — the latter two are git-ignored) must be tagged `RequiresLocalRuntime`; CI passes `-ExcludeTag RequiresLocalRuntime`. Run them locally with:
+
+```powershell
+Invoke-Pester .\tests\MusicServer.Web.Tests.ps1 -PassThru   # includes the tagged Describe
+```
+
+Diagnostic scratch output goes to `artifacts/` (git-ignored). Do not commit it.
 
 ## Automated schedule
 

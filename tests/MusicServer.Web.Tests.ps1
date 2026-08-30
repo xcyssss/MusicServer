@@ -1,9 +1,15 @@
-Describe 'MusicServer web playback safeguards' {
+# This Describe needs a LIVE MusicServer API plus this machine's library and
+# lyrics_report.csv (git-ignored), so it can never pass on a clean CI checkout.
+# Tagged RequiresLocalRuntime and excluded in .github/workflows/core-tests.yml.
+Describe 'MusicServer web playback safeguards' -Tag @('RequiresLocalRuntime') {
     BeforeAll {
         $script:apiRoot = 'http://127.0.0.1:8787'
         $script:library = @(Invoke-RestMethod -Uri "$apiRoot/api/library" -TimeoutSec 10).items
         $script:suspectFile = '『菁华浮梦』10年前的古风歌有多美，用低吟的唱法品品.mp3'
         $script:suspect = $library | Where-Object { $_.title -eq [IO.Path]::GetFileNameWithoutExtension($suspectFile) } | Select-Object -First 1
+        if (-not $script:suspect) {
+            throw "Library is missing '$script:suspectFile'. This suite asserts against a live local library; skip it via -ExcludeTag RequiresLocalRuntime."
+        }
     }
 
     It 'does not expose a known low-confidence lyric match as valid' {
@@ -14,6 +20,10 @@ Describe 'MusicServer web playback safeguards' {
         $lyrics.available | Should Be $false
         $lyrics.quality | Should Be 'SUSPECT'
     }
+}
+
+# Static markup assertions. These read web/ files only and are safe on a clean checkout.
+Describe 'MusicServer web UI safeguards' {
 
     It 'ships explicit previous and next controls with queue navigation' {
         $html = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\web\index.html') -Raw

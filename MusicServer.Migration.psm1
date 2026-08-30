@@ -1,4 +1,4 @@
-Set-StrictMode -Version 3.0
+﻿Set-StrictMode -Version 3.0
 
 # MusicServer.Migration.psm1 - JSON to SQLite migration
 # Non-destructive, transactional, idempotent.
@@ -142,7 +142,8 @@ VALUES (@d, @r, @rid, @tid, @nid, @title, @artist, @album, @dur, @reason,
             }
             foreach ($w in $jsonWanted) {
                 $selected = ''
-                if ($w.selected_candidate) { $selected = ConvertTo-Json -InputObject $w.selected_candidate -Compress -Depth 10 }
+                $wSel = Get-OptionalProperty $w 'selected_candidate' $null
+                if ($null -ne $wSel) { $selected = ConvertTo-Json -InputObject $wSel -Compress -Depth 10 }
                 $existing = @(Invoke-MusicServerParamSql -Template 'SELECT track_id FROM wanted_queue WHERE track_id = @tid LIMIT 1;' -Params @{ tid = [string]$w.track_id })
                 if ($existing.Count -gt 0) { $skipped++; $conflicts++; continue }
                 Invoke-MusicServerParamNonQuery -Template @"

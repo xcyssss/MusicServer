@@ -35,3 +35,20 @@ Navidrome/bin/
 .mimocode/
 .DS_Store
 Thumbs.db
+
+# Debug artifacts and one-off probe scripts.
+# artifacts/ holds ad-hoc diagnostic output (*.out, *.err, diag*.ps1);
+# tests/test_*.ps1 are throwaway sqlite3 quoting/parameter probes kept
+# only while the bug they investigate is being fixed.
+# Formal suites are named MusicServer.*.Tests.ps1 and are NOT ignored.
+artifacts/
+test.py
+tests/_reload_probe/
+tests/phase3_root/
+tests/_verify_scope.ps1
+tests/check_syntax.ps1
+tests/test_crash*.ps1
+tests/test_db*.ps1
+tests/test_param*.ps1
+tests/test_quotes.ps1
+tests/test_integration.ps1
