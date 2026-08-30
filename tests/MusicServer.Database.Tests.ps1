@@ -1,12 +1,19 @@
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 
+function Get-TestSqliteExecutable {
+    if ($env:MUSICSERVER_SQLITE) {
+        return $env:MUSICSERVER_SQLITE
+    }
+    return (Get-Command sqlite3.exe -ErrorAction Stop).Source
+}
+
 Describe 'MusicServer SQLite CLI database wrapper' {
     BeforeEach {
         $TestRoot = Join-Path ([IO.Path]::GetTempPath()) "musicserver_db_$([guid]::NewGuid().ToString('N'))"
         New-Item -ItemType Directory -Path $TestRoot -Force | Out-Null
         Import-Module (Join-Path $ProjectRoot 'MusicServer.Database.psm1') -Force
         $DbPath = Join-Path $TestRoot 'wrapper.db'
-        Initialize-MusicServerDatabase -DbPath $DbPath -SqliteExe 'C:\Users\dell\anaconda3\Library\bin\sqlite3.exe' | Out-Null
+        Initialize-MusicServerDatabase -DbPath $DbPath -SqliteExe (Get-TestSqliteExecutable) | Out-Null
     }
 
     AfterEach {
