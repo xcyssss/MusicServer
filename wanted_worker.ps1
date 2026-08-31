@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     异步处理 Wanted Queue：本地匹配 -> 精确候选 -> 其他 Provider -> Bilibili 搜索兜底。
 .PARAMETER Once
@@ -314,8 +314,11 @@ function Bind-LocalTrack {
     $Path = Move-LegacyDailyMixToLibrary -Path $Path
     $songId = Get-NavidromeSongIdForPath -Config $Config -Path $Path
     $Wanted.selected_candidate = [pscustomobject]@{ provider = 'local'; path = $Path }
-    if (-not (Set-QueueState -Wanted $Wanted -State 'LOCAL')) { Complete-WantedCancellation -Wanted $Wanted; return }
-    Set-CanonicalTrackStatusForWantedDb -TrackId $Track.id -WorkerId $WorkerId -WantedState 'LOCAL' -Status 'LOCAL' -LocalSongId $songId | Out-Null
+    $finResult = Finalize-WantedLocalDb -TrackId $Track.id -WorkerId $WorkerId -ExpectedState 'RESOLVING' -LocalSongId $songId
+    if (-not $finResult.Success) {
+        Write-Host "  [error] $([string]$Wanted.title)：LOCAL finalization failed: $($finResult.Reason)" -ForegroundColor Red
+        return
+    }
     Add-LegacyAcceptedRow -Track $Track -Path $Path
     Write-MusicServerEventDb -TrackId $Track.id -Provider 'local' -EventType 'LOCAL_BOUND' -Result 'SUCCESS' -Message "path=$Path; navidrome_id=$songId"
 }
@@ -349,8 +352,14 @@ function Complete-DownloadedTrack {
 
     [void](Write-TrackLyrics -Track $Track -AudioPath $target)
     $Wanted.selected_candidate = [pscustomobject]@{ provider = $Candidate.provider; url = $Candidate.url; score = $Score.score }
-    if (-not (Set-QueueState -Wanted $Wanted -State 'LOCAL')) { Complete-WantedCancellation -Wanted $Wanted; return }
-    Set-CanonicalTrackStatusForWantedDb -TrackId $Track.id -WorkerId $WorkerId -WantedState 'LOCAL' -Status 'LOCAL' | Out-Null
+    $finResult = Finalize-WantedLocalDb -TrackId $Track.id -WorkerId $WorkerId -ExpectedState 'VALIDATING'
+    if (-not $finResult.Success) {
+        Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
+        $targetLrc = [IO.Path]::ChangeExtension($target, '.lrc')
+        Remove-Item -LiteralPath $targetLrc -Force -ErrorAction SilentlyContinue
+        Complete-WantedCancellation -Wanted $Wanted
+        return
+    }
     Add-LegacyAcceptedRow -Track $Track -Path $target
     Write-MusicServerEventDb -TrackId $Track.id -Provider $Candidate.provider -EventType 'LOCAL' -Result 'SUCCESS' -Message "path=$target; duration=$($Validation.Duration); duration_diff=$($Validation.DurationDiff); allowed_diff=$($Validation.AllowedDiff)"
     if ((Test-Path -LiteralPath $Config.NdExe) -and (Test-Path -LiteralPath $Config.NdConfig)) {

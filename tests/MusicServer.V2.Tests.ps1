@@ -391,4 +391,80 @@ UPDATE wanted_queue SET lease_expires_epoch = @exp WHERE track_id = @tid;
         $stats = Get-DbStats
         $stats.canonical_tracks | Should Be 1
     }
+
+    # === Atomic Finalization Tests ===
+
+    It 'atomically sets both queue and canonical to LOCAL on finalization' {
+        $track = New-CanonicalTrack -Title 'FinOK' -Artist 'A' -Status 'WANTED'
+        Save-CanonicalTrackDb -Track $track | Out-Null
+        $now = [DateTimeOffset]::UtcNow.AddMinutes(30)
+        Invoke-MusicServerParamNonQuery -Template @"
+INSERT INTO wanted_queue (track_id, wanted_id, state, attempt_count, max_attempts, claimed_by, lease_expires_epoch, revision, created_at, updated_at)
+VALUES (@tid, @wid, 'VALIDATING', 0, 5, @worker, @lease, 1, datetime('now'), datetime('now'))
+"@ -Params @{ tid = $track.id; wid = "w_$($track.id)"; worker = 'test-worker'; lease = [long]$now.ToUnixTimeSeconds() }
+        $result = Finalize-WantedLocalDb -TrackId $track.id -WorkerId 'test-worker' -ExpectedState 'VALIDATING'
+        $result.Success | Should Be $true
+        $q = Get-WantedItemDb -TrackId $track.id
+        [string]$q.state | Should Be 'LOCAL'
+        $c = Get-CanonicalTrackDb -TrackId $track.id
+        [string]$c.status | Should Be 'LOCAL'
+    }
+
+    It 'rolls back both tables when canonical update is impossible (injected failure at step 2)' {
+        $track = New-CanonicalTrack -Title 'FinRollback' -Artist 'A' -Status 'WANTED'
+        Save-CanonicalTrackDb -Track $track | Out-Null
+        $now = [DateTimeOffset]::UtcNow.AddMinutes(30)
+        Invoke-MusicServerParamNonQuery -Template @"
+INSERT INTO wanted_queue (track_id, wanted_id, state, attempt_count, max_attempts, claimed_by, lease_expires_epoch, revision, created_at, updated_at)
+VALUES (@tid, @wid, 'VALIDATING', 0, 5, @worker, @lease, 1, datetime('now'), datetime('now'))
+"@ -Params @{ tid = $track.id; wid = "w_$($track.id)"; worker = 'test-worker'; lease = [long]$now.ToUnixTimeSeconds() }
+        $result = Finalize-WantedLocalDb -TrackId $track.id -WorkerId 'test-worker' -ExpectedState 'VALIDATING' -FailAfterStep 1
+        $result.Success | Should Be $false
+        $q = Get-WantedItemDb -TrackId $track.id
+        [string]$q.state | Should Be 'VALIDATING'
+        $c = Get-CanonicalTrackDb -TrackId $track.id
+        [string]$c.status | Should Be 'WANTED'
+    }
+
+    It 'rejects finalization when queue is CANCEL_REQUESTED' {
+        $track = New-CanonicalTrack -Title 'FinCancel' -Artist 'A' -Status 'WANTED'
+        Save-CanonicalTrackDb -Track $track | Out-Null
+        Invoke-MusicServerParamNonQuery -Template @"
+INSERT INTO wanted_queue (track_id, wanted_id, state, attempt_count, max_attempts, claimed_by, revision, created_at, updated_at)
+VALUES (@tid, @wid, 'CANCEL_REQUESTED', 0, 5, '', 2, datetime('now'), datetime('now'))
+"@ -Params @{ tid = $track.id; wid = "w_$($track.id)" }
+        $result = Finalize-WantedLocalDb -TrackId $track.id -WorkerId 'test-worker' -ExpectedState 'VALIDATING'
+        $result.Success | Should Be $false
+        $result.Reason | Should Be 'CANCEL_REQUESTED'
+    }
+
+    It 'rejects finalization when lease has expired' {
+        $track = New-CanonicalTrack -Title 'FinExpired' -Artist 'A' -Status 'WANTED'
+        Save-CanonicalTrackDb -Track $track | Out-Null
+        $past = [DateTimeOffset]::UtcNow.AddMinutes(-10)
+        Invoke-MusicServerParamNonQuery -Template @"
+INSERT INTO wanted_queue (track_id, wanted_id, state, attempt_count, max_attempts, claimed_by, lease_expires_epoch, revision, created_at, updated_at)
+VALUES (@tid, @wid, 'VALIDATING', 0, 5, @worker, @lease, 1, datetime('now'), datetime('now'))
+"@ -Params @{ tid = $track.id; wid = "w_$($track.id)"; worker = 'test-worker'; lease = [long]$past.ToUnixTimeSeconds() }
+        $result = Finalize-WantedLocalDb -TrackId $track.id -WorkerId 'test-worker' -ExpectedState 'VALIDATING'
+        $result.Success | Should Be $false
+        $result.Reason | Should Be 'LEASE_EXPIRED'
+    }
+
+    It 'supports local-bind path: claim sets RESOLVING, then finalize to LOCAL with local_song_id' {
+        $track = New-CanonicalTrack -Title 'FinLocalBind' -Artist 'A' -Status 'WANTED'
+        Save-CanonicalTrackDb -Track $track | Out-Null
+        Add-WantedItemDb -TrackId $track.id -MaxAttempts 5
+        $claim = Claim-WantedItemDb -TrackId $track.id -WorkerId 'test-worker'
+        $claim.Success | Should Be $true
+        $item = Get-WantedItemDb -TrackId $track.id
+        [string]$item.state | Should Be 'RESOLVING'
+        $result = Finalize-WantedLocalDb -TrackId $track.id -WorkerId 'test-worker' -ExpectedState 'RESOLVING' -LocalSongId 'navidrome_123'
+        $result.Success | Should Be $true
+        $q = Get-WantedItemDb -TrackId $track.id
+        [string]$q.state | Should Be 'LOCAL'
+        $c = Get-CanonicalTrackDb -TrackId $track.id
+        [string]$c.status | Should Be 'LOCAL'
+        [string]$c.local_song_id | Should Be 'navidrome_123'
+    }
 }

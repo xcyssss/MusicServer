@@ -1,4 +1,4 @@
-﻿Set-StrictMode -Version 3.0
+Set-StrictMode -Version 3.0
 
 # MusicServer.State.psm1 - Transactional state layer backed by SQLite
 # Provides: schema, migration, CAS, worker claim/lease, crash recovery,
@@ -309,6 +309,79 @@ WHERE id = @tid
         worker = $WorkerId; now_epoch = $nowEpoch
     } -ReturnChanges
     return ([int]$affected -eq 1)
+}
+
+function Finalize-WantedLocalDb {
+    <#
+    .SYNOPSIS
+      Atomically transition wanted_queue + canonical_tracks to LOCAL in one
+      SQLite transaction.  Eliminates the two-step half-state risk where
+      queue=LOCAL but canonical is still non-LOCAL after a crash.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$TrackId,
+        [Parameter(Mandatory)][string]$WorkerId,
+        [Parameter(Mandatory)][string]$ExpectedState,
+        [string]$LocalSongId = '',
+        [int]$FailAfterStep = 0
+    )
+
+    $item = Get-WantedItemDb -TrackId $TrackId
+    if ($null -eq $item) {
+        return @{ Success = $false; Reason = 'NOT_FOUND' }
+    }
+    if ([string]$item.state -eq 'CANCEL_REQUESTED') {
+        return @{ Success = $false; Reason = 'CANCEL_REQUESTED' }
+    }
+    $nowEpoch = [long][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    if ([string]$item.state -in @('RESOLVING','DOWNLOADING','VALIDATING') -and
+        ($null -ne $item.lease_expires_epoch -and [long]$item.lease_expires_epoch -le $nowEpoch)) {
+        return @{ Success = $false; Reason = 'LEASE_EXPIRED' }
+    }
+
+    $hasLocal = [bool]($PSBoundParameters.ContainsKey('LocalSongId') -and $LocalSongId)
+    $localSongLiteral = if ($hasLocal) { ConvertTo-MusicServerSqlLiteral $LocalSongId } else { "''" }
+
+    $queueSql = @"
+UPDATE wanted_queue
+SET state = 'LOCAL', claimed_by = '', lease_expires_at = NULL,
+    lease_expires_epoch = NULL, revision = revision + 1, updated_at = datetime('now')
+WHERE track_id = $(ConvertTo-MusicServerSqlLiteral $TrackId)
+  AND state = $(ConvertTo-MusicServerSqlLiteral $ExpectedState)
+  AND claimed_by = $(ConvertTo-MusicServerSqlLiteral $WorkerId);
+"@
+
+    $canonicalSql = @"
+UPDATE canonical_tracks
+SET status = 'LOCAL',
+    local_song_id = CASE WHEN $(if ($hasLocal) { '1' } else { '0' }) = 1 THEN $localSongLiteral ELSE local_song_id END,
+    updated_at = datetime('now'), revision = revision + 1
+WHERE id = $(ConvertTo-MusicServerSqlLiteral $TrackId)
+  AND EXISTS (
+      SELECT 1 FROM wanted_queue q
+      WHERE q.track_id = $(ConvertTo-MusicServerSqlLiteral $TrackId)
+        AND q.state = 'LOCAL'
+        AND q.claimed_by = ''
+  );
+"@
+
+    try {
+        Invoke-ApiAtomicSql -Statements @($queueSql, $canonicalSql) -FailAfterStep $FailAfterStep | Out-Null
+    } catch {
+        return @{ Success = $false; Reason = 'TRANSACTION_FAILED'; Error = "$($_.Exception.Message)" }
+    }
+
+    $updated = Get-WantedItemDb -TrackId $TrackId
+    $updatedCanonical = Get-CanonicalTrackDb -TrackId $TrackId
+    if ($updated -and [string]$updated.state -eq 'LOCAL' -and
+        $updatedCanonical -and [string]$updatedCanonical.status -eq 'LOCAL') {
+        return @{
+            Success = $true; Revision = [int]$updated.revision
+            LocalSongId = [string]$updatedCanonical.local_song_id
+        }
+    }
+    return @{ Success = $false; Reason = 'POST_CHECK_FAILED' }
 }
 
 function Convert-DbTrackRow {
