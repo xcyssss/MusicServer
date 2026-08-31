@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     异步处理 Wanted Queue：本地匹配 -> 精确候选 -> 其他 Provider -> Bilibili 搜索兜底。
 .PARAMETER Once

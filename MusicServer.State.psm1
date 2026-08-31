@@ -1,4 +1,4 @@
-Set-StrictMode -Version 3.0
+﻿Set-StrictMode -Version 3.0
 
 # MusicServer.State.psm1 - Transactional state layer backed by SQLite
 # Provides: schema, migration, CAS, worker claim/lease, crash recovery,
