@@ -159,6 +159,13 @@ Describe 'MusicServer Hardening v2 - Legacy Runtime Retirement' {
             $track = New-CanonicalTrack -Title 'Retry Counter' -Artist 'Phase5' -Status 'REMOTE' -DownloadCandidates @()
             Save-CanonicalTrackDb -Track $track | Out-Null
             Add-WantedItemDb -TrackId $track.id -MaxAttempts 3 | Out-Null
+            $blockedUntil = [DateTime]::UtcNow.AddMinutes(5).ToString('o')
+            foreach ($provider in @('bilibili_search', 'bilibili_download')) {
+                $health = Get-ProviderHealthDb -Provider $provider
+                $health.state = 'OPEN'
+                $health.blocked_until = $blockedUntil
+                Save-ProviderHealthDb -Health $health | Out-Null
+            }
 
             $result = Invoke-LegacyRetirementWorker -Root $scratch.Root
 

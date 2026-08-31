@@ -249,6 +249,9 @@ Navidrome DB modification was performed.
   `MusicServer.State.psm1`, `daily_cleanup.ps1`, `wanted_worker.ps1`,
   `tests/MusicServer.LegacyRetirement.Tests.ps1`,
   `HARDENING_V2_REPORT.md`, `RUNTIME_JSON_DEPENDENCY_AUDIT.md`
+- The retry-persistence fixture explicitly seeds a blocked provider circuit, so
+  the test exercises SQLite retry persistence without external network or
+  `yt-dlp` availability.
 - Untouched untracked files: `MusicServer.DesiredStateWorker.psm1`,
   `start_musicserver.ps1`, `stop_musicserver.ps1`
 
