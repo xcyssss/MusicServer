@@ -1,14 +1,35 @@
-# MusicServer Hardening v2 Phase 4 Validation Report
+# MusicServer Hardening v2 Phase 5 Validation Report
 
 ## Environment
 
 - Branch: `review/musicserver-hardening-v2`
-- Base SHA: `fbfd5b5a2fdfe9770e109735df7f078a6b1f79f9`
-- Final code checkpoint SHA: `8b87799649408db5953058d511b9e0e03e0e0cfb`
+- Phase 5 base SHA: `09f798e2755ef70d31e2ba2486339ac2950dce35`
+- Phase 5 checkpoint SHA: provided in the final handoff after commit
 - PowerShell 7: local validation
 - Windows PowerShell 5.1: local validation
 - SQLite: repository-resolved `sqlite3.exe`
 - Test data: fresh scratch roots and scratch databases; production state is read-only audited only
+
+## Phase 5 Legacy Runtime Retirement
+
+The Worker and Cleanup runtime paths now use SQLite as their authoritative
+state source. Queue enumeration, claim, lease renewal, cancellation, retry,
+canonical status, provider health, and events no longer read legacy JSON/CSV.
+Cleanup reads recommendation file metadata and feedback from SQLite. Legacy
+JSON/CSV files remain only as migration inputs, backups, or compatibility
+exports; they cannot override a committed SQLite decision.
+
+The four authority-conflict cases pass: SQLite CANCEL_REQUESTED overrides a
+legacy RESOLVING row, SQLite REMOTE prevents a legacy WANTED row from causing a
+download, SQLite WANTED is claimable with missing legacy JSON, and SQLite
+UNAVAILABLE prevents a legacy RETRY_WAIT from causing a retry.
+
+Migration now reports `SAFE_IDEMPOTENT`, `EXPECTED_LEGACY_OVERLAP`,
+`STALE_LEGACY`, `IDENTITY_AMBIGUITY`, `SEMANTIC_CONFLICT`, and `MALFORMED`
+categories, including skipped-row classification. A rehearsal against a copy
+of the production SQLite snapshot returned `SUCCESS` on the first run and
+`ALREADY_MIGRATED` with `idempotent=True` on the second run. The production
+files were not modified.
 
 ## Recommendation SQLite Migration
 
@@ -67,9 +88,8 @@ The deliberate conflict tests cover:
 3. SQLite recommendation C vs. legacy recommendation D: API recommendation
    reads use SQLite.
 
-`daily_recommend.ps1` has no legacy recommendation JSON/CSV reads. See
-`RUNTIME_JSON_DEPENDENCY_AUDIT.md` for the remaining project-wide worker and
-cleanup dependencies.
+`daily_recommend.ps1` has no legacy recommendation JSON/CSV reads. The Phase 5
+Worker and Cleanup retirement is recorded in the audit below.
 
 ## Migration
 
@@ -82,10 +102,10 @@ and is idempotent through a SQLite marker. Legacy source files are not deleted.
 
 ## Compatibility
 
-Worker CAS/lease semantics were not changed in Phase 4. The worker's SQLite
-claim authority remains intact, but its legacy JSON reads and compatibility
-writes remain a Phase 5 follow-up. The recommendation generator and API are
-SQLite-authoritative within this phase.
+Worker CAS/lease semantics remain intact. The Worker and Cleanup now use
+SQLite-authoritative runtime reads; JSON/CSV outputs are compatibility artifacts
+only. The recommendation generator, API, Worker, and Cleanup are all
+SQLite-authoritative for the migrated state surfaces.
 
 ## Tests
 
@@ -97,33 +117,36 @@ The complete local regression and integration runs are green:
 | Database | 5/5 | 5/5 |
 | V2 | 31/31 | 31/31 |
 | WorkerConcurrency | 4/4 | 4/4 |
+| LegacyRetirement | 9/9 | 9/9 |
 | ApiTransaction | 17/17 | 17/17 |
 | ApiRuntime | 5/5 | not required |
 | Recommendation | 38/38 | 38/38 |
 | Web | 2/2 | not required |
 
-PS7 state-group total: 104/104 (Core, Database, V2, WorkerConcurrency,
-Recommendation, Web). PS7 API total: 22/22 (ApiTransaction, ApiRuntime).
-PS5.1 required Phase 4 total: 119/119 (102 state-group tests plus 17
-ApiTransaction tests; ApiRuntime is not required on PS5.1).
+PS7 state-group total: 113/113 (Core, Database, V2, WorkerConcurrency,
+Recommendation, LegacyRetirement, Web). PS7 API total: 22/22
+(ApiTransaction, ApiRuntime). PS5.1 state-group total: 111/111 (Web is
+excluded because it contains live-runtime tests); PS5.1 API total: 22/22.
 
 Reproducible validation command record (run from the repository root):
 
 ```powershell
-# PS7 state group: Core, Database, V2, WorkerConcurrency, Recommendation, Web
-pwsh -NoProfile -ExecutionPolicy Bypass -Command "Import-Module Pester -RequiredVersion 3.4.0 -Force; `$files=@('.\\tests\\MusicServer.Core.Tests.ps1','.\\tests\\MusicServer.Database.Tests.ps1','.\\tests\\MusicServer.V2.Tests.ps1','.\\tests\\MusicServer.WorkerConcurrency.Tests.ps1','.\\tests\\MusicServer.Recommendation.Tests.ps1','.\\tests\\MusicServer.Web.Tests.ps1'); `$total=0; `$passed=0; `$failed=0; foreach(`$file in `$files){ `$r=if(`$file -like '*Web*'){Invoke-Pester `$file -PassThru -ExcludeTag RequiresLocalRuntime}else{Invoke-Pester `$file -PassThru}; `$total += `$r.TotalCount; `$passed += `$r.PassedCount; `$failed += `$r.FailedCount }; \"PS7 state TOTAL=`$total PASSED=`$passed FAILED=`$failed\""
+# PS7 state group: Core, Database, V2, WorkerConcurrency, Recommendation, LegacyRetirement, Web
+pwsh -NoProfile -ExecutionPolicy Bypass -Command "Import-Module Pester -RequiredVersion 3.4.0 -Force; `$files=@('.\\tests\\MusicServer.Core.Tests.ps1','.\\tests\\MusicServer.Database.Tests.ps1','.\\tests\\MusicServer.V2.Tests.ps1','.\\tests\\MusicServer.WorkerConcurrency.Tests.ps1','.\\tests\\MusicServer.Recommendation.Tests.ps1','.\\tests\\MusicServer.LegacyRetirement.Tests.ps1','.\\tests\\MusicServer.Web.Tests.ps1'); `$total=0; `$passed=0; `$failed=0; foreach(`$file in `$files){ `$r=if(`$file -like '*Web*'){Invoke-Pester `$file -PassThru -ExcludeTag RequiresLocalRuntime}else{Invoke-Pester `$file -PassThru}; `$total += `$r.TotalCount; `$passed += `$r.PassedCount; `$failed += `$r.FailedCount }; \"PS7 state TOTAL=`$total PASSED=`$passed FAILED=`$failed\""
 
 # PS7 API group
 pwsh -NoProfile -ExecutionPolicy Bypass -Command "Import-Module Pester -RequiredVersion 3.4.0 -Force; `$total=0; `$passed=0; `$failed=0; foreach(`$file in @('.\\tests\\MusicServer.ApiTransaction.Tests.ps1','.\\tests\\MusicServer.ApiRuntime.Tests.ps1')){ `$r=Invoke-Pester `$file -PassThru; `$total += `$r.TotalCount; `$passed += `$r.PassedCount; `$failed += `$r.FailedCount }; \"PS7 API TOTAL=`$total PASSED=`$passed FAILED=`$failed\""
 
-# Windows PowerShell 5.1 required group: state group without Web plus ApiTransaction
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Import-Module Pester -RequiredVersion 3.4.0 -Force; `$files=@('.\\tests\\MusicServer.Core.Tests.ps1','.\\tests\\MusicServer.Database.Tests.ps1','.\\tests\\MusicServer.V2.Tests.ps1','.\\tests\\MusicServer.WorkerConcurrency.Tests.ps1','.\\tests\\MusicServer.Recommendation.Tests.ps1','.\\tests\\MusicServer.ApiTransaction.Tests.ps1'); `$total=0; `$passed=0; `$failed=0; foreach(`$file in `$files){ `$r=Invoke-Pester `$file -PassThru; `$total += `$r.TotalCount; `$passed += `$r.PassedCount; `$failed += `$r.FailedCount }; \"PS5.1 required TOTAL=`$total PASSED=`$passed FAILED=`$failed\""
+# Windows PowerShell 5.1 state group without live-runtime Web tests
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Import-Module Pester -RequiredVersion 3.4.0 -Force; `$files=@('.\\tests\\MusicServer.Core.Tests.ps1','.\\tests\\MusicServer.Database.Tests.ps1','.\\tests\\MusicServer.V2.Tests.ps1','.\\tests\\MusicServer.WorkerConcurrency.Tests.ps1','.\\tests\\MusicServer.Recommendation.Tests.ps1','.\\tests\\MusicServer.LegacyRetirement.Tests.ps1'); `$total=0; `$passed=0; `$failed=0; foreach(`$file in `$files){ `$r=Invoke-Pester `$file -PassThru; `$total += `$r.TotalCount; `$passed += `$r.PassedCount; `$failed += `$r.FailedCount }; \"PS5.1 state TOTAL=`$total PASSED=`$passed FAILED=`$failed\""
+
+# Windows PowerShell 5.1 API group
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Import-Module Pester -RequiredVersion 3.4.0 -Force; `$total=0; `$passed=0; `$failed=0; foreach(`$file in @('.\\tests\\MusicServer.ApiTransaction.Tests.ps1','.\\tests\\MusicServer.ApiRuntime.Tests.ps1')){ `$r=Invoke-Pester `$file -PassThru; `$total += `$r.TotalCount; `$passed += `$r.PassedCount; `$failed += `$r.FailedCount }; \"PS5.1 API TOTAL=`$total PASSED=`$passed FAILED=`$failed\""
 ```
 
-Captured totals: PS7 state `TOTAL=104 PASSED=104 FAILED=0`, PS7 API
-`TOTAL=22 PASSED=22 FAILED=0`, and PS5.1 required
-`TOTAL=119 PASSED=119 FAILED=0`. The Recommendation command separately
-returned `TOTAL=38 PASSED=38 FAILED=0` on both shells. The same validation run
+Captured totals: PS7 state `TOTAL=113 PASSED=113 FAILED=0`, PS7 API
+`TOTAL=22 PASSED=22 FAILED=0`, PS5.1 state `TOTAL=111 PASSED=111 FAILED=0`,
+and PS5.1 API `TOTAL=22 PASSED=22 FAILED=0`. The same validation run
 included the real scratch HTTP API integration, a zero-count recommendation
 DryRun with an unchanged database hash, and the production
 `Invoke-MusicServerMigration -DryRun` read-only audit.
@@ -153,20 +176,18 @@ duplicate display handling.
 
 ## Runtime JSON Dependency Audit
 
-Recommendation generator and API authoritative JSON reads: 0 after activation.
-Project-wide remaining authoritative legacy reads are listed in
-`RUNTIME_JSON_DEPENDENCY_AUDIT.md`, chiefly `wanted_worker.ps1` and
-`daily_cleanup.ps1`.
+Authoritative Worker, Cleanup, recommendation, and API JSON/CSV reads: 0 for
+runtime state decisions. Remaining reads are migration or compatibility helper
+surfaces and the provider HTTP response parser. See
+`RUNTIME_JSON_DEPENDENCY_AUDIT.md` for the exact inventory.
 
-## Worker Legacy JSON Mirror
+## Worker/Cleanup Compatibility Mirror
 
-- read: yes, still present in the existing worker path
-- write: yes, compatibility state and accepted CSV writes remain
-- authoritative: SQLite is authoritative for claim/lease/CAS, but worker
-  content/queue fallback reads are not yet fully SQLite-only
-- recommendation-related: indirectly, through legacy canonical/wanted state
-
-This is intentionally reported as a remaining risk, not as a write-only mirror.
+- read: no legacy runtime-state reads
+- write: compatibility JSON/CSV exports remain where existing callers need them
+- authoritative: SQLite owns queue, canonical, feedback, provider, and event state
+- conflict behavior: contradictory legacy rows are ignored; the four authority
+  conflict cases are covered by `MusicServer.LegacyRetirement.Tests.ps1`
 
 ## Performance
 
@@ -193,7 +214,12 @@ display=20, explicit_likes=2, skipped=85, and conflicts=186. The existing DB
 counts were canonical=81, daily=81, feedback=0, wanted=2, provider=1, and
 events=1. `legacy_ignored` recorded 24 invalid lyrics rows and one legacy
 `bilibili` provider. It created no backup and performed no writes; the
-conflict report retained existing SQLite daily/provider state.
+conflict report retained existing SQLite daily/provider state. Conflict
+categories were `SAFE_IDEMPOTENT=162`, `EXPECTED_LEGACY_OVERLAP=20`,
+`STALE_LEGACY=4`, `IDENTITY_AMBIGUITY=0`, `SEMANTIC_CONFLICT=0`, and
+`MALFORMED=0`. The 85 merge skips were classified as
+`SAFE_IDEMPOTENT=81` and `STALE_LEGACY=4`; the 24 malformed rows were
+reported separately as `MALFORMED`.
 No production DB write, runtime activation, JSON deletion, music deletion, or
 Navidrome DB modification was performed.
 
@@ -205,9 +231,10 @@ Navidrome DB modification was performed.
   17/17.
 - `COMPATIBILITY_BUG`: newly written PowerShell files require UTF-8 BOM for
   Windows PowerShell 5.1 to parse non-ASCII fixtures correctly; fixed in the
-  Phase 4 files.
-- `LEGACY_STATE_ISSUE`: worker and cleanup still have legacy JSON/CSV runtime
-  reads; documented and deferred rather than silently misclassified.
+  Phase 4/5 files.
+- `LEGACY_STATE_ISSUE`: Phase 4 identified Worker/Cleanup legacy runtime reads;
+  Phase 5 removed those reads from the runtime decision paths and retained only
+  migration/compatibility surfaces.
 
 ## Changes Made
 
@@ -215,45 +242,47 @@ Navidrome DB modification was performed.
   (`Integrate SQLite recommendation state`)
 - Correctness follow-up checkpoint: `8b87799649408db5953058d511b9e0e03e0e0cfb`
   (`Harden recommendation migration boundaries`)
-- Changed source/test/docs files: `.github/workflows/core-tests.yml`,
-  `MusicServer.Database.psm1`, `MusicServer.Migration.psm1`,
-  `MusicServer.State.psm1`, `daily_recommend.ps1`, `music_api.ps1`,
-  `tests/MusicServer.Core.Tests.ps1`,
-  `tests/MusicServer.Recommendation.Tests.ps1`,
+- Phase 5 checkpoint: this report is included in
+  `Retire legacy runtime state reads and harden migration`.
+- Phase 5 source/test/docs files: `.github/workflows/core-tests.yml`,
+  `MusicServer.Migration.psm1`, `MusicServer.Providers.psm1`,
+  `MusicServer.State.psm1`, `daily_cleanup.ps1`, `wanted_worker.ps1`,
+  `tests/MusicServer.LegacyRetirement.Tests.ps1`,
   `HARDENING_V2_REPORT.md`, `RUNTIME_JSON_DEPENDENCY_AUDIT.md`
 - Untouched untracked files: `MusicServer.DesiredStateWorker.psm1`,
   `start_musicserver.ps1`, `stop_musicserver.ps1`
 
 ## Remaining Risks
 
-- Worker JSON read retirement is still required before claiming whole-project
-  SQLite-only runtime.
-- `daily_cleanup.ps1` still owns operational accepted/rejected CSV workflow.
+- Compatibility JSON/CSV exports remain by design; they are not runtime state
+  inputs and should be removed only in a separately authorized cleanup.
+- Production migration activation remains intentionally pending.
 - Real successful Bilibili download E2E remains external/provider dependent and
-  is outside metadata-only Phase 4.
+  is still affected by HTTP 412/rate-limit conditions.
 
 ## Final Verdict
 
-PASS_WITH_WARNINGS — the Phase 4 recommendation generator/API migration is
-complete and SQLite-authoritative, with all scoped checks green. The project
-as a whole is not yet JSON-free: the existing worker and daily cleanup still
-have legacy reads, as documented in the audit.
-No production migration activation, legacy JSON deletion, merge, push, or PR
-creation was performed.
+PASS_WITH_WARNINGS — Phase 5 legacy runtime-read retirement and migration
+hardening are complete with all scoped checks green. SQLite is authoritative
+for the migrated runtime state; compatibility files remain as exports and
+migration inputs. Production migration activation and successful Bilibili
+download E2E remain intentionally pending.
+No legacy JSON deletion or main merge was performed.
 
-Answers to the Phase 4 acceptance questions:
+Answers to the Phase 5 acceptance questions:
 
-1. Phase 4: COMPLETE for the scoped recommendation/API migration; warning for
-   the deferred worker/cleanup retirement.
-2. Recommendation generator and API runtime: SQLite-authoritative; whole
-   project: not yet.
+1. Phase 5: COMPLETE; Worker, Cleanup, API, and recommendation runtime state
+   decisions are SQLite-authoritative.
+2. Runtime state authority: SQLite; JSON/CSV remain compatibility/migration
+   artifacts only.
 3. Neutral recommendation history as seed: no longer used.
 4. 14-day cooldown: SQLite-authoritative for the recommender.
 5. accepted.csv and recommendation JSON: migration input only after activation,
    not runtime decision sources for this path.
-6. Authoritative JSON/CSV reads remain in worker, cleanup, Core compatibility,
-   and legacy provider-health paths.
-7. Worker JSON mirror: not write-only yet; it still has legacy reads.
+6. Runtime authoritative JSON/CSV reads remain: none in the migrated paths;
+   Core compatibility and migration readers remain intentionally available.
+7. Worker/Cleanup JSON mirror: write-only compatibility behavior remains where
+   needed; it cannot override SQLite.
 8. Production migration activation: ready for a separately authorized change,
    but not activated here.
 9. Full v2 E2E: metadata/state/API E2E is green; successful Bilibili download

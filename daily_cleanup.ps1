@@ -27,7 +27,6 @@ $DailyDir  = "$MusicDir\DailyMix"
 $DataDir   = "$Root\DailyMix_data"
 $Blacklist = "$DataDir\rejected.csv"
 $Accepted  = "$DataDir\accepted.csv"
-$History   = "$DataDir\history.csv"
 $NdDb      = "$Root\Navidrome\Data\navidrome.db"
 $Sqlite    = 'sqlite3'
 $TodayM3u  = "$MusicDir\每日推荐.m3u"
@@ -36,6 +35,14 @@ $NavidromeExe = "$Root\Navidrome\bin\navidrome.exe"
 $NavidromeCfg = "$Root\Navidrome\navidrome.toml"
 
 . "$Root\lib_playlist.ps1"
+Import-Module (Join-Path $Root 'MusicServer.Core.psm1') -Force
+Import-Module (Join-Path $Root 'MusicServer.Database.psm1') -Force
+Import-Module (Join-Path $Root 'MusicServer.State.psm1') -Force
+$Config = New-MusicServerConfig -Root $Root
+Initialize-MusicServerState -Config $Config
+Initialize-MusicServerDatabase -DbPath (Join-Path $Config.StateDir 'musicserver.db') -SqliteExe $Config.Sqlite
+Initialize-MusicServerSchema
+$Sqlite = $Config.Sqlite
 
 function Write-Step($m) { Write-Host "`n>>> $m" -ForegroundColor Cyan }
 
@@ -75,12 +82,10 @@ if (Test-Path -LiteralPath $NdDb) {
 }
 Write-Host "  全库星标数: $($starredPaths.Count)" -ForegroundColor Green
 
-# ---------- 读取历史，拿网易云 ID ----------
-$histMap = @{}
-if (Test-Path -LiteralPath $History) {
-    Import-Csv $History -Encoding UTF8 | ForEach-Object {
-        if ($_.File) { $histMap[$_.File] = $_ }
-    }
+# ---------- 从 SQLite 获取日推文件元数据 ----------
+$fileMap = @{}
+foreach ($row in @(Get-RecommendationFilesDb)) {
+    if ($row.file_name) { $fileMap[[string]$row.file_name] = $row }
 }
 
 $today = Get-Date -Format 'yyyy-MM-dd'
@@ -88,7 +93,7 @@ $keepList = @()
 $dropList = @()
 
 foreach ($f in $files) {
-    $meta = $histMap[$f.Name]
+    $meta = $fileMap[$f.Name]
     # 当天下载的先不动，给你时间听
     if ($meta -and $meta.Date -eq $today -and $KeepDays -ge 1) {
         Write-Host ("  [今日] {0} — 暂不处理" -f $f.BaseName) -ForegroundColor DarkGray
@@ -117,33 +122,58 @@ if ($keepList.Count -gt 0) {
     Write-Step "把喜欢的歌移入主音乐库"
     $accRows = @()
     foreach ($k in $keepList) {
+        $trackId = if ($k.Meta -and $k.Meta.track_id) { [string]$k.Meta.track_id } else { Get-CanonicalTrackId -Title $k.File.BaseName -Artist '' }
+        $title = if ($k.Meta) { [string]$k.Meta.title } else { $k.File.BaseName }
+        $artist = if ($k.Meta) { [string]$k.Meta.artist } else { '' }
+        $neteaseId = if ($k.Meta) { [string]$k.Meta.netease_id } else { '' }
+        $acceptedAt = Get-Date -Format 'yyyy-MM-dd'
+        $fileDate = if ($k.Meta) { [string]$k.Meta.date } else { $acceptedAt }
+        $album = if ($k.Meta) { [string]$k.Meta.album } else { '' }
+        $duration = if ($k.Meta) { [int]$k.Meta.duration } else { 0 }
+        $seedSource = if ($k.Meta) { [string]$k.Meta.seed_source } else { 'daily_cleanup' }
+        $acceptedValue = ConvertTo-Json -InputObject ([ordered]@{
+                legacy_key = "cleanup_accepted:$($k.File.Name):$trackId"
+                title = $title; artist = $artist; netease_id = $neteaseId; file = [string]$k.File.Name
+                accepted_at = $acceptedAt; positive = $true
+            }) -Compress -Depth 10
+        try {
+            # SQLite is committed before the irreversible filesystem action.
+            # A failed compatibility export or later retry cannot undo this fact.
+            Write-FeedbackIfAbsentDb -TrackId $trackId -FeedbackType 'ACCEPTED' `
+                -Source 'daily_cleanup' -Value $acceptedValue | Out-Null
+            Save-RecommendationFileDb -FileName ([string]$k.File.Name) -TrackId $trackId `
+                -Date $fileDate `
+                -NeteaseId $neteaseId -Title $title -Artist $artist `
+                -Album $album -Duration $duration -SeedSource $seedSource | Out-Null
+        } catch {
+            throw "SQLite acceptance failed for $($k.File.Name): $($_.Exception.Message)"
+        }
         $dest = Join-Path $MusicDir $k.File.Name
         if (Test-Path -LiteralPath $dest) {
             Write-Host ("  主库已有同名，跳过: {0}" -f $k.File.Name) -ForegroundColor DarkGray
         } else {
-            Move-Item -LiteralPath $k.File.FullName -Destination $dest -Force
+            Move-Item -LiteralPath $k.File.FullName -Destination $dest -Force -ErrorAction Stop
             # 歌词一起搬
             $lrc = [System.IO.Path]::ChangeExtension($k.File.FullName, '.lrc')
             if (Test-Path -LiteralPath $lrc) {
-                Move-Item -LiteralPath $lrc -Destination ([System.IO.Path]::ChangeExtension($dest, '.lrc')) -Force
+                Move-Item -LiteralPath $lrc -Destination ([System.IO.Path]::ChangeExtension($dest, '.lrc')) -Force -ErrorAction Stop
             }
             Write-Host ("  移入: {0}" -f $k.File.BaseName) -ForegroundColor Green
         }
-        if ($k.Meta) {
-            $accRows += [PSCustomObject]@{
-                AcceptedAt = (Get-Date -Format 'yyyy-MM-dd')
-                NeteaseId  = $k.Meta.NeteaseId
-                Title      = $k.Meta.Title
-                Artist     = $k.Meta.Artist
-                File       = $k.File.Name
-            }
+        $accRows += [PSCustomObject]@{
+            AcceptedAt = $acceptedAt; NeteaseId = $neteaseId
+            Title = $title; Artist = $artist; File = $k.File.Name
         }
     }
     if ($accRows.Count -gt 0) {
-        if (Test-Path -LiteralPath $Accepted) {
-            $accRows | Export-Csv -Path $Accepted -NoTypeInformation -Encoding UTF8 -Append
-        } else {
-            $accRows | Export-Csv -Path $Accepted -NoTypeInformation -Encoding UTF8
+        try {
+            if (Test-Path -LiteralPath $Accepted) {
+                $accRows | Export-Csv -Path $Accepted -NoTypeInformation -Encoding UTF8 -Append -ErrorAction Stop
+            } else {
+                $accRows | Export-Csv -Path $Accepted -NoTypeInformation -Encoding UTF8 -ErrorAction Stop
+            }
+        } catch {
+            Write-Warning "LEGACY_WRITE_ONLY_COMPAT accepted.csv export failed: $($_.Exception.Message)"
         }
         Write-Host ("  已记入 accepted.csv ({0} 条)" -f $accRows.Count) -ForegroundColor Green
     }
@@ -155,17 +185,13 @@ if ($dropList.Count -gt 0) {
     $rejRows = @()
     foreach ($d in $dropList) {
         $lrc = [System.IO.Path]::ChangeExtension($d.File.FullName, '.lrc')
-        Remove-Item -LiteralPath $d.File.FullName -Force -EA SilentlyContinue
-        if (Test-Path -LiteralPath $lrc) { Remove-Item -LiteralPath $lrc -Force -EA SilentlyContinue }
-        Write-Host ("  删除: {0}" -f $d.File.BaseName) -ForegroundColor DarkYellow
-
         if ($d.Meta) {
             $rejRows += [PSCustomObject]@{
                 RejectedAt = (Get-Date -Format 'yyyy-MM-dd')
-                NeteaseId  = $d.Meta.NeteaseId
-                Title      = $d.Meta.Title
-                Artist     = $d.Meta.Artist
-                FromSeed   = $d.Meta.FromSeed
+                NeteaseId  = $d.Meta.netease_id
+                Title      = $d.Meta.title
+                Artist     = $d.Meta.artist
+                FromSeed   = $d.Meta.seed_source
             }
         } else {
             $rejRows += [PSCustomObject]@{
@@ -176,11 +202,34 @@ if ($dropList.Count -gt 0) {
                 FromSeed   = ''
             }
         }
+        $rejectedTrackId = if ($d.Meta -and $d.Meta.track_id) { [string]$d.Meta.track_id } else { Get-CanonicalTrackId -Title $rejRows[-1].Title -Artist $rejRows[-1].Artist }
+        if ($rejectedTrackId) {
+            $rejectedValue = ConvertTo-Json -InputObject ([ordered]@{
+                    legacy_key = "cleanup_rejected:$($d.File.Name):$rejectedTrackId"
+                    title = [string]$rejRows[-1].Title; artist = [string]$rejRows[-1].Artist
+                    netease_id = [string]$rejRows[-1].NeteaseId; file = [string]$d.File.Name
+                    rejected_at = (Get-Date -Format 'yyyy-MM-dd'); positive = $false
+                }) -Compress -Depth 10
+            try {
+                # Commit the SQLite blacklist before the irreversible delete.
+                Write-FeedbackIfAbsentDb -TrackId $rejectedTrackId -FeedbackType 'REJECTED' `
+                    -Source 'daily_cleanup' -Value $rejectedValue | Out-Null
+            } catch {
+                throw "SQLite rejection failed for $($d.File.Name): $($_.Exception.Message)"
+            }
+        }
+        Remove-Item -LiteralPath $d.File.FullName -Force -ErrorAction Stop
+        if (Test-Path -LiteralPath $lrc) { Remove-Item -LiteralPath $lrc -Force -ErrorAction Stop }
+        Write-Host ("  删除: {0}" -f $d.File.BaseName) -ForegroundColor DarkYellow
     }
-    if (Test-Path -LiteralPath $Blacklist) {
-        $rejRows | Export-Csv -Path $Blacklist -NoTypeInformation -Encoding UTF8 -Append
-    } else {
-        $rejRows | Export-Csv -Path $Blacklist -NoTypeInformation -Encoding UTF8
+    try {
+        if (Test-Path -LiteralPath $Blacklist) {
+            $rejRows | Export-Csv -Path $Blacklist -NoTypeInformation -Encoding UTF8 -Append -ErrorAction Stop
+        } else {
+            $rejRows | Export-Csv -Path $Blacklist -NoTypeInformation -Encoding UTF8 -ErrorAction Stop
+        }
+    } catch {
+        Write-Warning "LEGACY_WRITE_ONLY_COMPAT rejected.csv export failed: $($_.Exception.Message)"
     }
     Write-Host ("  已记入 rejected.csv ({0} 条，永不再推)" -f $rejRows.Count) -ForegroundColor Yellow
 }
@@ -191,12 +240,12 @@ Write-Step "重建播放列表"
 # 「每日推荐」= DailyMix 里剩下的（今天还没清理的）
 $remain = @(Get-ChildItem -LiteralPath $DailyDir -Filter *.mp3 -EA SilentlyContinue)
 $todayTracks = foreach ($f in $remain) {
-    $m = $histMap[$f.Name]
+    $m = $fileMap[$f.Name]
     @{
         File     = $f.FullName
-        Title    = if ($m) { $m.Title } else { $f.BaseName }
-        Artist   = if ($m) { $m.Artist } else { '' }
-        Duration = if ($m) { $m.Duration } else { 0 }
+        Title    = if ($m) { $m.title } else { $f.BaseName }
+        Artist   = if ($m) { $m.artist } else { '' }
+        Duration = if ($m) { $m.duration } else { 0 }
     }
 }
 $n1 = Write-M3u -Path $TodayM3u -Name "每日推荐 $(Get-Date -Format 'MM-dd')" -Tracks @($todayTracks) `
@@ -205,14 +254,13 @@ Write-Host ("  每日推荐: {0} 首" -f $n1) -ForegroundColor Green
 
 # 「日推精选」= 历史上所有点过 ♥ 并已移入主库的歌
 $keepTracks = @()
-if (Test-Path -LiteralPath $Accepted) {
-    $seen = New-Object System.Collections.Generic.HashSet[string]
-    foreach ($a in (Import-Csv $Accepted -Encoding UTF8)) {
-        if (-not $a.File -or -not $seen.Add($a.File)) { continue }
-        $p = Join-Path $MusicDir $a.File
-        if (-not (Test-Path -LiteralPath $p)) { continue }
-        $keepTracks += @{ File = $p; Title = $a.Title; Artist = $a.Artist; Duration = 0 }
-    }
+$seen = New-Object System.Collections.Generic.HashSet[string]
+foreach ($feedback in @(Get-RecommendationFeedbackDb -FeedbackType 'ACCEPTED')) {
+    $a = Convert-RecommendationFeedbackValue -Value ([string]$feedback.value)
+    if (-not $a -or -not $a.file -or -not $seen.Add([string]$a.file)) { continue }
+    $p = Join-Path $MusicDir ([string]$a.file)
+    if (-not (Test-Path -LiteralPath $p)) { continue }
+    $keepTracks += @{ File = $p; Title = [string]$a.title; Artist = [string]$a.artist; Duration = 0 }
 }
 $n2 = Write-M3u -Path $KeepM3u -Name '日推精选' -Tracks @($keepTracks) `
     -Comment "所有点过 ♥ 的日推歌曲，更新于 $(Get-Date -Format 'yyyy-MM-dd HH:mm')"
@@ -235,7 +283,7 @@ Write-Host ""
 Write-Host "==================== 清理完成 ====================" -ForegroundColor Cyan
 Write-Host ("  保留: {0} 首（已移入主库）" -f $keepList.Count) -ForegroundColor Green
 Write-Host ("  删除: {0} 首（已入黑名单）" -f $dropList.Count) -ForegroundColor Yellow
-$totalAcc = if (Test-Path -LiteralPath $Accepted) { (Import-Csv $Accepted -Encoding UTF8).Count } else { 0 }
-$totalRej = if (Test-Path -LiteralPath $Blacklist) { (Import-Csv $Blacklist -Encoding UTF8).Count } else { 0 }
+$totalAcc = @(Get-RecommendationFeedbackDb -FeedbackType 'ACCEPTED').Count
+$totalRej = @(Get-RecommendationFeedbackDb -FeedbackType 'REJECTED').Count
 Write-Host ("  累计喜欢: {0} | 累计拒绝: {1}" -f $totalAcc, $totalRej)
 Write-Host "=================================================" -ForegroundColor Cyan

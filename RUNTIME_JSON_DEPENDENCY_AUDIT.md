@@ -1,7 +1,7 @@
 # Runtime JSON/CSV Dependency Audit
 
-Date: 2026-08-30
-Scope: Hardening v2 Phase 4 recommendation-state migration
+Date: 2026-08-31
+Scope: Hardening v2 Phase 5 legacy runtime-read retirement and migration rehearsal
 
 The important distinction in this audit is between a file that is used as a
 runtime decision source and a file that is only retained as a compatibility
@@ -9,7 +9,7 @@ artifact. A migration read is allowed before the SQLite activation marker is
 written. After `migration_markers.source_key = recommendation_state_v2` is
 present, recommendation runtime code must not consult those legacy files.
 
-## Recommendation runtime result
+## Runtime result
 
 | Surface | Runtime authoritative source | Legacy JSON/CSV read after activation |
 |---|---|---:|
@@ -18,6 +18,8 @@ present, recommendation runtime code must not consult those legacy files.
 | `daily_recommend.ps1` cooldown | SQLite `daily_recommendations` | 0 |
 | `music_api.ps1` recommendation list | SQLite `daily_recommendations` + canonical state | 0 |
 | recommendation writes | SQLite transaction; DISPLAY feedback in SQLite | 0 |
+| `wanted_worker.ps1` queue/claim/status/retry/cancellation | SQLite `wanted_queue` + canonical state + provider health/events | 0 |
+| `daily_cleanup.ps1` decision/feedback/playlist metadata | SQLite recommendation files + feedback | 0 |
 | one-time migration | `MusicServer.Migration.psm1` JSON/CSV input | allowed before marker |
 
 `lyrics_report.csv` is also imported as weak `LIBRARY_FALLBACK` feedback, so
@@ -29,34 +31,32 @@ startup; API restart is therefore not a legacy-state write boundary.
 
 ## Inventory
 
-### A — authoritative runtime reads remaining
+### A — remaining reader surfaces (not runtime authority)
 
-These are known remaining reads and are intentionally not hidden behind the
-Phase 4 recommendation claim:
+These are remaining compatibility or migration reads, not runtime state
+decisions for the migrated Worker/Cleanup paths:
 
 | File | Read | Why it still matters | Planned disposition |
 |---|---|---|---|
-| `wanted_worker.ps1` | `Get-WantedTracks`, `Get-CanonicalTrack`, provider helpers through `MusicServer.Core`/`MusicServer.Providers`; startup `Import-LegacyRecommendationState` | Worker queue CAS/lease is SQLite-authoritative, but this script still uses legacy JSON snapshots for queue/content decisions and fallback guards | Phase 5 worker JSON mirror retirement |
-| `daily_cleanup.ps1` | `history.csv`, `accepted.csv`, `rejected.csv` | Legacy cleanup and playlist workflow still uses CSV metadata | Migrate cleanup bookkeeping to SQLite before production activation |
+| `wanted_worker.ps1` | none for runtime state | Queue enumeration, claim, cancellation, retry, canonical status, provider health, and events use SQLite | Keep compatibility exports only; no legacy runtime reads |
+| `daily_cleanup.ps1` | none for runtime state | Recommendation file metadata, feedback, and playlist selection use SQLite | Keep compatibility CSV exports only |
 | `MusicServer.Core.psm1` | `Read-StateCollection` used by legacy helper surface | Compatibility state API retained for migration/worker callers | Remove callers, then retire helper surface |
-| `MusicServer.Providers.psm1` | legacy provider-health helpers read/write `providers.json` | Used by the legacy worker path | Move worker provider health reads fully to `provider_health` |
+| `MusicServer.Providers.psm1` | HTTP search response `ConvertFrom-Json` only | Provider health reads/writes use SQLite; HTTP payload parsing is not state authority | Retain HTTP response parsing |
 
-Therefore the project as a whole does still contain authoritative JSON/CSV
-runtime reads. Phase 4's narrower recommendation generator and API runtime
-claim is SQLite-only; this audit does not claim the worker or cleanup scripts
-are already migrated.
+The remaining JSON/CSV reads in the table are compatibility/migration helper
+surfaces, not Worker/Cleanup runtime decisions. SQLite is the authoritative
+runtime source for the migrated surfaces.
 
 ### B — compatibility writes
 
 | File/surface | Artifact | Role |
 |---|---|---|
-| `wanted_worker.ps1` and Core helpers | `tracks.json`, `wanted.json`, `recommendations.json`, `recommendation_history.json`, `events.jsonl` | Existing worker/UI compatibility mirror; not part of daily recommendation runtime |
-| `wanted_worker.ps1` | `accepted.csv` | Existing cleanup/recommendation compatibility output after localization |
+| `wanted_worker.ps1` and Core helpers | legacy JSON/event exports where enabled | Compatibility/export artifacts; never read to decide runtime state |
+| `wanted_worker.ps1` | `accepted.csv` | Compatibility output after a new SQLite ACCEPTED fact |
 | `daily_cleanup.ps1` | `accepted.csv`, `rejected.csv` | Existing operational cleanup output |
 
-The worker's current writes are compatibility writes, but its current reads are
-still listed in category A above. It is not yet accurate to describe the
-worker as write-only compatibility.
+These files are optional compatibility artifacts. A failed or stale export
+does not change the SQLite decision that has already been committed.
 
 ### C — migration input
 
@@ -71,6 +71,7 @@ is absent:
 - `DailyMix_data/state/providers.json`
 - `DailyMix_data/accepted.csv`
 - `DailyMix_data/rejected.csv`
+- `DailyMix_data/history.csv`
 - `lyrics_report.csv`
 
 Malformed rows are reported and skipped where possible. The imported data is
@@ -82,8 +83,9 @@ without rereading those sources.
 
 The migration keeps a non-destructive timestamped backup of legacy source files
 under `DailyMix_data/state/migration_backup_*`. The source files are never
-deleted. Existing `today.csv`/JSON compatibility behavior remains available to
-legacy callers until the worker and cleanup follow-up is completed.
+deleted. Existing JSON/CSV compatibility behavior remains available to legacy
+callers; the files are not runtime state inputs for the migrated Worker/Cleanup
+paths.
 
 ### E — tests/artifacts
 
@@ -97,5 +99,29 @@ git-ignored and must not be committed.
   `Import-LegacyRecommendationState`, or recommendation legacy-file reads.
 - `music_api.ps1` recommendation routes use `Get-TodayRecommendationsDb` and
   do not call `Read-StateCollection`.
-- `wanted_worker.ps1` was deliberately not refactored in Phase 4; its remaining
-  JSON reads are recorded above rather than misclassified as write-only.
+- `wanted_worker.ps1` contains no legacy state-read calls and uses SQLite for
+  queue, lease, cancellation, retry, canonical status, and event decisions.
+- `daily_cleanup.ps1` contains no legacy CSV/JSON reads and uses SQLite for
+  recommendation metadata, feedback, and playlist selection.
+- `MusicServer.Providers.psm1` contains no legacy provider-health state reads;
+  its remaining JSON parser handles provider HTTP responses only.
+- `.github/workflows/core-tests.yml` includes `LegacyRetirement` in the state
+  job so the authority checks run in CI.
+
+## Phase 5 validation
+
+- LegacyRetirement: 9/9 on PowerShell 7 and 9/9 on Windows PowerShell 5.1.
+- PS7 state group: 113/113; PS7 API group: 22/22.
+- PS5.1 state group (excluding live-runtime Web tests): 111/111; PS5.1 API
+  group: 22/22.
+- Authority conflict cases A-D pass: SQLite CANCEL_REQUESTED, REMOTE,
+  WANTED, and UNAVAILABLE each override contradictory or missing legacy data.
+- Production SQLite snapshot rehearsal: first migration `SUCCESS`, second
+  migration `ALREADY_MIGRATED`, `idempotent=True`; no production files were
+  modified. Conflict categories were
+  `SAFE_IDEMPOTENT=162`, `EXPECTED_LEGACY_OVERLAP=20`,
+  `STALE_LEGACY=4`, `IDENTITY_AMBIGUITY=0`, `SEMANTIC_CONFLICT=0`,
+  `MALFORMED=0`.
+- Rehearsal merge skips were `85`: `SAFE_IDEMPOTENT=81` and
+  `STALE_LEGACY=4`; 24 malformed lyrics rows were separately classified as
+  `MALFORMED` and reported without changing the SQLite snapshot.

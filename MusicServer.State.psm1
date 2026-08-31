@@ -7,7 +7,7 @@
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Database.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Core.psm1') -Force
 
-$script:SchemaVersion = 3
+$script:SchemaVersion = 4
 $script:LeaseMinutes = 30
 
 # ================================================================
@@ -62,6 +62,21 @@ CREATE TABLE IF NOT EXISTS recommendation_feedback (
     source TEXT NOT NULL DEFAULT '',
     value TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
+);
+"@
+    Invoke-MusicServerSqlNonQuery -Query @"
+CREATE TABLE IF NOT EXISTS recommendation_files (
+    file_name TEXT PRIMARY KEY,
+    track_id TEXT NOT NULL DEFAULT '',
+    date TEXT NOT NULL DEFAULT '',
+    netease_id TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    artist TEXT NOT NULL DEFAULT '',
+    album TEXT NOT NULL DEFAULT '',
+    duration INTEGER NOT NULL DEFAULT 0,
+    seed_source TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT ''
 );
 "@
     Invoke-MusicServerSqlNonQuery -Query @"
@@ -149,6 +164,8 @@ CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
 CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at);
 CREATE INDEX IF NOT EXISTS idx_daily_date ON daily_recommendations(date);
 CREATE INDEX IF NOT EXISTS idx_feedback_track ON recommendation_feedback(track_id);
+CREATE INDEX IF NOT EXISTS idx_recommendation_files_track ON recommendation_files(track_id);
+CREATE INDEX IF NOT EXISTS idx_recommendation_files_date ON recommendation_files(date);
 "@
     Set-SchemaVersion -Version $script:SchemaVersion
 }
@@ -230,6 +247,68 @@ VALUES (@id, @title, @artist, @album, @duration, @cover_url,
         }
         return @{ Success = $true; Revision = 1 }
     }
+}
+
+function Set-CanonicalTrackStatusDb {
+    param(
+        [Parameter(Mandatory)][string]$TrackId,
+        [Parameter(Mandatory)][ValidateSet('REMOTE','WANTED','RESOLVING','DOWNLOADING','VALIDATING','RETRY_WAIT','UNAVAILABLE','LOCAL','CANCEL_REQUESTED')][string]$Status,
+        [string]$LocalSongId = '',
+        [switch]$CAS,
+        [int]$ExpectedRevision = -1
+    )
+    $track = Get-CanonicalTrackDb -TrackId $TrackId
+    if ($null -eq $track) { return $null }
+    if ($CAS -and $ExpectedRevision -lt 0) { $ExpectedRevision = [int]$track.revision }
+    $track.status = $Status
+    if ($PSBoundParameters.ContainsKey('LocalSongId')) { $track.local_song_id = $LocalSongId }
+    $saved = if ($CAS) {
+        Save-CanonicalTrackDb -Track $track -CAS -ExpectedRevision $ExpectedRevision
+    } else {
+        Save-CanonicalTrackDb -Track $track
+    }
+    if (-not $saved.Success) { return $null }
+    return (Get-CanonicalTrackDb -TrackId $TrackId)
+}
+
+function Reset-CanonicalTrackToRemoteDb {
+    param([Parameter(Mandatory)][string]$TrackId)
+    $track = Get-CanonicalTrackDb -TrackId $TrackId
+    if ($null -eq $track) { return $null }
+    if ([string]$track.status -ne 'LOCAL') {
+        $track.status = 'REMOTE'
+        Save-CanonicalTrackDb -Track $track | Out-Null
+    }
+    return (Get-CanonicalTrackDb -TrackId $TrackId)
+}
+
+function Set-CanonicalTrackStatusForWantedDb {
+    param(
+        [Parameter(Mandatory)][string]$TrackId,
+        [Parameter(Mandatory)][string]$WorkerId,
+        [Parameter(Mandatory)][string]$WantedState,
+        [Parameter(Mandatory)][ValidateSet('REMOTE','WANTED','RESOLVING','DOWNLOADING','VALIDATING','RETRY_WAIT','UNAVAILABLE','LOCAL','CANCEL_REQUESTED')][string]$Status,
+        [string]$LocalSongId = ''
+    )
+    $nowEpoch = [long][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    $affected = Invoke-MusicServerParamNonQuery -Template @"
+UPDATE canonical_tracks
+SET status = @status,
+    local_song_id = CASE WHEN @has_local = 1 THEN @local_song_id ELSE local_song_id END,
+    updated_at = @now, revision = revision + 1
+WHERE id = @tid
+  AND EXISTS (
+      SELECT 1 FROM wanted_queue q
+      WHERE q.track_id = @tid AND q.state = @wanted_state
+        AND (q.state NOT IN ('RESOLVING','DOWNLOADING','VALIDATING')
+             OR (q.claimed_by = @worker AND (q.lease_expires_epoch IS NULL OR q.lease_expires_epoch > @now_epoch)))
+  );
+"@ -Params @{
+        tid = $TrackId; status = $Status; has_local = if ($PSBoundParameters.ContainsKey('LocalSongId')) { 1 } else { 0 }
+        local_song_id = $LocalSongId; now = Get-NowIso; wanted_state = $WantedState
+        worker = $WorkerId; now_epoch = $nowEpoch
+    } -ReturnChanges
+    return ([int]$affected -eq 1)
 }
 
 function Convert-DbTrackRow {
@@ -569,6 +648,61 @@ VALUES (@tid, @ft, @src, @val, @now);
 "@ -Params @{ tid = $TrackId; ft = $FeedbackType; src = $Source; val = $Value; now = (Get-NowIso) }
 }
 
+function Write-FeedbackIfAbsentDb {
+    param(
+        [Parameter(Mandatory)][string]$TrackId,
+        [Parameter(Mandatory)][string]$FeedbackType,
+        [string]$Source = '', [string]$Value = '', [string]$CreatedAt = ''
+    )
+    if (-not $CreatedAt) { $CreatedAt = Get-NowIso }
+    $existing = @(Invoke-MusicServerParamSql -Template @"
+SELECT id FROM recommendation_feedback
+WHERE track_id = @tid AND feedback_type = @ft AND source = @src AND value = @val
+LIMIT 1;
+"@ -Params @{ tid = $TrackId; ft = $FeedbackType; src = $Source; val = $Value })
+    if ($existing.Count -gt 0) { return $false }
+    [void](Invoke-MusicServerParamNonQuery -Template @"
+INSERT INTO recommendation_feedback (track_id, feedback_type, source, value, created_at)
+VALUES (@tid, @ft, @src, @val, @created);
+"@ -Params @{ tid = $TrackId; ft = $FeedbackType; src = $Source; val = $Value; created = $CreatedAt })
+    return $true
+}
+
+function Save-RecommendationFileDb {
+    param(
+        [Parameter(Mandatory)][string]$FileName,
+        [string]$TrackId = '', [string]$Date = '', [string]$NeteaseId = '',
+        [string]$Title = '', [string]$Artist = '', [string]$Album = '',
+        [int]$Duration = 0, [string]$SeedSource = '', [string]$CreatedAt = ''
+    )
+    if (-not $CreatedAt) { $CreatedAt = Get-NowIso }
+    Invoke-MusicServerParamNonQuery -Template @"
+INSERT INTO recommendation_files
+    (file_name, track_id, date, netease_id, title, artist, album, duration, seed_source, created_at, updated_at)
+VALUES (@file, @tid, @date, @nid, @title, @artist, @album, @duration, @seed, @created, @created)
+ON CONFLICT(file_name) DO UPDATE SET
+    track_id = excluded.track_id, date = excluded.date, netease_id = excluded.netease_id,
+    title = excluded.title, artist = excluded.artist, album = excluded.album,
+    duration = excluded.duration, seed_source = excluded.seed_source, updated_at = excluded.updated_at;
+"@ -Params @{
+        file = $FileName; tid = $TrackId; date = $Date; nid = $NeteaseId; title = $Title
+        artist = $Artist; album = $Album; duration = $Duration; seed = $SeedSource
+        created = $CreatedAt
+    }
+    return (Get-RecommendationFileDb -FileName $FileName)
+}
+
+function Get-RecommendationFileDb {
+    param([Parameter(Mandatory)][string]$FileName)
+    $rows = @(Invoke-MusicServerParamSql -Template 'SELECT * FROM recommendation_files WHERE file_name = @file LIMIT 1;' -Params @{ file = $FileName })
+    if ($rows.Count -eq 0) { return $null }
+    return $rows[0]
+}
+
+function Get-RecommendationFilesDb {
+    return @(Invoke-MusicServerSqlJson -Query 'SELECT * FROM recommendation_files ORDER BY date, file_name;')
+}
+
 # ================================================================
 # Wanted Queue - CAS + Worker Claim + Lease
 # ================================================================
@@ -586,7 +720,9 @@ function Convert-DbWantedRow {
     try { if ($Row.selected_candidate_json) { $selected = ConvertFrom-Json -InputObject ([string]$Row.selected_candidate_json) } } catch {}
     return [pscustomobject]@{
         track_id = [string]$Row.track_id; wanted_id = [string]$Row.wanted_id
+        id = [string]$Row.wanted_id
         state = [string]$Row.state; attempt_count = [int]$Row.attempt_count
+        attempts = [int]$Row.attempt_count
         max_attempts = [int]$Row.max_attempts; next_retry_at = [string]$Row.next_retry_at
         selected_candidate = $selected; last_error = [string]$Row.last_error
         claimed_by = [string]$Row.claimed_by; claimed_at = [string]$Row.claimed_at
@@ -683,7 +819,10 @@ function Update-WantedStateCasDb {
     $setClauses = @('state = @state', 'revision = revision + 1', 'updated_at = @now')
     $params = @{ tid = $TrackId; state = $NewState; now = $now; rev = $ExpectedRevision; worker = $WorkerId }
     if ($LastError) { $setClauses += 'last_error = @err'; $params['err'] = $LastError }
-    if ($NextRetryAt) { $setClauses += 'next_retry_at = @nrt'; $params['nrt'] = $NextRetryAt }
+    if ($PSBoundParameters.ContainsKey('NextRetryAt')) {
+        $setClauses += 'next_retry_at = @nrt'
+        $params['nrt'] = if ($NextRetryAt) { $NextRetryAt } else { $null }
+    }
     if ($AttemptCount -ge 0) { $setClauses += 'attempt_count = @ac'; $params['ac'] = $AttemptCount }
     if ($NewState -notin @('RESOLVING','DOWNLOADING','VALIDATING')) {
         $setClauses += "claimed_by = ''"
@@ -866,7 +1005,8 @@ function Get-ProviderHealthDb {
         provider = $Provider; state = 'CLOSED'; success_count = 0; failure_count = 0
         consecutive_failures = 0; consecutive_412 = 0; last_success = $null; last_failure = $null
         last_412_at = $null; blocked_until = $null; average_latency_ms = 0
-        half_open_probe_claimed = 0; last_error = ''; revision = 0; updated_at = ''
+        half_open_probe_claimed = 0; probe_pending = $false
+        last_error = ''; revision = 0; updated_at = ''
     }
 }
 
@@ -880,6 +1020,7 @@ function Convert-DbProviderRow {
         last_412_at = [string]$Row.last_412_at; blocked_until = [string]$Row.blocked_until
         average_latency_ms = [double]$Row.average_latency_ms
         half_open_probe_claimed = [int]$Row.half_open_probe_claimed
+        probe_pending = ([int]$Row.half_open_probe_claimed -eq 1)
         last_error = [string]$Row.last_error; revision = [int]$Row.revision
         updated_at = [string]$Row.updated_at
     }
@@ -1000,7 +1141,7 @@ function Get-LatestRecommendationFeedbackDb {
 
 function Get-DbStats {
     $stats = @{}
-    foreach ($table in @('canonical_tracks','daily_recommendations','recommendation_feedback','wanted_queue','provider_health','events')) {
+    foreach ($table in @('canonical_tracks','daily_recommendations','recommendation_feedback','recommendation_files','wanted_queue','provider_health','events')) {
         $rows = @(Invoke-MusicServerSqlJson -Query "SELECT COUNT(*) as cnt FROM $table;")
         if ($rows.Count -gt 0) {
             $cnt = 0

@@ -1,5 +1,6 @@
 ﻿Import-Module (Join-Path $PSScriptRoot 'MusicServer.Core.psm1') -Force
 Set-StrictMode -Version 3.0
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.State.psm1') -Force
 
 function New-DownloadCandidate {
     param(
@@ -20,29 +21,26 @@ function New-DownloadCandidate {
     }
 }
 
+function Ensure-ProviderDatabase {
+    param([Parameter(Mandatory)][psobject]$Config)
+    $dbPath = Join-Path $Config.StateDir 'musicserver.db'
+    Initialize-MusicServerDatabase -DbPath $dbPath -SqliteExe $Config.Sqlite
+    Initialize-MusicServerSchema
+}
+
 function Get-ProviderHealth {
     param([Parameter(Mandatory)][psobject]$Config, [Parameter(Mandatory)][string]$Provider)
-    $items = @(Read-StateCollection -Config $Config -Name providers)
-    $health = $items | Where-Object { [string]$_.provider -eq $Provider } | Select-Object -First 1
-    if ($health) { return $health }
-    return [pscustomobject]@{
-        provider = $Provider; state = 'CLOSED'; success_count = 0; failure_count = 0
-        consecutive_failures = 0; consecutive_412 = 0; last_success = $null; last_failure = $null
-        last_412_at = $null; blocked_until = $null; average_latency_ms = 0
-        probe_pending = $false; updated_at = Get-NowIso
-    }
+    Ensure-ProviderDatabase -Config $Config | Out-Null
+    return (Get-ProviderHealthDb -Provider $Provider)
 }
 
 function Save-ProviderHealth {
     param([Parameter(Mandatory)][psobject]$Config, [Parameter(Mandatory)][psobject]$Health)
-    $items = @(Read-StateCollection -Config $Config -Name providers)
-    $Health.updated_at = Get-NowIso
-    $found = $false
-    for ($i = 0; $i -lt $items.Count; $i++) {
-        if ([string]$items[$i].provider -eq [string]$Health.provider) { $items[$i] = $Health; $found = $true; break }
+    Ensure-ProviderDatabase -Config $Config | Out-Null
+    if ($Health.PSObject.Properties['probe_pending']) {
+        $Health | Add-Member -NotePropertyName half_open_probe_claimed -NotePropertyValue ([int]([bool]$Health.probe_pending)) -Force
     }
-    if (-not $found) { $items += $Health }
-    Write-StateCollection -Config $Config -Name providers -Items $items
+    Save-ProviderHealthDb -Health $Health | Out-Null
     return $Health
 }
 
@@ -70,21 +68,19 @@ function Claim-ProviderRequest {
         [Parameter(Mandatory)][string]$Provider,
         [int]$ProbeCooldownMinutes = 15
     )
+    Ensure-ProviderDatabase -Config $Config | Out-Null
     $health = Get-ProviderHealth -Config $Config -Provider $Provider
     $now = [DateTime]::UtcNow
     if ([string]$health.state -eq 'OPEN') {
         $blocked = $null
         if ($health.blocked_until) { $blocked = Convert-ToUtcDateTime $health.blocked_until }
         if ($blocked -and $blocked -gt $now) { return $false }
-        $health.state = 'HALF_OPEN'
-        $health.probe_pending = $true
-        Save-ProviderHealth -Config $Config -Health $health | Out-Null
-        Write-StructuredEvent -Config $Config -Provider $Provider -Event 'CIRCUIT_HALF_OPEN' -Message 'cooldown elapsed; one real request probe permitted'
+        if (-not (Claim-HalfOpenProbeDb -Provider $Provider)) { return $false }
+        Write-MusicServerEventDb -Provider $Provider -EventType 'CIRCUIT_HALF_OPEN' -Message 'cooldown elapsed; one real request probe permitted'
+        return $true
     }
     if ([string]$health.state -eq 'HALF_OPEN') {
-        if (-not [bool]$health.probe_pending) { return $false }
-        $health.probe_pending = $false
-        Save-ProviderHealth -Config $Config -Health $health | Out-Null
+        return [bool](Claim-HalfOpenProbeDb -Provider $Provider)
     }
     return $true
 }
@@ -133,7 +129,7 @@ function Record-ProviderFailure {
         $health.state = 'OPEN'
         $health.probe_pending = $false
         Save-ProviderHealth -Config $Config -Health $health | Out-Null
-        Write-StructuredEvent -Config $Config -Provider $Provider -Event 'CIRCUIT_OPEN' -ErrorType 'HTTP_412' -HttpStatus 412 -Message "blocked_until=$($health.blocked_until); cooldown_minutes=$minutes"
+        Write-MusicServerEventDb -Provider $Provider -EventType 'CIRCUIT_OPEN' -ErrorType 'HTTP_412' -HttpStatus 412 -Message "blocked_until=$($health.blocked_until); cooldown_minutes=$minutes"
     } else {
         Save-ProviderHealth -Config $Config -Health $health | Out-Null
     }

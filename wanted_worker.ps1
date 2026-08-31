@@ -31,7 +31,6 @@ $Config = New-MusicServerConfig -Root $Root
 Initialize-MusicServerState -Config $Config
 Initialize-MusicServerDatabase -DbPath (Join-Path $Config.StateDir 'musicserver.db') -SqliteExe $Config.Sqlite
 Initialize-MusicServerSchema
-Import-LegacyRecommendationState -Config $Config | Out-Null
 $WorkerMutex = [Threading.Mutex]::new($false, 'MusicServer_WantedWorker')
 $OwnsWorkerMutex = $false
 try {
@@ -59,7 +58,7 @@ function Test-OwnsActiveLease {
     param([psobject]$Wanted)
     try {
         $row = Get-WantedItemDb -TrackId ([string]$Wanted.track_id)
-        if ($null -ceq $row) { return $true }
+        if ($null -ceq $row) { return $false }
         if ([string]$row.state -ne 'CANCEL_REQUESTED' -and [string]$row.claimed_by -ceq $WorkerId) {
             $epoch = $null
             if ($row.PSObject.Properties['lease_expires_epoch']) {
@@ -72,8 +71,9 @@ function Test-OwnsActiveLease {
         }
         return $false
     } catch {
-        # DB unavailable: fall through to the legacy cancellation guards instead of dead-ending.
-        return $true
+        # DB unavailable: fail closed. A worker must never make a runtime state
+        # decision from a legacy mirror or continue without lease authority.
+        return $false
     }
 }
 
@@ -85,7 +85,7 @@ function Complete-CancellationInDb {
         try { $cur = Get-WantedItemDb -TrackId $tid } catch {}
         if ($null -ceq $cur) {
             # Never resurrect a completed cancellation; keep the canonical track consistent.
-            Reset-TrackToRemote -Config $Config -TrackId $tid | Out-Null
+            Reset-CanonicalTrackToRemoteDb -TrackId $tid | Out-Null
             return
         }
         if ([string]$cur.state -ne 'CANCEL_REQUESTED') {
@@ -106,7 +106,7 @@ function Release-WantedLease {
         $cur = Get-WantedItemDb -TrackId $tid
         if ($null -ceq $cur) {
             # Row already completed (e.g. cancellation cleanup): keep the canonical track consistent.
-            if ($State -ne 'LOCAL') { Reset-TrackToRemote -Config $Config -TrackId $tid | Out-Null }
+            if ($State -ne 'LOCAL') { Reset-CanonicalTrackToRemoteDb -TrackId $tid | Out-Null }
             return
         }
         $ok = Update-WantedStateCasDb -TrackId $tid -WorkerId $WorkerId -ExpectedRevision ([int]$cur.revision) `
@@ -114,7 +114,7 @@ function Release-WantedLease {
         if ($ok.Success) { return }
         # Lost the CAS race (e.g. crash recovery reclaimed our expired lease): never
         # let a stale writer force its own terminal state into the canonical track.
-        if ($State -ne 'LOCAL') { Reset-TrackToRemote -Config $Config -TrackId $tid | Out-Null }
+        if ($State -ne 'LOCAL') { Reset-CanonicalTrackToRemoteDb -TrackId $tid | Out-Null }
     } catch {
         Write-Host "  [warn] DB 状态同步失败：$_" -ForegroundColor DarkYellow
     }
@@ -156,7 +156,7 @@ WHERE track_id = @tid AND state = 'RETRY_WAIT' AND claimed_by = ''
 
 function Get-LiveWanted {
     param([psobject]$Wanted)
-    return @(Get-WantedTracks -Config $Config | Where-Object { [string]$_.id -eq [string]$Wanted.id } | Select-Object -First 1) | Select-Object -First 1
+    return (Get-WantedItemDb -TrackId ([string]$Wanted.track_id))
 }
 
 function Test-WantedCancellation {
@@ -173,27 +173,35 @@ function Complete-WantedCancellation {
         $tempLrc = [IO.Path]::ChangeExtension($TemporaryPath, '.lrc')
         Remove-Item -LiteralPath $tempLrc -Force -ErrorAction SilentlyContinue
     }
-    Remove-WantedTrack -Config $Config -WantedId ([string]$Wanted.id)
-    Reset-TrackToRemote -Config $Config -TrackId ([string]$Wanted.track_id) | Out-Null
     Complete-CancellationInDb -Wanted $Wanted -TemporaryPath $TemporaryPath
-    Write-StructuredEvent -Config $Config -TrackId $Wanted.track_id -Event 'WANTED_CANCELLED' -Result 'SUCCESS' -Message 'user cancelled before localization completed'
 }
 
 function Set-QueueState {
     param([psobject]$Wanted, [string]$State, [string]$Error = '', [string]$NextRetryAt = '')
     $live = Get-LiveWanted -Wanted $Wanted
-    if ($live -and [string]$live.state -eq 'CANCEL_REQUESTED' -and $State -ne 'CANCEL_REQUESTED') {
+    if ($null -eq $live) { return $false }
+    if ([string]$live.state -eq 'CANCEL_REQUESTED' -and $State -ne 'CANCEL_REQUESTED') {
         $Wanted.state = 'CANCEL_REQUESTED'
         $Wanted.last_error = 'USER_CANCELLED'
         return $false
     }
-    $from = [string]$Wanted.state
+    $attemptCount = if ($Wanted.PSObject.Properties['attempt_count']) { [int]$Wanted.attempt_count } else { [int]$Wanted.attempts }
+    $result = Update-WantedStateCasDb -TrackId ([string]$live.track_id) -WorkerId $WorkerId -ExpectedRevision ([int]$live.revision) `
+        -NewState $State -LastError $Error -NextRetryAt $NextRetryAt -AttemptCount $attemptCount
+    if (-not $result.Success) {
+        if ([string]$result.CurrentState -eq 'CANCEL_REQUESTED') {
+            $Wanted.state = 'CANCEL_REQUESTED'
+            $Wanted.last_error = 'USER_CANCELLED'
+        }
+        return $false
+    }
     $Wanted.state = $State
+    $Wanted.attempt_count = $attemptCount
+    $Wanted.attempts = $attemptCount
     $Wanted.last_error = $Error
     $Wanted.next_retry_at = if ($NextRetryAt) { $NextRetryAt } else { $null }
-    Save-WantedTrack -Config $Config -Wanted $Wanted | Out-Null
-    Write-StructuredEvent -Config $Config -TrackId $Wanted.track_id -Event 'STATE_TRANSITION' -FromState $from -ToState $State -Attempt ([int]$Wanted.attempts) -ErrorType $Error
-    [void](Release-WantedLease -Wanted $Wanted -State $State -Error $Error -NextRetryAt $NextRetryAt)
+    $Wanted.revision = [int]$result.Revision
+    Write-MusicServerEventDb -TrackId $Wanted.track_id -EventType 'STATE_TRANSITION' -FromState ([string]$live.state) -ToState $State -Attempt $attemptCount -ErrorType $Error
     return $true
 }
 
@@ -205,6 +213,17 @@ function Get-RetryTime {
     }
     $minutes = [Math]::Min(120, [Math]::Pow(2, [Math]::Max(0, [int]$Wanted.attempts - 1)) * 5)
     return [DateTime]::UtcNow.AddMinutes($minutes).ToString('o')
+}
+
+function Increment-WantedAttempt {
+    param([Parameter(Mandatory)][psobject]$Wanted)
+    $current = if ($Wanted.PSObject.Properties['attempt_count']) { [int]$Wanted.attempt_count } else { [int]$Wanted.attempts }
+    $next = $current + 1
+    if ($Wanted.PSObject.Properties['attempt_count']) { $Wanted.attempt_count = $next }
+    else { $Wanted | Add-Member -NotePropertyName attempt_count -NotePropertyValue $next -Force }
+    if ($Wanted.PSObject.Properties['attempts']) { $Wanted.attempts = $next }
+    else { $Wanted | Add-Member -NotePropertyName attempts -NotePropertyValue $next -Force }
+    return $next
 }
 
 function Get-BilibiliBlockedUntil {
@@ -242,7 +261,7 @@ function Write-TrackLyrics {
         [IO.File]::WriteAllText($lrcPath, $content, (New-Object Text.UTF8Encoding($false)))
         return $true
     } catch {
-        Write-StructuredEvent -Config $Config -TrackId $Track.id -Provider 'netease' -Event 'LYRICS_FAILED' -ErrorType 'LYRICS_REQUEST_FAILED' -Message $_.Exception.Message
+        Write-MusicServerEventDb -TrackId $Track.id -Provider 'netease' -EventType 'LYRICS_FAILED' -ErrorType 'LYRICS_REQUEST_FAILED' -Message $_.Exception.Message
         return $false
     }
 }
@@ -251,14 +270,23 @@ function Add-LegacyAcceptedRow {
     param([psobject]$Track, [string]$Path)
     $acceptedPath = Join-Path $Config.DataDir 'accepted.csv'
     $neteaseId = Get-NeteaseIdFromTrack -Track $Track
-    $existing = @()
-    if (Test-Path -LiteralPath $acceptedPath) { $existing = @(Import-Csv -LiteralPath $acceptedPath -Encoding UTF8) }
-    if (@($existing | Where-Object { ($neteaseId -and [string]$_.NeteaseId -eq $neteaseId) -or [string]$_.File -eq [IO.Path]::GetFileName($Path) }).Count -gt 0) { return }
+    $fileName = [IO.Path]::GetFileName($Path)
+    $acceptedAt = Get-Date -Format 'yyyy-MM-dd'
+    $value = ConvertTo-Json -InputObject ([ordered]@{
+            legacy_key = "accepted:$fileName`:$neteaseId"; title = [string]$Track.title
+            artist = [string]$Track.artist; netease_id = $neteaseId; file = $fileName
+            accepted_at = $acceptedAt; positive = $true
+        }) -Compress -Depth 10
+    $added = Write-FeedbackIfAbsentDb -TrackId ([string]$Track.id) -FeedbackType 'ACCEPTED' -Source 'wanted_worker' -Value $value -CreatedAt $acceptedAt
+    Save-RecommendationFileDb -FileName $fileName -TrackId ([string]$Track.id) -Date $acceptedAt `
+        -NeteaseId $neteaseId -Title ([string]$Track.title) -Artist ([string]$Track.artist) `
+        -Album ([string](Get-OptionalProperty $Track 'album')) -Duration ([int](Get-OptionalProperty $Track 'duration' 0)) -SeedSource 'wanted_worker' | Out-Null
+    if (-not $added) { return }
     $row = [pscustomobject]@{
-        AcceptedAt = (Get-Date -Format 'yyyy-MM-dd'); NeteaseId = $neteaseId
-        Title = $Track.title; Artist = $Track.artist; File = [IO.Path]::GetFileName($Path)
+        AcceptedAt = $acceptedAt; NeteaseId = $neteaseId
+        Title = $Track.title; Artist = $Track.artist; File = $fileName
     }
-    if ($existing.Count -gt 0) { $row | Export-Csv -LiteralPath $acceptedPath -NoTypeInformation -Encoding UTF8 -Append }
+    if (Test-Path -LiteralPath $acceptedPath) { $row | Export-Csv -LiteralPath $acceptedPath -NoTypeInformation -Encoding UTF8 -Append }
     else { $row | Export-Csv -LiteralPath $acceptedPath -NoTypeInformation -Encoding UTF8 }
 }
 
@@ -285,11 +313,11 @@ function Bind-LocalTrack {
     if (-not (Test-OwnsActiveLease -Wanted $Wanted)) { Write-Host "  [abandon] $([string]$Wanted.title)：租约已丢失，放弃本次处理。" -ForegroundColor DarkYellow; return }
     $Path = Move-LegacyDailyMixToLibrary -Path $Path
     $songId = Get-NavidromeSongIdForPath -Config $Config -Path $Path
-    Set-TrackStatus -Config $Config -TrackId $Track.id -Status 'LOCAL' -LocalSongId $songId | Out-Null
     $Wanted.selected_candidate = [pscustomobject]@{ provider = 'local'; path = $Path }
-    [void](Set-QueueState -Wanted $Wanted -State 'LOCAL')
+    if (-not (Set-QueueState -Wanted $Wanted -State 'LOCAL')) { Complete-WantedCancellation -Wanted $Wanted; return }
+    Set-CanonicalTrackStatusForWantedDb -TrackId $Track.id -WorkerId $WorkerId -WantedState 'LOCAL' -Status 'LOCAL' -LocalSongId $songId | Out-Null
     Add-LegacyAcceptedRow -Track $Track -Path $Path
-    Write-StructuredEvent -Config $Config -TrackId $Track.id -Provider 'local' -Event 'LOCAL_BOUND' -Result 'SUCCESS' -Message "path=$Path; navidrome_id=$songId"
+    Write-MusicServerEventDb -TrackId $Track.id -Provider 'local' -EventType 'LOCAL_BOUND' -Result 'SUCCESS' -Message "path=$Path; navidrome_id=$songId"
 }
 
 function Complete-DownloadedTrack {
@@ -320,16 +348,16 @@ function Complete-DownloadedTrack {
     }
 
     [void](Write-TrackLyrics -Track $Track -AudioPath $target)
-    Add-LegacyAcceptedRow -Track $Track -Path $target
-    Set-TrackStatus -Config $Config -TrackId $Track.id -Status 'LOCAL' | Out-Null
     $Wanted.selected_candidate = [pscustomobject]@{ provider = $Candidate.provider; url = $Candidate.url; score = $Score.score }
-    [void](Set-QueueState -Wanted $Wanted -State 'LOCAL')
-    Write-StructuredEvent -Config $Config -TrackId $Track.id -Provider $Candidate.provider -Event 'LOCAL' -Result 'SUCCESS' -Message "path=$target; duration=$($Validation.Duration); duration_diff=$($Validation.DurationDiff); allowed_diff=$($Validation.AllowedDiff)"
+    if (-not (Set-QueueState -Wanted $Wanted -State 'LOCAL')) { Complete-WantedCancellation -Wanted $Wanted; return }
+    Set-CanonicalTrackStatusForWantedDb -TrackId $Track.id -WorkerId $WorkerId -WantedState 'LOCAL' -Status 'LOCAL' | Out-Null
+    Add-LegacyAcceptedRow -Track $Track -Path $target
+    Write-MusicServerEventDb -TrackId $Track.id -Provider $Candidate.provider -EventType 'LOCAL' -Result 'SUCCESS' -Message "path=$target; duration=$($Validation.Duration); duration_diff=$($Validation.DurationDiff); allowed_diff=$($Validation.AllowedDiff)"
     if ((Test-Path -LiteralPath $Config.NdExe) -and (Test-Path -LiteralPath $Config.NdConfig)) {
         & $Config.NdExe -c $Config.NdConfig scan --nobanner 2>$null | Out-Null
     }
     $songId = Get-NavidromeSongIdForPath -Config $Config -Path $target
-    $track = Get-CanonicalTrack -Config $Config -TrackId $Track.id
+    $track = Get-CanonicalTrackDb -TrackId $Track.id
     if ($track) {
         $known = @($track.download_candidates) | Where-Object { [string](Get-OptionalProperty $_ 'url') -eq [string]$Candidate.url }
         if ($known.Count -eq 0) {
@@ -340,7 +368,7 @@ function Complete-DownloadedTrack {
         }
         $track.local_song_id = $songId
         $track.status = 'LOCAL'
-        Save-CanonicalTrack -Config $Config -Track $track | Out-Null
+        Save-CanonicalTrackDb -Track $track | Out-Null
     }
 }
 
@@ -356,9 +384,9 @@ function Process-WantedTrack {
         return
     }
 
-    $track = Get-CanonicalTrack -Config $Config -TrackId ([string]$Wanted.track_id)
+    $track = Get-CanonicalTrackDb -TrackId ([string]$Wanted.track_id)
     if (-not $track) {
-        $Wanted.attempts = [int]$Wanted.attempts + 1
+        [void](Increment-WantedAttempt -Wanted $Wanted)
         [void](Set-QueueState -Wanted $Wanted -State 'UNAVAILABLE' -Error 'TRACK_NOT_FOUND')
         return
     }
@@ -373,8 +401,8 @@ function Process-WantedTrack {
         return
     }
 
-    Set-TrackStatus -Config $Config -TrackId $track.id -Status 'RESOLVING' | Out-Null
     if (-not (Set-QueueState -Wanted $Wanted -State 'RESOLVING')) { Complete-WantedCancellation -Wanted $Wanted; return }
+    Set-CanonicalTrackStatusForWantedDb -TrackId $track.id -WorkerId $WorkerId -WantedState 'RESOLVING' -Status 'RESOLVING' | Out-Null
     [void](Reassert-WantedLease -Wanted $Wanted)
     $ranked = @(Resolve-DownloadCandidates -Config $Config -Track $track)
 
@@ -382,17 +410,17 @@ function Process-WantedTrack {
     if (-not (Test-OwnsActiveLease -Wanted $Wanted)) { Write-Host "  [abandon] $([string]$Wanted.title)：候选解析期间租约丢失，放弃本次处理。" -ForegroundColor DarkYellow; return }
 
     if ($ranked.Count -eq 0) {
-        $Wanted.attempts = [int]$Wanted.attempts + 1
+        [void](Increment-WantedAttempt -Wanted $Wanted)
         $blockedUntil = Get-BilibiliBlockedUntil
         if ($blockedUntil) {
-            Set-TrackStatus -Config $Config -TrackId $track.id -Status 'RETRY_WAIT' | Out-Null
             [void](Set-QueueState -Wanted $Wanted -State 'RETRY_WAIT' -Error 'BILIBILI_CIRCUIT_OPEN' -NextRetryAt $blockedUntil)
+            Set-CanonicalTrackStatusForWantedDb -TrackId $track.id -WorkerId $WorkerId -WantedState 'RETRY_WAIT' -Status 'RETRY_WAIT' | Out-Null
         } elseif ([int]$Wanted.attempts -ge [int]$Wanted.max_attempts) {
-            Set-TrackStatus -Config $Config -TrackId $track.id -Status 'UNAVAILABLE' | Out-Null
             [void](Set-QueueState -Wanted $Wanted -State 'UNAVAILABLE' -Error 'NO_CANDIDATE')
+            Set-CanonicalTrackStatusForWantedDb -TrackId $track.id -WorkerId $WorkerId -WantedState 'UNAVAILABLE' -Status 'UNAVAILABLE' | Out-Null
         } else {
-            Set-TrackStatus -Config $Config -TrackId $track.id -Status 'RETRY_WAIT' | Out-Null
             [void](Set-QueueState -Wanted $Wanted -State 'RETRY_WAIT' -Error 'NO_CANDIDATE' -NextRetryAt (Get-RetryTime -Wanted $Wanted))
+            Set-CanonicalTrackStatusForWantedDb -TrackId $track.id -WorkerId $WorkerId -WantedState 'RETRY_WAIT' -Status 'RETRY_WAIT' | Out-Null
         }
         return
     }
@@ -404,14 +432,14 @@ function Process-WantedTrack {
         $candidate = $entry.Candidate
         $score = $entry.Score
         $Wanted.selected_candidate = $candidate
-        Write-StructuredEvent -Config $Config -TrackId $track.id -Provider $candidate.provider -Event 'CANDIDATE_SELECTED' -Attempt ([int]$Wanted.attempts) -Message "score=$($score.score); identity=$($score.identity_confidence); duration_diff=$($score.duration_diff)"
+        Write-MusicServerEventDb -TrackId $track.id -Provider $candidate.provider -EventType 'CANDIDATE_SELECTED' -Attempt ([int]$Wanted.attempts) -Message "score=$($score.score); identity=$($score.identity_confidence); duration_diff=$($score.duration_diff)"
         if ($candidate.provider -eq 'local') {
             Bind-LocalTrack -Track $track -Wanted $Wanted -Path $candidate.url
             return
         }
 
-        Set-TrackStatus -Config $Config -TrackId $track.id -Status 'DOWNLOADING' | Out-Null
         if (-not (Set-QueueState -Wanted $Wanted -State 'DOWNLOADING')) { Complete-WantedCancellation -Wanted $Wanted; return }
+        Set-CanonicalTrackStatusForWantedDb -TrackId $track.id -WorkerId $WorkerId -WantedState 'DOWNLOADING' -Status 'DOWNLOADING' | Out-Null
         if (Test-WantedCancellation -Wanted $Wanted) { Complete-WantedCancellation -Wanted $Wanted; return }
         if (-not (Test-OwnsActiveLease -Wanted $Wanted)) { return }
         [void](Reassert-WantedLease -Wanted $Wanted)
@@ -428,24 +456,24 @@ function Process-WantedTrack {
 
         if (-not $download.Success) {
             if ($download.Blocked) {
-                $Wanted.attempts = [int]$Wanted.attempts + 1
-                Set-TrackStatus -Config $Config -TrackId $track.id -Status 'RETRY_WAIT' | Out-Null
+                [void](Increment-WantedAttempt -Wanted $Wanted)
                 [void](Set-QueueState -Wanted $Wanted -State 'RETRY_WAIT' -Error $download.Error -NextRetryAt (Get-RetryTime -Wanted $Wanted -Provider 'bilibili_download'))
+                Set-CanonicalTrackStatusForWantedDb -TrackId $track.id -WorkerId $WorkerId -WantedState 'RETRY_WAIT' -Status 'RETRY_WAIT' | Out-Null
                 return
             }
-            Write-StructuredEvent -Config $Config -TrackId $track.id -Provider $candidate.provider -Event 'DOWNLOAD_FAILED' -Attempt ([int]$Wanted.attempts) -ErrorType $download.Error
+            Write-MusicServerEventDb -TrackId $track.id -Provider $candidate.provider -EventType 'DOWNLOAD_FAILED' -Attempt ([int]$Wanted.attempts) -ErrorType $download.Error
             continue
         }
 
-        Set-TrackStatus -Config $Config -TrackId $track.id -Status 'VALIDATING' | Out-Null
         if (-not (Set-QueueState -Wanted $Wanted -State 'VALIDATING')) {
             Complete-WantedCancellation -Wanted $Wanted -TemporaryPath $download.Path
             return
         }
+        Set-CanonicalTrackStatusForWantedDb -TrackId $track.id -WorkerId $WorkerId -WantedState 'VALIDATING' -Status 'VALIDATING' | Out-Null
         if (-not (Test-OwnsActiveLease -Wanted $Wanted)) { Remove-Item -LiteralPath $download.Path -Force -ErrorAction SilentlyContinue; return }
         [void](Reassert-WantedLease -Wanted $Wanted)
         $validation = Validate-DownloadedCandidate -Config $Config -Track $track -Path $download.Path
-        Write-StructuredEvent -Config $Config -TrackId $track.id -Provider $candidate.provider -Event 'VALIDATION' -Result $validation.Reason -Message "duration=$($validation.Duration); expected=$($track.duration); diff=$($validation.DurationDiff); allowed=$($validation.AllowedDiff)"
+        Write-MusicServerEventDb -TrackId $track.id -Provider $candidate.provider -EventType 'VALIDATION' -Result $validation.Reason -Message "duration=$($validation.Duration); expected=$($track.duration); diff=$($validation.DurationDiff); allowed=$($validation.AllowedDiff)"
 
         if (Test-WantedCancellation -Wanted $Wanted) {
             Complete-WantedCancellation -Wanted $Wanted -TemporaryPath $download.Path
@@ -463,13 +491,13 @@ function Process-WantedTrack {
 
     if (Test-WantedCancellation -Wanted $Wanted) { Complete-WantedCancellation -Wanted $Wanted; return }
     if (-not (Test-OwnsActiveLease -Wanted $Wanted)) { return }
-    $Wanted.attempts = [int]$Wanted.attempts + 1
+    [void](Increment-WantedAttempt -Wanted $Wanted)
     if ([int]$Wanted.attempts -ge [int]$Wanted.max_attempts) {
-        Set-TrackStatus -Config $Config -TrackId $track.id -Status 'UNAVAILABLE' | Out-Null
         [void](Set-QueueState -Wanted $Wanted -State 'UNAVAILABLE' -Error 'ALL_CANDIDATES_FAILED')
+        Set-CanonicalTrackStatusForWantedDb -TrackId $track.id -WorkerId $WorkerId -WantedState 'UNAVAILABLE' -Status 'UNAVAILABLE' | Out-Null
     } else {
-        Set-TrackStatus -Config $Config -TrackId $track.id -Status 'RETRY_WAIT' | Out-Null
         [void](Set-QueueState -Wanted $Wanted -State 'RETRY_WAIT' -Error 'ALL_CANDIDATES_FAILED' -NextRetryAt (Get-RetryTime -Wanted $Wanted))
+        Set-CanonicalTrackStatusForWantedDb -TrackId $track.id -WorkerId $WorkerId -WantedState 'RETRY_WAIT' -Status 'RETRY_WAIT' | Out-Null
     }
 }
 
@@ -479,7 +507,7 @@ function Invoke-WorkerPass {
     try { Invoke-CrashRecoveryDb | Out-Null } catch {
         Write-Host "  [warn] 崩溃恢复跳过：$_" -ForegroundColor DarkYellow
     }
-    $queue = @(Get-WantedTracks -Config $Config -EligibleOnly)
+    $queue = @(Get-WantedTracksDb -EligibleOnly)
     if ($queue.Count -eq 0) {
         Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Wanted Queue 为空。" -ForegroundColor DarkGray
         return
