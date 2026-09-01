@@ -96,7 +96,7 @@ function Invoke-NavidromeSqliteJson {
     $sqlite = [string]$Config.Sqlite
     if (-not $sqlite) { return @() }
 
-    $errorFile = Join-Path ([IO.Path]::GetTempPath()) ("musicserver_nav_{0}.err" -f [guid]::NewGuid().ToString('N'))
+    $errorFile = Join-Path ([System.IO.Path]::GetTempPath()) ("musicserver_nav_{0}.err" -f [guid]::NewGuid().ToString('N'))
     try {
         # Invoke sqlite directly so the complete SQL statement is passed as one
         # argument. Start-Process -ArgumentList flattens the SQL string and can
@@ -123,10 +123,10 @@ function Invoke-NavidromeSqliteJson {
 
 function Get-LocalLibraryId {
     param([Parameter(Mandatory)][string]$File)
-    $sha = [Security.Cryptography.SHA256]::Create()
+    $sha = [System.Security.Cryptography.SHA256]::Create()
     try {
-        $bytes = [Text.Encoding]::UTF8.GetBytes([IO.Path]::GetFullPath($File))
-        $hex = [BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant()
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes([System.IO.Path]::GetFullPath($File))
+        $hex = [System.BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant()
         return 'na-' + $hex.Substring(0, 16)
     } finally {
         $sha.Dispose()
@@ -136,14 +136,14 @@ function Get-LocalLibraryId {
 function Get-LrcPath {
     param([string]$File)
     if (-not $File) { return $null }
-    $candidate = [IO.Path]::ChangeExtension($File, '.lrc')
+    $candidate = [System.IO.Path]::ChangeExtension($File, '.lrc')
     if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
     return $null
 }
 
 function Get-UiLibrary {
     $items = New-Object System.Collections.ArrayList
-    $seenFiles = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $seenFiles = @{}
     $script:LibraryFiles = @{}
 
     $sql = 'SELECT id, name, artist, album, path, duration, track, addedto, collectionat FROM songs;'
@@ -151,12 +151,12 @@ function Get-UiLibrary {
         $file = [string]$row.path
         if ([string]::IsNullOrWhiteSpace($file)) { continue }
         try {
-            if (-not [IO.Path]::IsPathRooted($file)) { $file = Join-Path $Root $file }
-            $file = [IO.Path]::GetFullPath($file)
+            if (-not [System.IO.Path]::IsPathRooted($file)) { $file = Join-Path $Root $file }
+            $file = [System.IO.Path]::GetFullPath($file)
         } catch { continue }
         if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { continue }
 
-        [void]$seenFiles.Add($file)
+        $seenFiles[$file.ToLowerInvariant()] = $true
         $id = 'library-' + [string]$row.id
         $script:LibraryFiles[$id] = $file
         $lrcPath = Get-LrcPath -File $file
@@ -175,12 +175,13 @@ function Get-UiLibrary {
     foreach ($dir in @($Config.MusicDir)) {
         if (-not (Test-Path -LiteralPath $dir -PathType Container)) { continue }
         foreach ($entry in @(Get-ChildItem -LiteralPath $dir -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.mp3','.flac','.wav','.aac','.m4a' })) {
-            $file = [IO.Path]::GetFullPath($entry.FullName)
-            if ($seenFiles.Contains($file)) { continue }
-            [void]$seenFiles.Add($file)
+            $file = [System.IO.Path]::GetFullPath($entry.FullName)
+            $fileKey = $file.ToLowerInvariant()
+            if ($seenFiles.ContainsKey($fileKey)) { continue }
+            $seenFiles[$fileKey] = $true
             $id = Get-LocalLibraryId -File $file
             $script:LibraryFiles[$id] = $file
-            $title = [IO.Path]::GetFileNameWithoutExtension($file)
+            $title = [System.IO.Path]::GetFileNameWithoutExtension($file)
             $artist = [string](Split-Path -Leaf (Split-Path -Parent $file))
             $lrcPath = Get-LrcPath -File $file
             [void]$items.Add([pscustomobject]@{
@@ -213,7 +214,7 @@ function Resolve-UiLibraryFile {
 
 function Send-Json {
     param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)]$Body, [int]$StatusCode = 200)
-    $bytes = [Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $Body -Depth 20))
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $Body -Depth 20))
     $Context.Response.StatusCode = $StatusCode
     $Context.Response.ContentType = 'application/json; charset=utf-8'
     $Context.Response.ContentLength64 = $bytes.Length
@@ -236,7 +237,7 @@ function Send-StaticFile {
         return
     }
 
-    $bytes = [IO.File]::ReadAllBytes($file)
+    $bytes = [System.IO.File]::ReadAllBytes($file)
     $Context.Response.StatusCode = 200
     $Context.Response.ContentType = $ContentType
     $Context.Response.ContentLength64 = $bytes.Length
@@ -254,8 +255,9 @@ function Send-IndexHtml {
 (() => {
   const clientId = (globalThis.crypto && crypto.randomUUID)
     ? crypto.randomUUID()
-    : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  const heartbeat = () => fetch(`/ui/heartbeat?id=${encodeURIComponent(clientId)}`, {
+    : String(Date.now()) + '-' + Math.random().toString(16).slice(2);
+  const heartbeatUrl = '/ui/heartbeat?id=' + encodeURIComponent(clientId);
+  const heartbeat = () => fetch(heartbeatUrl, {
     method: 'POST', cache: 'no-store', keepalive: true
   }).catch(() => {});
   heartbeat();
@@ -263,14 +265,17 @@ function Send-IndexHtml {
   document.addEventListener('visibilitychange', () => { if (!document.hidden) heartbeat(); });
   window.addEventListener('pageshow', heartbeat);
   window.addEventListener('pagehide', () => {
-    try { navigator.sendBeacon(`/ui/goodbye?id=${encodeURIComponent(clientId)}`, ''); } catch {}
+    try { navigator.sendBeacon('/ui/goodbye?id=' + encodeURIComponent(clientId), ''); } catch {}
   });
 })();
 </script>
 '@
-    if ($html -match '</body>') { $html = $html -replace '</body>', ($lifecycleScript + [Environment]::NewLine + '</body>') }
-    else { $html += $lifecycleScript }
-    $bytes = [Text.Encoding]::UTF8.GetBytes($html)
+    if ($html.Contains('</body>')) {
+        $html = $html.Replace('</body>', $lifecycleScript + [Environment]::NewLine + '</body>')
+    } else {
+        $html += $lifecycleScript
+    }
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($html)
     $Context.Response.StatusCode = 200
     $Context.Response.ContentType = 'text/html; charset=utf-8'
     $Context.Response.ContentLength64 = $bytes.Length
@@ -291,9 +296,9 @@ function Send-LibraryStream {
         '.mp3' = 'audio/mpeg'; '.flac' = 'audio/flac'; '.wav' = 'audio/wav'
         '.aac' = 'audio/aac'; '.m4a' = 'audio/mp4'
     }
-    $ext = [IO.Path]::GetExtension($file).ToLowerInvariant()
+    $ext = [System.IO.Path]::GetExtension($file).ToLowerInvariant()
     $contentType = if ($contentTypes.ContainsKey($ext)) { $contentTypes[$ext] } else { 'application/octet-stream' }
-    $stream = [IO.File]::Open($file, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+    $stream = [System.IO.File]::Open($file, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
     try {
         $Context.Response.StatusCode = 200
         $Context.Response.ContentType = $contentType
@@ -337,7 +342,7 @@ function Proxy-ApiRequest {
     }
 
     $target = $ApiPrefix.TrimEnd('/') + $pathAndQuery
-    $proxyRequest = [Net.HttpWebRequest]::Create($target)
+    $proxyRequest = [System.Net.HttpWebRequest]::Create($target)
     $proxyRequest.Method = $request.HttpMethod
     $proxyRequest.AllowAutoRedirect = $false
     $proxyRequest.Timeout = 30000
@@ -352,7 +357,7 @@ function Proxy-ApiRequest {
     $proxyResponse = $null
     try {
         $proxyResponse = $proxyRequest.GetResponse()
-    } catch [Net.WebException] {
+    } catch [System.Net.WebException] {
         if ($_.Exception.Response) { $proxyResponse = $_.Exception.Response } else { throw }
     }
 
@@ -374,7 +379,7 @@ function Proxy-ApiRequest {
 function Get-ClientId {
     param([Parameter(Mandatory)]$Request)
     try {
-        $query = [Web.HttpUtility]::ParseQueryString($Request.Url.Query)
+        $query = [System.Web.HttpUtility]::ParseQueryString($Request.Url.Query)
         return [string]$query['id']
     } catch { return '' }
 }
@@ -450,12 +455,12 @@ function Handle-Request {
     }
 
     if ($Context.Request.HttpMethod -eq 'GET' -and $path -match '^/api/library/([^/]+)/stream$') {
-        $id = [Web.HttpUtility]::UrlDecode($Matches[1], [Text.Encoding]::UTF8)
+        $id = [System.Web.HttpUtility]::UrlDecode($Matches[1], [System.Text.Encoding]::UTF8)
         Send-LibraryStream -Context $Context -Id $id
         return
     }
     if ($Context.Request.HttpMethod -eq 'GET' -and $path -match '^/api/library/([^/]+)/lyrics$') {
-        $id = [Web.HttpUtility]::UrlDecode($Matches[1], [Text.Encoding]::UTF8)
+        $id = [System.Web.HttpUtility]::UrlDecode($Matches[1], [System.Text.Encoding]::UTF8)
         Send-LibraryLyrics -Context $Context -Id $id
         return
     }
@@ -481,7 +486,7 @@ if (Test-UiReady) {
 try {
     Start-MusicServerApi
 
-    $script:Listener = [Net.HttpListener]::new()
+    $script:Listener = [System.Net.HttpListener]::new()
     $script:Listener.Prefixes.Add($UiPrefix)
     $script:Listener.Start()
     Write-UiLog "UI started at $UiPrefix pid=$PID"
