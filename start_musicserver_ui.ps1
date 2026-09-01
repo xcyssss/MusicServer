@@ -126,6 +126,11 @@ function Proxy-ApiRequest {
         if ($proxyResponse.Headers['Location']) {
             $Context.Response.RedirectLocation = $proxyResponse.Headers['Location']
         }
+        if ($proxyResponse.ContentLength -ge 0) {
+            $Context.Response.ContentLength64 = [long]$proxyResponse.ContentLength
+        } else {
+            $Context.Response.SendChunked = $true
+        }
 
         $input = $proxyResponse.GetResponseStream()
         try {
@@ -171,7 +176,7 @@ try {
         try {
             $path = $context.Request.Url.AbsolutePath
             switch ($path) {
-                '/'          { Send-StaticFile -Context $context -RelativePath 'index.html' -ContentType 'text/html; charset=utf-8'; continue }
+                '/'           { Send-StaticFile -Context $context -RelativePath 'index.html' -ContentType 'text/html; charset=utf-8'; continue }
                 '/index.html' { Send-StaticFile -Context $context -RelativePath 'index.html' -ContentType 'text/html; charset=utf-8'; continue }
                 '/app.js'     { Send-StaticFile -Context $context -RelativePath 'app.js' -ContentType 'application/javascript; charset=utf-8'; continue }
                 '/styles.css' { Send-StaticFile -Context $context -RelativePath 'styles.css' -ContentType 'text/css; charset=utf-8'; continue }
