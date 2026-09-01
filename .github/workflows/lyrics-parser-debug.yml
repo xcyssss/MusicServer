@@ -1,0 +1,24 @@
+name: Lyrics Parser Debug
+
+on:
+  push:
+    branches:
+      - fix/lyrics-source-contract
+
+jobs:
+  parser:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse launcher with Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $tokens = $null
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD 'start_musicserver_ui.ps1'), [ref]$tokens, [ref]$errors)
+          foreach ($error in @($errors)) {
+            Write-Host ("PARSER: line={0} col={1} id={2} message={3}" -f $error.Extent.StartLineNumber, $error.Extent.StartColumnNumber, $error.ErrorId, $error.Message)
+            Write-Host ("TEXT: {0}" -f $error.Extent.Text)
+          }
+          Write-Host "ParserErrors=$(@($errors).Count)"
+          if (@($errors).Count -gt 0) { exit 1 }
