@@ -6,7 +6,10 @@ Describe 'MusicServer web playback safeguards' -Tag @('RequiresLocalRuntime') {
         $script:apiRoot = 'http://127.0.0.1:8787'
         $script:library = @(Invoke-RestMethod -Uri "$apiRoot/api/library" -TimeoutSec 10).items
         $script:suspectFile = '『菁华浮梦』10年前的古风歌有多美，用低吟的唱法品品.mp3'
-        $script:suspect = $library | Where-Object { $_.title -eq [IO.Path]::GetFileNameWithoutExtension($suspectFile) } | Select-Object -First 1
+        $script:suspect = $library | Where-Object {
+            $displayTitle = if ($_.title) { [string]$_.title } else { [string]$_.name }
+            $displayTitle -eq [IO.Path]::GetFileNameWithoutExtension($suspectFile)
+        } | Select-Object -First 1
         if (-not $script:suspect) {
             throw "Library is missing '$script:suspectFile'. This suite asserts against a live local library; skip it via -ExcludeTag RequiresLocalRuntime."
         }
@@ -47,6 +50,14 @@ Describe 'MusicServer web UI safeguards' {
         $js | Should Match 'function reshuffleLibrary'
         $js | Should Match "\$\('#shuffle-button'\)\.addEventListener"
         $html | Should Match 'id="shuffle-button"'
+    }
+
+    It 'normalizes Navidrome name to title and counts the real local library' {
+        $js = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\web\app.js') -Raw
+        $js | Should Match 'normalizeLibraryItem'
+        $js | Should Match 'title:\s*item\?\.title\s*\|\|\s*item\?\.name'
+        $js | Should Match 'items\.map\(normalizeLibraryItem\)'
+        $js | Should Match "\$\('#local-count'\)\.textContent\s*=\s*state\.library\.length"
     }
 
     It 'ships a one-command launcher that serves the UI and maps the legacy recommendation route' {
