@@ -207,18 +207,38 @@ async function loadLyrics(url, open = true) {
   }
 }
 
+function neteasePreviewFromTrack(item) {
+  const identifiers = Array.isArray(item?.track?.identifiers) ? item.track.identifiers : [];
+  const netease = identifiers.find((identifier) => String(identifier?.type || '').toLowerCase() === 'netease' && identifier?.value);
+  if (!netease) return '';
+  return `https://music.163.com/song/media/outer/url?id=${encodeURIComponent(String(netease.value))}.mp3`;
+}
+
+function resolvePlaybackSource(item) {
+  const nestedPreview = Array.isArray(item?.track?.preview_sources)
+    ? item.track.preview_sources.find((source) => source?.media_url || source?.url)
+    : null;
+  return item?.stream_url
+    || item?.playback_source?.url
+    || item?.preview_source?.media_url
+    || item?.preview_source?.url
+    || nestedPreview?.media_url
+    || nestedPreview?.url
+    || neteasePreviewFromTrack(item);
+}
+
 async function playItem(item, collection = 'library') {
   const key = keyOf(item); const audio = $('#audio-player');
   if (!key) return;
   if (state.currentKey === key && !audio.paused) { audio.pause(); return; }
-  const source = item.stream_url || item.playback_source?.url || item.preview_source?.media_url || item.preview_source?.url;
+  const source = resolvePlaybackSource(item);
   if (!source) { showToast('这首歌暂时没有可用试听源'); return; }
   const sourceUrl = new URL(source, window.location.href).href;
   const isNewTrack = state.currentKey !== key || audio.src !== sourceUrl;
   state.currentKey = key; state.currentCollection = collection; updatePlayer(item); render();
   if (isNewTrack) { audio.pause(); audio.currentTime = 0; audio.src = sourceUrl; }
   await loadLyrics(item.lyrics_url || (item.track_id ? `/api/tracks/${encodeURIComponent(item.track_id)}/lyrics` : ''), true);
-  try { await audio.play(); } catch { showToast('浏览器阻止了自动播放，请再点一次播放'); }
+  try { await audio.play(); } catch { showToast('试听源加载失败，请稍后重试'); }
 }
 
 function adjacentItem(direction) {
