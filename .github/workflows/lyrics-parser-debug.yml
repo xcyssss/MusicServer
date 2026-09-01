@@ -16,9 +16,9 @@ jobs:
           $tokens = $null
           $errors = $null
           [void][System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD 'start_musicserver_ui.ps1'), [ref]$tokens, [ref]$errors)
-          foreach ($error in @($errors)) {
-            Write-Host ("PARSER: line={0} col={1} id={2} message={3}" -f $error.Extent.StartLineNumber, $error.Extent.StartColumnNumber, $error.ErrorId, $error.Message)
-            Write-Host ("TEXT: {0}" -f $error.Extent.Text)
+          foreach ($parseError in @($errors)) {
+            Write-Host ("PARSER: line={0} col={1} id={2} message={3}" -f $parseError.Extent.StartLineNumber, $parseError.Extent.StartColumnNumber, $parseError.ErrorId, $parseError.Message)
+            Write-Host ("TEXT: {0}" -f $parseError.Extent.Text)
           }
           Write-Host "ParserErrors=$(@($errors).Count)"
           if (@($errors).Count -gt 0) { exit 1 }
