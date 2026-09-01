@@ -1,13 +1,13 @@
-param(
-    [string]$ApiPrefix$missingMessage = 'No verified lyric source is available for this track.',
-    [string]$UiPrefix$missingMessage = 'No verified lyric source is available for this track.',
+﻿param(
+    [string]$ApiPrefix = 'http://127.0.0.1:8787/',
+    [string]$UiPrefix = 'http://127.0.0.1:8790/',
     [switch]$NoBrowser,
     [int]$ClientTimeoutSeconds = 90,
     [int]$LastClientGraceSeconds = 8
 )
 
-$ErrorActionPreference$missingMessage = 'No verified lyric source is available for this track.'
-$ProgressPreference$missingMessage = 'No verified lyric source is available for this track.'
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 try { Add-Type -AssemblyName System.Web -ErrorAction SilentlyContinue } catch {}
 
 $Root = $PSScriptRoot
@@ -34,7 +34,7 @@ if (-not (Test-Path -LiteralPath $LogRoot)) {
 function Write-UiLog {
     param([string]$Message)
     try {
-        $line$missingMessage = 'No verified lyric source is available for this track.' -f ([DateTime]::Now.ToString('yyyy-MM-dd HH:mm:ss')), $Message
+        $line = '[{0}] {1}' -f ([DateTime]::Now.ToString('yyyy-MM-dd HH:mm:ss')), $Message
         Add-Content -LiteralPath $UiLog -Value $line -Encoding UTF8
     } catch {}
 }
@@ -183,9 +183,9 @@ function Get-NetEaseLyricsById {
     param([Parameter(Mandatory)][string]$SongId)
 
     $headers = @{
-        'User-Agent'$missingMessage = 'No verified lyric source is available for this track.'
-        'Referer'$missingMessage = 'No verified lyric source is available for this track.'
-        'Accept'$missingMessage = 'No verified lyric source is available for this track.'
+        'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36'
+        'Referer' = 'https://music.163.com/'
+        'Accept' = 'application/json,text/plain,*/*'
     }
     try {
         $encoded = [System.Uri]::EscapeDataString($SongId)
@@ -204,7 +204,7 @@ function Get-UiLibrary {
     $seenFiles = @{}
     $script:LibraryFiles = @{}
 
-    $sql$missingMessage = 'No verified lyric source is available for this track.'
+    $sql = 'SELECT id, name, artist, album, path, duration, track, addedto, collectionat FROM songs;'
     foreach ($row in @(Invoke-NavidromeSqliteJson -Sql $sql)) {
         $file = [string]$row.path
         if ([string]::IsNullOrWhiteSpace($file)) { continue }
@@ -215,11 +215,11 @@ function Get-UiLibrary {
         if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { continue }
 
         $seenFiles[$file.ToLowerInvariant()] = $true
-        $id$missingMessage = 'No verified lyric source is available for this track.' + [string]$row.id
+        $id = 'library-' + [string]$row.id
         $script:LibraryFiles[$id] = $file
         $lrcPath = Get-LrcPath -File $file
         [void]$items.Add([pscustomobject]@{
-            id = $id; source$missingMessage = 'No verified lyric source is available for this track.'; provider$missingMessage = 'No verified lyric source is available for this track.'
+            id = $id; source = 'navidrome'; provider = 'navidrome'
             name = [string]$row.name; title = [string]$row.name
             artist = [string]$row.artist; album = [string]$row.album
             duration = [int]$row.duration; track = [int]$row.track
@@ -243,9 +243,9 @@ function Get-UiLibrary {
             $artist = [string](Split-Path -Leaf (Split-Path -Parent $file))
             $lrcPath = Get-LrcPath -File $file
             [void]$items.Add([pscustomobject]@{
-                id = $id; source$missingMessage = 'No verified lyric source is available for this track.'; provider$missingMessage = 'No verified lyric source is available for this track.'
+                id = $id; source = 'local'; provider = 'navidrome'
                 name = $title; title = $title; artist = $artist; album = $artist
-                duration = 0; track = 0; addedto$missingMessage = 'No verified lyric source is available for this track.'; collectionat$missingMessage = 'No verified lyric source is available for this track.'
+                duration = 0; track = 0; addedto = ''; collectionat = ''
                 path = $file; file = $file
                 stream_url = "/api/library/$id/stream"
                 lyrics_url = if ($lrcPath) { "/api/library/$id/lyrics" } else { '' }
@@ -274,9 +274,9 @@ function Send-Json {
     param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)]$Body, [int]$StatusCode = 200)
     $bytes = [System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $Body -Depth 20))
     $Context.Response.StatusCode = $StatusCode
-    $Context.Response.ContentType$missingMessage = 'No verified lyric source is available for this track.'
+    $Context.Response.ContentType = 'application/json; charset=utf-8'
     $Context.Response.ContentLength64 = $bytes.Length
-    $Context.Response.Headers['Cache-Control']$missingMessage = 'No verified lyric source is available for this track.'
+    $Context.Response.Headers['Cache-Control'] = 'no-store'
     $Context.Response.OutputStream.Write($bytes, 0, $bytes.Length)
     $Context.Response.OutputStream.Close()
 }
@@ -299,7 +299,7 @@ function Send-StaticFile {
     $Context.Response.StatusCode = 200
     $Context.Response.ContentType = $ContentType
     $Context.Response.ContentLength64 = $bytes.Length
-    $Context.Response.Headers['Cache-Control']$missingMessage = 'No verified lyric source is available for this track.'
+    $Context.Response.Headers['Cache-Control'] = 'no-store'
     $Context.Response.OutputStream.Write($bytes, 0, $bytes.Length)
     $Context.Response.OutputStream.Close()
 }
@@ -314,7 +314,7 @@ function Send-IndexHtml {
   const clientId = (globalThis.crypto && crypto.randomUUID)
     ? crypto.randomUUID()
     : String(Date.now()) + '-' + Math.random().toString(16).slice(2);
-  const heartbeatUrl$missingMessage = 'No verified lyric source is available for this track.' + encodeURIComponent(clientId);
+  const heartbeatUrl = '/ui/heartbeat?id=' + encodeURIComponent(clientId);
   const heartbeat = () => fetch(heartbeatUrl, {
     method: 'POST', cache: 'no-store', keepalive: true
   }).catch(() => {});
@@ -335,9 +335,9 @@ function Send-IndexHtml {
     }
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($html)
     $Context.Response.StatusCode = 200
-    $Context.Response.ContentType$missingMessage = 'No verified lyric source is available for this track.'
+    $Context.Response.ContentType = 'text/html; charset=utf-8'
     $Context.Response.ContentLength64 = $bytes.Length
-    $Context.Response.Headers['Cache-Control']$missingMessage = 'No verified lyric source is available for this track.'
+    $Context.Response.Headers['Cache-Control'] = 'no-store'
     $Context.Response.OutputStream.Write($bytes, 0, $bytes.Length)
     $Context.Response.OutputStream.Close()
 }
@@ -346,13 +346,13 @@ function Send-LibraryStream {
     param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)][string]$Id)
     $file = Resolve-UiLibraryFile -Id $Id
     if (-not $file) {
-        Send-Json -Context $Context -Body @{ error$missingMessage = 'No verified lyric source is available for this track.'; id = $Id } -StatusCode 404
+        Send-Json -Context $Context -Body @{ error = 'FILE_NOT_FOUND'; id = $Id } -StatusCode 404
         return
     }
 
     $contentTypes = @{
-        '.mp3'$missingMessage = 'No verified lyric source is available for this track.'; '.flac'$missingMessage = 'No verified lyric source is available for this track.'; '.wav'$missingMessage = 'No verified lyric source is available for this track.'
-        '.aac'$missingMessage = 'No verified lyric source is available for this track.'; '.m4a'$missingMessage = 'No verified lyric source is available for this track.'
+        '.mp3' = 'audio/mpeg'; '.flac' = 'audio/flac'; '.wav' = 'audio/wav'
+        '.aac' = 'audio/aac'; '.m4a' = 'audio/mp4'
     }
     $ext = [System.IO.Path]::GetExtension($file).ToLowerInvariant()
     $contentType = if ($contentTypes.ContainsKey($ext)) { $contentTypes[$ext] } else { 'application/octet-stream' }
@@ -377,8 +377,8 @@ function Send-LibraryLyrics {
     $lrcPath = if ($file) { Get-LrcPath -File $file } else { $null }
     if (-not $lrcPath) {
         Send-Json -Context $Context -Body @{
-            id = $Id; available = $false; format$missingMessage = 'No verified lyric source is available for this track.'; text$missingMessage = 'No verified lyric source is available for this track.'; quality$missingMessage = 'No verified lyric source is available for this track.'
-            source$missingMessage = 'No verified lyric source is available for this track.'; message$missingMessage = 'No verified lyric source is available for this track.'
+            id = $Id; available = $false; format = 'lrc'; text = ''; quality = 'MISSING'
+            source = 'local'; message = '这首歌暂时没有找到本地歌词。'
         }
         return
     }
@@ -386,8 +386,8 @@ function Send-LibraryLyrics {
     $quality = Get-LyricQuality -File $file
     if ($quality -in @('SUSPECT','NO_MATCH','NO_LYRIC','ERROR')) {
         Send-Json -Context $Context -Body @{
-            id = $Id; available = $false; format$missingMessage = 'No verified lyric source is available for this track.'; text$missingMessage = 'No verified lyric source is available for this track.'; quality = $quality
-            source$missingMessage = 'No verified lyric source is available for this track.'; message$missingMessage = 'No verified lyric source is available for this track.'
+            id = $Id; available = $false; format = 'lrc'; text = ''; quality = $quality
+            source = 'local'; message = '歌词匹配置信度不足，已隐藏，避免显示错误歌词。'
         }
         return
     }
@@ -400,8 +400,8 @@ function Send-LibraryLyrics {
         } catch {}
     }
     Send-Json -Context $Context -Body @{
-        id = $Id; available = $true; format$missingMessage = 'No verified lyric source is available for this track.'; text = $lyrics; quality = $quality
-        source$missingMessage = 'No verified lyric source is available for this track.'; path = $lrcPath; message$missingMessage = 'No verified lyric source is available for this track.'
+        id = $Id; available = $true; format = 'lrc'; text = $lyrics; quality = $quality
+        source = 'local'; path = $lrcPath; message = ''
     }
 }
 
@@ -414,8 +414,8 @@ function Send-TrackLyrics {
         $details = Invoke-RestMethod -Uri $trackUrl -TimeoutSec 10
     } catch {
         Send-Json -Context $Context -Body @{
-            track_id = $TrackId; available = $false; format$missingMessage = 'No verified lyric source is available for this track.'; text$missingMessage = 'No verified lyric source is available for this track.'; quality$missingMessage = 'No verified lyric source is available for this track.'
-            source$missingMessage = 'No verified lyric source is available for this track.'; message$missingMessage = 'No verified lyric source is available for this track.'
+            track_id = $TrackId; available = $false; format = 'lrc'; text = ''; quality = 'MISSING'
+            source = 'none'; message = '无法读取歌曲信息，暂时无法获取歌词。'
         }
         return
     }
@@ -425,8 +425,8 @@ function Send-TrackLyrics {
         $lyrics = Get-NetEaseLyricsById -SongId $neteaseId
         if (-not [string]::IsNullOrWhiteSpace($lyrics)) {
             Send-Json -Context $Context -Body @{
-                track_id = $TrackId; available = $true; format$missingMessage = 'No verified lyric source is available for this track.'; text = $lyrics; quality$missingMessage = 'No verified lyric source is available for this track.'
-                source$missingMessage = 'No verified lyric source is available for this track.'; song_id = $neteaseId; message$missingMessage = 'No verified lyric source is available for this track.'
+                track_id = $TrackId; available = $true; format = 'lrc'; text = $lyrics; quality = 'EXACT'
+                source = 'netease'; song_id = $neteaseId; message = ''
             }
             return
         }
@@ -438,14 +438,14 @@ function Send-TrackLyrics {
         return
     }
 
-    $missingSource$missingMessage = 'No verified lyric source is available for this track.'
-    $missingMessage$missingMessage = 'No verified lyric source is available for this track.'
+    $missingSource = 'none'
+    $missingMessage = '这首歌暂时没有可验证的歌词来源。'
     if ($neteaseId) {
-        $missingSource$missingMessage = 'No verified lyric source is available for this track.'
-        $missingMessage$missingMessage = 'No verified lyric source is available for this track.'
+        $missingSource = 'netease'
+        $missingMessage = '网易云暂未返回这首歌的歌词。'
     }
     Send-Json -Context $Context -Body @{
-        track_id = $TrackId; available = $false; format$missingMessage = 'No verified lyric source is available for this track.'; text$missingMessage = 'No verified lyric source is available for this track.'; quality$missingMessage = 'No verified lyric source is available for this track.'
+        track_id = $TrackId; available = $false; format = 'lrc'; text = ''; quality = 'MISSING'
         source = $missingSource; message = $missingMessage
     }
 }
