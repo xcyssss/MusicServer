@@ -1,0 +1,35 @@
+name: Lyrics Source ASCII Fix
+
+on:
+  push:
+    branches:
+      - fix/lyrics-source-contract
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/lyrics-source-contract
+      - name: Replace non-ASCII lyric messages in PS5 launcher
+        shell: pwsh
+        run: |
+          $path = Join-Path $PWD 'start_musicserver_ui.ps1'
+          $text = Get-Content -LiteralPath $path -Raw -Encoding UTF8
+          $text = [regex]::Replace($text, "source = 'local'; message = '[^']*'", "source = 'local'; message = 'Local lyrics are unavailable or unverified for this track.'")
+          $text = [regex]::Replace($text, "source = 'none'; message = '[^']*'", "source = 'none'; message = 'Track metadata is unavailable, so lyrics cannot be loaded.'")
+          $text = [regex]::Replace($text, "\$missingMessage = '[^']*'", "`$missingMessage = 'No verified lyric source is available for this track.'")
+          [System.IO.File]::WriteAllText($path, $text, [System.Text.UTF8Encoding]::new($false))
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- start_musicserver_ui.ps1
+          if (git diff --cached --quiet) {
+            Write-Host 'No launcher changes needed.'
+            exit 0
+          }
+          git commit -m 'Make lyric gateway source PS5-safe'
+          git push origin HEAD:fix/lyrics-source-contract
