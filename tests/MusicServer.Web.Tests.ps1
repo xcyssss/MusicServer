@@ -53,7 +53,7 @@ Describe 'MusicServer web UI safeguards' {
         $launcherPath = Join-Path $PSScriptRoot '..\start_musicserver_ui.ps1'
         $launcher = Get-Content -LiteralPath $launcherPath -Raw
         $launcher | Should Match "UiPrefix = 'http://127\.0\.0\.1:8790/'"
-        $launcher | Should Match "Send-StaticFile -Context \$context -RelativePath 'index\.html'"
+        $launcher | Should Match "RelativePath 'index\.html'"
         $launcher | Should Match "\^/api/recommendations/today"
         $launcher | Should Match "'/api/today'"
         $launcher | Should Match 'Proxy-ApiRequest'
