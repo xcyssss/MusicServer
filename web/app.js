@@ -24,6 +24,7 @@ const duration = (seconds) => { const value = Number(seconds || 0); return value
 const keyOf = (item) => String(item?.track_id || item?.id || '');
 const itemStatus = (item) => item.wanted?.state || item.local_status || 'REMOTE';
 const statusClass = (status) => status === 'LOCAL' ? 'local' : ['DOWNLOADING', 'RESOLVING', 'VALIDATING'].includes(status) ? 'downloading' : ['RETRY_WAIT', 'CANCEL_REQUESTED'].includes(status) ? 'retry' : '';
+const normalizeLibraryItem = (item) => ({ ...item, title: item?.title || item?.name || '' });
 
 function showToast(message) {
   const toast = $('#toast'); toast.textContent = message; toast.classList.add('show');
@@ -58,7 +59,7 @@ function persistLibraryOrder() {
 }
 
 function syncLibrary(items) {
-  const incoming = Array.isArray(items) ? items : [];
+  const incoming = Array.isArray(items) ? items.map(normalizeLibraryItem) : [];
   state.librarySequence = incoming;
   if (state.mode === 'random' && state.libraryOrder.length) {
     state.library = orderByKeys(incoming, state.libraryOrder);
@@ -102,6 +103,7 @@ function renderLibrary() {
   const visible = filteredLibrary();
   $('#library-count').textContent = `${state.library.length} 首`;
   $('#library-nav-count').textContent = state.library.length;
+  $('#local-count').textContent = state.library.length;
   if (!state.library.length) { list.innerHTML = '<div class="empty-state">本地曲库还没有歌曲。</div>'; return; }
   if (!visible.length) { list.innerHTML = '<div class="empty-state">没有找到匹配的歌曲。</div>'; return; }
   list.innerHTML = visible.map((item) => {
@@ -122,7 +124,7 @@ function renderRecommendations() {
   $('#recommendation-count').textContent = state.items.length;
   $('#hero-count').textContent = state.items.length || 20;
   $('#liked-count').textContent = state.items.filter((item) => item.liked).length;
-  $('#local-count').textContent = state.items.filter((item) => item.local_status === 'LOCAL').length;
+  $('#local-count').textContent = state.library.length;
   $('#wanted-count').textContent = state.items.filter((item) => item.wanted?.state && item.wanted.state !== 'LOCAL').length;
   $('#queue-count').textContent = state.items.filter((item) => item.wanted?.state && item.wanted.state !== 'LOCAL').length;
   if (!state.items.length) { list.innerHTML = '<div class="empty-state">今天还没有推荐，稍后再来看看。</div>'; return; }
