@@ -11,6 +11,7 @@ lyrics_report.csv
 Navidrome/Data/
 Navidrome/*.log
 Navidrome/service_*.log
+logs/
 *.db
 *.db-*
 *.sqlite
