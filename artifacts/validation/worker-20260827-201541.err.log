@@ -1,0 +1,7 @@
+Move-Item : Cannot create a file when that file already exists.
+所在位置 E:\Project\MusicServer\MusicServer.Core.psm1:162 字符: 5
++     Move-Item -LiteralPath $temp -Destination $path -Force
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : WriteError: (E:\Project\Musi...ate\wanted.json:FileInfo) [Move-Item], IOException
+    + FullyQualifiedErrorId : MoveFileInfoItemIOError,Microsoft.PowerShell.Commands.MoveItemCommand
+ 

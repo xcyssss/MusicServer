@@ -1,0 +1,7 @@
+警告: 模块“MusicServer.Core”中的某些导入命令的名称包含未批准的动词，这些动词可能导致这些命令名不易被发现。若要查找具有未批准的动词的命令，请使用 Verbose 参数再次运行 Import-Module 
+命令。有关批准的动词列表，请键入 Get-Verb。
+警告: 模块“MusicServer.Core”中的某些导入命令的名称包含未批准的动词，这些动词可能导致这些命令名不易被发现。若要查找具有未批准的动词的命令，请使用 Verbose 参数再次运行 Import-Module 
+命令。有关批准的动词列表，请键入 Get-Verb。
+警告: 模块“MusicServer.Providers”中的某些导入命令的名称包含未批准的动词，这些动词可能导致这些命令名不易被发现。若要查找具有未批准的动词的命令，请使用 Verbose 参数再次运行 Import-Module 
+命令。有关批准的动词列表，请键入 Get-Verb。
+MusicServer API listening on http://127.0.0.1:8787/

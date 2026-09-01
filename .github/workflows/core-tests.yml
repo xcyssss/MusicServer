@@ -1,0 +1,79 @@
+name: MusicServer Core Tests
+
+on:
+  push:
+    branches:
+      - main
+      - 'review/**'
+    paths:
+      - '**/*.ps1'
+      - '**/*.psm1'
+      - 'web/**'
+      - '.github/workflows/core-tests.yml'
+  pull_request:
+    paths:
+      - '**/*.ps1'
+      - '**/*.psm1'
+      - 'web/**'
+      - '.github/workflows/core-tests.yml'
+
+# Suites are split across two parallel jobs because a serial run exceeds
+# timeout-minutes on Windows PowerShell 5.1 (measured locally: ApiTransaction
+# ~334s, ApiRuntime ~152s, Core+Database+V2+WorkerConcurrency ~480s).
+#
+# Suites tagged RequiresLocalRuntime assert against a live MusicServer API and
+# this machine's library / lyrics_report.csv, so they are excluded here and must
+# be run locally.
+jobs:
+  tests:
+    name: ${{ matrix.group }}
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [state, api]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ensure Pester 3.4.0
+        shell: powershell
+        run: |
+          $pester = Get-Module -ListAvailable Pester | Where-Object { $_.Version -eq [Version]'3.4.0' } | Select-Object -First 1
+          if (-not $pester) {
+            Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+            Install-Module Pester -RequiredVersion 3.4.0 -Scope CurrentUser -Force -SkipPublisherCheck
+          }
+
+      - name: Ensure sqlite3
+        shell: powershell
+        run: |
+          # MusicServer.Database.psm1 resolves sqlite3.exe from PATH with no
+          # fallback path, and GitHub runners do not ship a sqlite3 binary.
+          if (-not (Get-Command sqlite3 -ErrorAction SilentlyContinue)) {
+            choco install sqlite -y --no-progress
+            $env:PATH = "$env:PATH;C:\ProgramData\chocolatey\bin"
+          }
+          $sqlite = Get-Command sqlite3 -ErrorAction Stop
+          Write-Host "sqlite3 -> $($sqlite.Source)"
+
+      - name: Run Pester suites
+        shell: powershell
+        run: |
+          Import-Module Pester -RequiredVersion 3.4.0 -Force
+          $groups = @{
+            state = @('Core', 'Database', 'V2', 'WorkerConcurrency', 'Recommendation', 'LegacyRetirement', 'Web')
+            api   = @('ApiTransaction', 'ApiRuntime')
+          }
+          $paths = @($groups['${{ matrix.group }}'] | ForEach-Object { ".\tests\MusicServer.$_.Tests.ps1" })
+          Write-Host "Suites: $($paths -join ', ')"
+          $result = Invoke-Pester -Path $paths -ExcludeTag RequiresLocalRuntime -PassThru
+          Write-Host "Passed=$($result.PassedCount) Failed=$($result.FailedCount)"
+          if ($result.FailedCount -gt 0) {
+            $result.TestResult | Where-Object { $_.Result -eq 'Failed' } | ForEach-Object {
+              Write-Host "FAILED: $($_.Name)"
+              Write-Host "  :: $($_.FailureMessage)"
+            }
+            exit 1
+          }

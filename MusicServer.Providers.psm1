@@ -1,5 +1,6 @@
 ﻿Import-Module (Join-Path $PSScriptRoot 'MusicServer.Core.psm1') -Force
 Set-StrictMode -Version 3.0
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.State.psm1') -Force
 
 function New-DownloadCandidate {
     param(
@@ -20,36 +21,45 @@ function New-DownloadCandidate {
     }
 }
 
+function Ensure-ProviderDatabase {
+    param([Parameter(Mandatory)][psobject]$Config)
+    $dbPath = Join-Path $Config.StateDir 'musicserver.db'
+    Initialize-MusicServerDatabase -DbPath $dbPath -SqliteExe $Config.Sqlite
+    Initialize-MusicServerSchema
+}
+
 function Get-ProviderHealth {
     param([Parameter(Mandatory)][psobject]$Config, [Parameter(Mandatory)][string]$Provider)
-    $items = @(Read-StateCollection -Config $Config -Name providers)
-    $health = $items | Where-Object { [string]$_.provider -eq $Provider } | Select-Object -First 1
-    if ($health) { return $health }
-    return [pscustomobject]@{
-        provider = $Provider; state = 'CLOSED'; success_count = 0; failure_count = 0
-        consecutive_failures = 0; consecutive_412 = 0; last_success = $null; last_failure = $null
-        last_412_at = $null; blocked_until = $null; average_latency_ms = 0
-        probe_pending = $false; updated_at = Get-NowIso
-    }
+    Ensure-ProviderDatabase -Config $Config | Out-Null
+    return (Get-ProviderHealthDb -Provider $Provider)
 }
 
 function Save-ProviderHealth {
     param([Parameter(Mandatory)][psobject]$Config, [Parameter(Mandatory)][psobject]$Health)
-    $items = @(Read-StateCollection -Config $Config -Name providers)
-    $Health.updated_at = Get-NowIso
-    $found = $false
-    for ($i = 0; $i -lt $items.Count; $i++) {
-        if ([string]$items[$i].provider -eq [string]$Health.provider) { $items[$i] = $Health; $found = $true; break }
+    Ensure-ProviderDatabase -Config $Config | Out-Null
+    if ($Health.PSObject.Properties['probe_pending']) {
+        $Health | Add-Member -NotePropertyName half_open_probe_claimed -NotePropertyValue ([int]([bool]$Health.probe_pending)) -Force
     }
-    if (-not $found) { $items += $Health }
-    Write-StateCollection -Config $Config -Name providers -Items $items
+    Save-ProviderHealthDb -Health $Health | Out-Null
     return $Health
 }
 
 function Get-ProviderStatuses {
     param([Parameter(Mandatory)][psobject]$Config)
-    $names = @('local','bilibili')
+    $names = @('local','bilibili_search','bilibili_download')
     return @($names | ForEach-Object { Get-ProviderHealth -Config $Config -Provider $_ })
+}
+
+function Test-ProviderRequestAvailable {
+    param([Parameter(Mandatory)][psobject]$Config, [Parameter(Mandatory)][string]$Provider)
+    $health = Get-ProviderHealth -Config $Config -Provider $Provider
+    $state = [string]$health.state
+    if ($state -eq 'CLOSED') { return $true }
+    if ($state -eq 'HALF_OPEN') { return [bool]$health.probe_pending }
+    if ($state -ne 'OPEN') { return $true }
+    if (-not $health.blocked_until) { return $true }
+    $blocked = Convert-ToUtcDateTime $health.blocked_until
+    return (-not $blocked -or $blocked -le [DateTime]::UtcNow)
 }
 
 function Claim-ProviderRequest {
@@ -58,22 +68,19 @@ function Claim-ProviderRequest {
         [Parameter(Mandatory)][string]$Provider,
         [int]$ProbeCooldownMinutes = 15
     )
+    Ensure-ProviderDatabase -Config $Config | Out-Null
     $health = Get-ProviderHealth -Config $Config -Provider $Provider
     $now = [DateTime]::UtcNow
     if ([string]$health.state -eq 'OPEN') {
         $blocked = $null
         if ($health.blocked_until) { $blocked = Convert-ToUtcDateTime $health.blocked_until }
         if ($blocked -and $blocked -gt $now) { return $false }
-        $health.state = 'HALF_OPEN'
-        $health.probe_pending = $true
-        Save-ProviderHealth -Config $Config -Health $health | Out-Null
-        Write-StructuredEvent -Config $Config -Provider $Provider -Event 'CIRCUIT_HALF_OPEN' -Message 'cooldown elapsed; one probe permitted'
+        if (-not (Claim-HalfOpenProbeDb -Provider $Provider)) { return $false }
+        Write-MusicServerEventDb -Provider $Provider -EventType 'CIRCUIT_HALF_OPEN' -Message 'cooldown elapsed; one real request probe permitted'
+        return $true
     }
     if ([string]$health.state -eq 'HALF_OPEN') {
-        # The worker is single-consumer. probe_pending acts as the persisted one-probe lease.
-        if (-not [bool]$health.probe_pending) { return $false }
-        $health.probe_pending = $false
-        Save-ProviderHealth -Config $Config -Health $health | Out-Null
+        return [bool](Claim-HalfOpenProbeDb -Provider $Provider)
     }
     return $true
 }
@@ -122,11 +129,17 @@ function Record-ProviderFailure {
         $health.state = 'OPEN'
         $health.probe_pending = $false
         Save-ProviderHealth -Config $Config -Health $health | Out-Null
-        Write-StructuredEvent -Config $Config -Provider $Provider -Event 'CIRCUIT_OPEN' -ErrorType 'HTTP_412' -HttpStatus 412 -Message "blocked_until=$($health.blocked_until); cooldown_minutes=$minutes"
+        Write-MusicServerEventDb -Provider $Provider -EventType 'CIRCUIT_OPEN' -ErrorType 'HTTP_412' -HttpStatus 412 -Message "blocked_until=$($health.blocked_until); cooldown_minutes=$minutes"
     } else {
         Save-ProviderHealth -Config $Config -Health $health | Out-Null
     }
     return $health
+}
+
+function Get-AllowedDurationDrift {
+    param([int]$ExpectedDuration)
+    if ($ExpectedDuration -le 0) { return 20 }
+    return [int][Math]::Max(8, [Math]::Min(20, [Math]::Ceiling($ExpectedDuration * 0.05)))
 }
 
 function Get-CandidateScore {
@@ -151,8 +164,8 @@ function Get-CandidateScore {
     if ([int]$Track.duration -gt 0 -and [int]$Candidate.duration -gt 0) {
         $durationDiff = [Math]::Abs([int]$Track.duration - [int]$Candidate.duration)
         if ($durationDiff -le 5) { $identity += 20 }
-        elseif ($durationDiff -le 20) { $identity += 8 }
-        elseif ($durationDiff -gt 45) { $identity -= 100 }
+        elseif ($durationDiff -le (Get-AllowedDurationDrift -ExpectedDuration ([int]$Track.duration))) { $identity += 8 }
+        else { $identity -= 100 }
     }
 
     $reliability = switch ([string]$Candidate.provider) {
@@ -172,8 +185,46 @@ function Get-CandidateScore {
         $healthPenalty = [Math]::Min(40, [int]$Health.consecutive_failures * 5)
         if ([string]$Health.state -eq 'OPEN') { $healthPenalty += 1000 }
     }
-    $score = $identity + $reliability - $cost - $healthPenalty - ([int]$Candidate.priority * -1)
+    $score = $identity + $reliability - $cost - $healthPenalty + [int]$Candidate.priority
     return [pscustomobject]@{ score = [double]$score; identity_confidence = $identity; duration_diff = $durationDiff; request_cost = $cost; rate_limit_penalty = $healthPenalty }
+}
+
+function Test-DownloadCandidateIdentity {
+    param([Parameter(Mandatory)][psobject]$Track, [Parameter(Mandatory)][psobject]$Candidate)
+
+    if ([string]$Candidate.provider -eq 'local') { return $true }
+    $expectedDuration = [int]$Track.duration
+    $candidateDuration = [int]$Candidate.duration
+    if ($expectedDuration -gt 0 -and $candidateDuration -gt 0) {
+        $diff = [Math]::Abs($expectedDuration - $candidateDuration)
+        if ($diff -gt (Get-AllowedDurationDrift -ExpectedDuration $expectedDuration)) { return $false }
+    }
+    if ([string]$Candidate.provider -eq 'bilibili_direct') { return $true }
+
+    $titleKey = Normalize-MusicText ([string]$Track.title)
+    $candidateTitle = Normalize-MusicText ([string]$Candidate.title)
+    if (-not $titleKey -or -not $candidateTitle) { return $false }
+    $titleEvidence = ($candidateTitle -eq $titleKey) -or $candidateTitle.Contains($titleKey) -or $titleKey.Contains($candidateTitle)
+    if (-not $titleEvidence) { return $false }
+
+    $artistKeys = @([string]$Track.artist -split '[,，、/&]' | ForEach-Object { Normalize-MusicText $_ } | Where-Object { $_ })
+    if ($artistKeys.Count -eq 0) { return $true }
+    $candidateArtist = Normalize-MusicText ([string]$Candidate.artist)
+    $artistEvidence = $false
+    foreach ($artistKey in $artistKeys) {
+        if (($candidateArtist -and $candidateArtist.Contains($artistKey)) -or $candidateTitle.Contains($artistKey)) {
+            $artistEvidence = $true
+            break
+        }
+    }
+    if ($artistEvidence) { return $true }
+
+    # Some clean music uploads use an exact song title but the uploader is not the artist.
+    # Only accept that fallback when duration is also extremely close.
+    if ($candidateTitle -eq $titleKey -and $expectedDuration -gt 0 -and $candidateDuration -gt 0) {
+        return ([Math]::Abs($expectedDuration - $candidateDuration) -le 5)
+    }
+    return $false
 }
 
 function Get-SafeDownloadName {
@@ -185,7 +236,7 @@ function Get-SafeDownloadName {
 
 function Search-BilibiliCandidates {
     param([Parameter(Mandatory)][psobject]$Config, [Parameter(Mandatory)][psobject]$Track)
-    if (-not (Claim-ProviderRequest -Config $Config -Provider 'bilibili')) {
+    if (-not (Claim-ProviderRequest -Config $Config -Provider 'bilibili_search')) {
         return [pscustomobject]@{ Candidates = @(); Blocked = $true; Error = 'CIRCUIT_OPEN'; HttpStatus = 0 }
     }
     $keyword = "$($Track.title) $(($Track.artist -split '[,，、]')[0])".Trim()
@@ -199,11 +250,11 @@ function Search-BilibiliCandidates {
     $started.Stop()
     $joined = ($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
     if ($joined -match '412|Precondition Failed') {
-        Record-ProviderFailure -Config $Config -Provider 'bilibili' -HttpStatus 412 -ErrorType 'HTTP_412' -Message 'search metadata request blocked' | Out-Null
+        Record-ProviderFailure -Config $Config -Provider 'bilibili_search' -HttpStatus 412 -ErrorType 'HTTP_412' -Message 'search metadata request blocked' | Out-Null
         return [pscustomobject]@{ Candidates = @(); Blocked = $true; Error = 'HTTP_412'; HttpStatus = 412 }
     }
     if ($LASTEXITCODE -ne 0) {
-        Record-ProviderFailure -Config $Config -Provider 'bilibili' -ErrorType 'SEARCH_FAILED' -Message ($joined | Select-Object -Last 1) | Out-Null
+        Record-ProviderFailure -Config $Config -Provider 'bilibili_search' -ErrorType 'SEARCH_FAILED' -Message ($joined | Select-Object -Last 1) | Out-Null
         return [pscustomobject]@{ Candidates = @(); Blocked = $false; Error = 'SEARCH_FAILED'; HttpStatus = 0 }
     }
     try {
@@ -212,13 +263,14 @@ function Search-BilibiliCandidates {
         $results = foreach ($entry in $entries) {
             if (-not $entry.id) { continue }
             $url = if ($entry.webpage_url) { [string]$entry.webpage_url } else { "https://www.bilibili.com/video/$($entry.id)" }
+            # uploader is an UP account, not reliable song-artist metadata. Keep it in metadata only.
             New-DownloadCandidate -Provider 'bilibili_search' -Url $url -Bvid ([string]$entry.id) `
-                -Title ([string]$entry.title) -Artist ([string]$entry.uploader) -Duration ([int]$entry.duration) -Priority 10 -Metadata $entry
+                -Title ([string]$entry.title) -Artist '' -Duration ([int]$entry.duration) -Priority 10 -Metadata $entry
         }
-        Record-ProviderSuccess -Config $Config -Provider 'bilibili' -LatencyMs $started.Elapsed.TotalMilliseconds
+        Record-ProviderSuccess -Config $Config -Provider 'bilibili_search' -LatencyMs $started.Elapsed.TotalMilliseconds
         return [pscustomobject]@{ Candidates = @($results); Blocked = $false; Error = ''; HttpStatus = 0 }
     } catch {
-        Record-ProviderFailure -Config $Config -Provider 'bilibili' -ErrorType 'INVALID_SEARCH_RESPONSE' -Message $_.Exception.Message | Out-Null
+        Record-ProviderFailure -Config $Config -Provider 'bilibili_search' -ErrorType 'INVALID_SEARCH_RESPONSE' -Message $_.Exception.Message | Out-Null
         return [pscustomobject]@{ Candidates = @(); Blocked = $false; Error = 'INVALID_SEARCH_RESPONSE'; HttpStatus = 0 }
     }
 }
@@ -249,27 +301,31 @@ function Resolve-DownloadCandidates {
         $candidates += New-DownloadCandidate -Provider 'local' -Url $local.File.FullName -Title $Track.title -Artist $Track.artist -Duration ([int]$Track.duration) -Priority 100 -Metadata $local
     }
 
-    # 明确 BVID/URL 是精确资源，优先于模糊搜索；Provider OPEN 时不发任何 Bilibili 请求。
+    # Direct candidates are known resources. Do not spend another search request if download is currently blocked.
     $direct = @(Get-DirectCandidates -Track $Track)
-    if ($direct.Count -gt 0 -and (Claim-ProviderRequest -Config $Config -Provider 'bilibili')) { $candidates += $direct }
+    if ($direct.Count -gt 0) {
+        if (-not (Test-ProviderRequestAvailable -Config $Config -Provider 'bilibili_download')) { return @() }
+        $candidates += $direct
+    }
 
-    # Search 永远是最后兜底：仅在没有本地/精确候选时执行一次元数据搜索。
     if ($candidates.Count -eq 0) {
+        # A search is useless when the media endpoint cannot be used anyway.
+        if (-not (Test-ProviderRequestAvailable -Config $Config -Provider 'bilibili_download')) { return @() }
         $search = Search-BilibiliCandidates -Config $Config -Track $Track
         if (-not $search.Blocked) { $candidates += $search.Candidates }
     }
-    $health = Get-ProviderHealth -Config $Config -Provider 'bilibili'
+    $downloadHealth = Get-ProviderHealth -Config $Config -Provider 'bilibili_download'
     $ranked = foreach ($candidate in $candidates) {
-        if ($candidate.provider -like 'bilibili*' -and [string]$health.state -eq 'OPEN') { continue }
-        $score = Get-CandidateScore -Track $Track -Candidate $candidate -Health $(if ($candidate.provider -like 'bilibili*') { $health } else { $null })
-        if ([int]$Track.duration -gt 0 -and [int]$candidate.duration -gt 0 -and $score.duration_diff -gt 45) { continue }
+        if ($candidate.provider -like 'bilibili*' -and -not (Test-ProviderRequestAvailable -Config $Config -Provider 'bilibili_download')) { continue }
+        if (-not (Test-DownloadCandidateIdentity -Track $Track -Candidate $candidate)) { continue }
+        $score = Get-CandidateScore -Track $Track -Candidate $candidate -Health $(if ($candidate.provider -like 'bilibili*') { $downloadHealth } else { $null })
         [pscustomobject]@{ Candidate = $candidate; Score = $score }
     }
     return @($ranked | Sort-Object @{Expression={$_.Score.score};Descending=$true})
 }
 
 function Validate-DownloadedCandidate {
-    param([Parameter(Mandatory)][psobject]$Config, [Parameter(Mandatory)][psobject]$Track, [Parameter(Mandatory)][string]$Path, [int]$ToleranceSeconds = 45)
+    param([Parameter(Mandatory)][psobject]$Config, [Parameter(Mandatory)][psobject]$Track, [Parameter(Mandatory)][string]$Path, [int]$ToleranceSeconds = 0)
     $duration = 0
     if (Test-Path -LiteralPath $Config.FFprobe) {
         try {
@@ -277,20 +333,23 @@ function Validate-DownloadedCandidate {
             if ($raw) { $duration = [int][double]$raw }
         } catch {}
     }
-    if ($duration -le 0) { return [pscustomobject]@{ Valid = $false; Duration = 0; DurationDiff = 0; Reason = 'FFPROBE_FAILED' } }
+    if ($duration -le 0) { return [pscustomobject]@{ Valid = $false; Duration = 0; DurationDiff = 0; AllowedDiff = 0; Reason = 'FFPROBE_FAILED' } }
     $diff = if ([int]$Track.duration -gt 0) { [Math]::Abs($duration - [int]$Track.duration) } else { 0 }
-    return [pscustomobject]@{ Valid = ($diff -le $ToleranceSeconds); Duration = $duration; DurationDiff = $diff; Reason = if ($diff -le $ToleranceSeconds) { 'PASS' } else { 'WRONG_DURATION' } }
+    $allowed = if ($ToleranceSeconds -gt 0) { $ToleranceSeconds } else { Get-AllowedDurationDrift -ExpectedDuration ([int]$Track.duration) }
+    return [pscustomobject]@{ Valid = ($diff -le $allowed); Duration = $duration; DurationDiff = $diff; AllowedDiff = $allowed; Reason = if ($diff -le $allowed) { 'PASS' } else { 'WRONG_DURATION' } }
 }
 
 function Invoke-BilibiliDownload {
     param([Parameter(Mandatory)][psobject]$Config, [Parameter(Mandatory)][psobject]$Track, [Parameter(Mandatory)][psobject]$Candidate)
-    if (-not (Claim-ProviderRequest -Config $Config -Provider 'bilibili')) { return [pscustomobject]@{ Success = $false; Blocked = $true; Error = 'CIRCUIT_OPEN'; Path = '' } }
+    if (-not (Claim-ProviderRequest -Config $Config -Provider 'bilibili_download')) { return [pscustomobject]@{ Success = $false; Blocked = $true; Error = 'CIRCUIT_OPEN'; Path = '' } }
     Initialize-MusicServerState -Config $Config
     $target = Join-Path $Config.DailyDir "$(Get-SafeDownloadName -Track $Track).mp3"
+    # DailyDir is a staging area. Never let a stale partial file masquerade as a successful new download.
+    if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue }
     $args = @(
         '--extract-audio', '--audio-format', 'mp3', '--audio-quality', '0', '-o', $target,
         '--embed-thumbnail', '--embed-metadata', '--no-overwrites', '--no-playlist',
-        '-f', 'worstaudio/worst', '--no-progress', '--no-warnings', '--ignore-errors',
+        '-f', 'bestaudio/best', '--no-progress', '--no-warnings',
         '--retries', '1', '--fragment-retries', '1', '--extractor-retries', '1', '--socket-timeout', '30',
         $Candidate.url
     )
@@ -300,14 +359,14 @@ function Invoke-BilibiliDownload {
     $started.Stop()
     $joined = ($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
     if ($joined -match '412|Precondition Failed') {
-        Record-ProviderFailure -Config $Config -Provider 'bilibili' -HttpStatus 412 -ErrorType 'HTTP_412' -Message 'download request blocked' | Out-Null
+        Record-ProviderFailure -Config $Config -Provider 'bilibili_download' -HttpStatus 412 -ErrorType 'HTTP_412' -Message 'download request blocked' | Out-Null
         return [pscustomobject]@{ Success = $false; Blocked = $true; Error = 'HTTP_412'; Path = ''; Output = $joined }
     }
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $target)) {
-        Record-ProviderFailure -Config $Config -Provider 'bilibili' -ErrorType 'DOWNLOAD_FAILED' -Message ($joined | Select-Object -Last 1) | Out-Null
+        Record-ProviderFailure -Config $Config -Provider 'bilibili_download' -ErrorType 'DOWNLOAD_FAILED' -Message ($joined | Select-Object -Last 1) | Out-Null
         return [pscustomobject]@{ Success = $false; Blocked = $false; Error = 'DOWNLOAD_FAILED'; Path = ''; Output = $joined }
     }
-    Record-ProviderSuccess -Config $Config -Provider 'bilibili' -LatencyMs $started.Elapsed.TotalMilliseconds
+    Record-ProviderSuccess -Config $Config -Provider 'bilibili_download' -LatencyMs $started.Elapsed.TotalMilliseconds
     return [pscustomobject]@{ Success = $true; Blocked = $false; Error = ''; Path = $target; Output = $joined }
 }
 
@@ -322,18 +381,18 @@ function New-DownloadProviderRegistry {
             validate = { param($config, $track, $path) Validate-DownloadedCandidate -Config $config -Track $track -Path $path }
         }
         [pscustomobject]@{
-            name = 'bilibili_direct'; health_provider = 'bilibili'
+            name = 'bilibili_direct'; health_provider = 'bilibili_download'
             can_handle = { param($track) @(Get-DirectCandidates -Track $track).Count -gt 0 }
             search = { param($config, $track) Get-DirectCandidates -Track $track }
-            score = { param($track, $candidate) Get-CandidateScore -Track $track -Candidate $candidate -Health (Get-ProviderHealth -Config $config -Provider 'bilibili') }
+            score = { param($track, $candidate) Get-CandidateScore -Track $track -Candidate $candidate -Health (Get-ProviderHealth -Config $config -Provider 'bilibili_download') }
             download = { param($config, $track, $candidate) Invoke-BilibiliDownload -Config $config -Track $track -Candidate $candidate }
             validate = { param($config, $track, $path) Validate-DownloadedCandidate -Config $config -Track $track -Path $path }
         }
         [pscustomobject]@{
-            name = 'bilibili_search'; health_provider = 'bilibili'
+            name = 'bilibili_search'; health_provider = 'bilibili_search'
             can_handle = { param($track) $true }
             search = { param($config, $track) (Search-BilibiliCandidates -Config $config -Track $track).Candidates }
-            score = { param($track, $candidate) Get-CandidateScore -Track $track -Candidate $candidate -Health (Get-ProviderHealth -Config $config -Provider 'bilibili') }
+            score = { param($track, $candidate) Get-CandidateScore -Track $track -Candidate $candidate -Health (Get-ProviderHealth -Config $config -Provider 'bilibili_download') }
             download = { param($config, $track, $candidate) Invoke-BilibiliDownload -Config $config -Track $track -Candidate $candidate }
             validate = { param($config, $track, $path) Validate-DownloadedCandidate -Config $config -Track $track -Path $path }
         }

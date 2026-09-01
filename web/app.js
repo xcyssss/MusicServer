@@ -17,13 +17,13 @@ const state = {
   lyricsRequest: 0,
 };
 
-const labels = { REMOTE: '在线', WANTED: '待下载', RESOLVING: '正在解析', DOWNLOADING: '下载中', VALIDATING: '校验中', LOCAL: '已本地化', RETRY_WAIT: '等待重试', UNAVAILABLE: '暂不可用' };
+const labels = { REMOTE: '在线', WANTED: '待下载', RESOLVING: '正在解析', DOWNLOADING: '下载中', VALIDATING: '校验中', CANCEL_REQUESTED: '正在取消', LOCAL: '已本地化', RETRY_WAIT: '等待重试', UNAVAILABLE: '暂不可用' };
 const $ = (selector) => document.querySelector(selector);
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>'"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[char]));
 const duration = (seconds) => { const value = Number(seconds || 0); return value ? `${Math.floor(value / 60)}:${String(Math.floor(value % 60)).padStart(2, '0')}` : '—'; };
 const keyOf = (item) => String(item?.track_id || item?.id || '');
 const itemStatus = (item) => item.wanted?.state || item.local_status || 'REMOTE';
-const statusClass = (status) => status === 'LOCAL' ? 'local' : ['DOWNLOADING', 'RESOLVING', 'VALIDATING'].includes(status) ? 'downloading' : status === 'RETRY_WAIT' ? 'retry' : '';
+const statusClass = (status) => status === 'LOCAL' ? 'local' : ['DOWNLOADING', 'RESOLVING', 'VALIDATING'].includes(status) ? 'downloading' : ['RETRY_WAIT', 'CANCEL_REQUESTED'].includes(status) ? 'retry' : '';
 
 function showToast(message) {
   const toast = $('#toast'); toast.textContent = message; toast.classList.add('show');
@@ -270,8 +270,13 @@ async function loadRecommendations(silent = false) {
 async function loadProviderStatus() {
   try {
     const response = await fetch('/api/providers/status', { cache: 'no-store' }); const data = await response.json();
-    const blocked = (data.items || []).find((item) => item.provider === 'bilibili' && item.state === 'OPEN');
-    $('#provider-summary').textContent = blocked ? 'Bilibili 冷却中 · 不影响试听' : '本地优先 · Provider 正常';
+    const blocked = (data.items || []).filter((item) => String(item.provider || '').startsWith('bilibili_') && item.state === 'OPEN');
+    if (blocked.length) {
+      const names = blocked.map((item) => item.provider === 'bilibili_search' ? '搜索' : '下载').join(' / ');
+      $('#provider-summary').textContent = `Bilibili ${names}冷却中 · 不影响试听`;
+    } else {
+      $('#provider-summary').textContent = '本地优先 · Provider 正常';
+    }
   } catch { $('#provider-summary').textContent = 'Provider 状态暂不可用'; }
 }
 
