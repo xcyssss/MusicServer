@@ -11,7 +11,7 @@ Describe 'MusicServer web playback safeguards' -Tag @('RequiresLocalRuntime') {
             $displayTitle -eq [IO.Path]::GetFileNameWithoutExtension($suspectFile)
         } | Select-Object -First 1
         if (-not $script:suspect) {
-            throw "Library is missing '$script:suspectFile'. This suite asserts against a live local library; skip it via -ExcludeTag RequiresLocalRuntime."
+            throw "Library is missing '$suspectFile'. This suite asserts against a live local library; skip it via -ExcludeTag RequiresLocalRuntime."
         }
     }
 
@@ -60,13 +60,19 @@ Describe 'MusicServer web UI safeguards' {
         $js | Should Match "\$\('#local-count'\)\.textContent\s*=\s*state\.library\.length"
     }
 
-    It 'falls back to the canonical Netease identifier when recommendation playback metadata is incomplete' {
+    It 'hydrates old recommendation metadata and recovers the Netease playback id before giving up' {
         $js = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\web\app.js') -Raw
         $js | Should Match 'function neteasePreviewFromTrack'
-        $js | Should Match 'item\?\.track\?\.identifiers'
+        $js | Should Match 'function neteasePreviewFromRecommendation'
+        $js | Should Match 'recommendation\.netease_id'
+        $js | Should Match 'recommendation\.playback_source'
         $js | Should Match 'music\.163\.com/song/media/outer/url'
         $js | Should Match 'function resolvePlaybackSource'
-        $js | Should Match 'const source = resolvePlaybackSource\(item\)'
+        $js | Should Match 'function hydrateRecommendationPlayback'
+        $js | Should Match '/api/tracks/'
+        $js | Should Match 'encodeURIComponent\(item\.track_id\)'
+        $js | Should Match 'await hydrateRecommendationPlayback\(item\)'
+        $js | Should Match 'source = resolvePlaybackSource\(item\)'
     }
 
     It 'ships a one-command launcher that serves the UI and maps the legacy recommendation route' {

@@ -207,31 +207,81 @@ async function loadLyrics(url, open = true) {
   }
 }
 
+function neteasePreviewUrl(id) {
+  if (id === undefined || id === null || String(id).trim() === '') return '';
+  return `https://music.163.com/song/media/outer/url?id=${encodeURIComponent(String(id).trim())}.mp3`;
+}
+
+function neteaseIdFromPlaybackValue(value) {
+  const match = /^netease:(.+)$/i.exec(String(value || '').trim());
+  return match ? match[1].trim() : '';
+}
+
 function neteasePreviewFromTrack(item) {
   const identifiers = Array.isArray(item?.track?.identifiers) ? item.track.identifiers : [];
   const netease = identifiers.find((identifier) => String(identifier?.type || '').toLowerCase() === 'netease' && identifier?.value);
-  if (!netease) return '';
-  return `https://music.163.com/song/media/outer/url?id=${encodeURIComponent(String(netease.value))}.mp3`;
+  return netease ? neteasePreviewUrl(netease.value) : '';
+}
+
+function neteasePreviewFromRecommendation(item) {
+  const recommendation = item?.recommendation;
+  if (!recommendation) return '';
+  const explicitId = recommendation.netease_id;
+  if (explicitId !== undefined && explicitId !== null && String(explicitId).trim()) return neteasePreviewUrl(explicitId);
+  const playbackId = neteaseIdFromPlaybackValue(recommendation.playback_source);
+  return playbackId ? neteasePreviewUrl(playbackId) : '';
 }
 
 function resolvePlaybackSource(item) {
   const nestedPreview = Array.isArray(item?.track?.preview_sources)
     ? item.track.preview_sources.find((source) => source?.media_url || source?.url)
     : null;
+  const recommendationPreview = Array.isArray(item?.recommendation?.preview_sources)
+    ? item.recommendation.preview_sources.find((source) => source?.media_url || source?.url)
+    : null;
+  const playbackUrl = item?.playback_source && typeof item.playback_source === 'object'
+    ? item.playback_source.url
+    : '';
+  const directPlaybackId = typeof item?.playback_source === 'string'
+    ? neteaseIdFromPlaybackValue(item.playback_source)
+    : '';
   return item?.stream_url
-    || item?.playback_source?.url
+    || playbackUrl
     || item?.preview_source?.media_url
     || item?.preview_source?.url
+    || recommendationPreview?.media_url
+    || recommendationPreview?.url
     || nestedPreview?.media_url
     || nestedPreview?.url
+    || (directPlaybackId ? neteasePreviewUrl(directPlaybackId) : '')
+    || neteasePreviewFromRecommendation(item)
     || neteasePreviewFromTrack(item);
+}
+
+async function hydrateRecommendationPlayback(item) {
+  if (!item?.track_id) return item;
+  try {
+    const response = await fetch(`/api/tracks/${encodeURIComponent(item.track_id)}`, { cache: 'no-store' });
+    if (!response.ok) return item;
+    const details = await response.json();
+    if (details.track) item.track = details.track;
+    if (details.recommendation) item.recommendation = details.recommendation;
+    if (details.playback_source) item.playback_source = details.playback_source;
+    if (details.local_status) item.local_status = details.local_status;
+    if (details.playback_source?.type === 'local' && details.playback_source?.url) item.stream_url = details.playback_source.url;
+  } catch {}
+  return item;
 }
 
 async function playItem(item, collection = 'library') {
   const key = keyOf(item); const audio = $('#audio-player');
   if (!key) return;
   if (state.currentKey === key && !audio.paused) { audio.pause(); return; }
-  const source = resolvePlaybackSource(item);
+  let source = resolvePlaybackSource(item);
+  if (!source && item.track_id) {
+    await hydrateRecommendationPlayback(item);
+    source = resolvePlaybackSource(item);
+  }
   if (!source) { showToast('这首歌暂时没有可用试听源'); return; }
   const sourceUrl = new URL(source, window.location.href).href;
   const isNewTrack = state.currentKey !== key || audio.src !== sourceUrl;
