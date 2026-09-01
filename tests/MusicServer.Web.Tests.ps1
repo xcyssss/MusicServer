@@ -84,14 +84,16 @@ Describe 'MusicServer web UI safeguards' {
     }
 
     It 'uses the recommendation Netease id for lyrics before any local fuzzy lyric file' {
-        $api = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\music_api.ps1') -Raw
-        $api | Should Match 'function Get-NeteaseIdForTrack'
-        $api | Should Match 'function Get-NetEaseLyricsById'
-        $api | Should Match 'netease_id'
-        $api | Should Match 'playback_source'
-        $api | Should Match 'source\s*=\s*''netease'''
-        $api | Should Match 'available\s*=\s*\$true'
-        $api | Should Match 'text\s*=\s*\$lyrics'
+        $launcher = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\start_musicserver_ui.ps1') -Raw
+        $launcher | Should Match 'function Get-NeteaseIdForTrack'
+        $launcher | Should Match 'function Get-NetEaseLyricsById'
+        $launcher | Should Match 'function Send-TrackLyrics'
+        $launcher | Should Match 'netease_id'
+        $launcher | Should Match 'playback_source'
+        $launcher | Should Match 'source\s*=\s*''netease'''
+        $launcher | Should Match 'available\s*=\s*\$true'
+        $launcher | Should Match 'text\s*=\s*\$lyrics'
+        $launcher | Should Match '\^/api/tracks/\(\[\^/\]\+\)/lyrics\$'
     }
 
     It 'quality-gates local lrc files using lyrics_report before exposing them' {
