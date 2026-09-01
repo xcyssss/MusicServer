@@ -75,6 +75,36 @@ Describe 'MusicServer web UI safeguards' {
         $js | Should Match 'source = resolvePlaybackSource\(item\)'
     }
 
+    It 'normalizes both legacy lyrics payloads and the explicit lyric contract' {
+        $js = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\web\app.js') -Raw
+        $js | Should Match 'function normalizeLyricsPayload'
+        $js | Should Match 'data\?\.lyrics'
+        $js | Should Match 'normalized\.available'
+        $js | Should Match 'parseLyrics\(normalized\.text\)'
+    }
+
+    It 'uses the recommendation Netease id for lyrics before any local fuzzy lyric file' {
+        $launcher = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\start_musicserver_ui.ps1') -Raw
+        $launcher | Should Match 'function Get-NeteaseIdForTrack'
+        $launcher | Should Match 'function Get-NetEaseLyricsById'
+        $launcher | Should Match 'function Send-TrackLyrics'
+        $launcher | Should Match 'netease_id'
+        $launcher | Should Match 'playback_source'
+        $launcher | Should Match 'source\s*=\s*''netease'''
+        $launcher | Should Match 'available\s*=\s*\$true'
+        $launcher | Should Match 'text\s*=\s*\$lyrics'
+        $launcher | Should Match '\^/api/tracks/\(\[\^/\]\+\)/lyrics\$'
+    }
+
+    It 'quality-gates local lrc files using lyrics_report before exposing them' {
+        $launcher = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\start_musicserver_ui.ps1') -Raw
+        $launcher | Should Match 'lyrics_report\.csv'
+        $launcher | Should Match 'function Get-LyricQuality'
+        $launcher | Should Match 'SUSPECT'
+        $launcher | Should Match 'available\s*=\s*\$false'
+        $launcher | Should Match 'quality\s*=\s*\$quality'
+    }
+
     It 'ships a one-command launcher that serves the UI and maps the legacy recommendation route' {
         $launcherPath = Join-Path $PSScriptRoot '..\start_musicserver_ui.ps1'
         $launcher = Get-Content -LiteralPath $launcherPath -Raw

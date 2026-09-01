@@ -174,9 +174,22 @@ function parseLyrics(text) {
   return rows.sort((a, b) => a.time - b.time);
 }
 
+function normalizeLyricsPayload(data) {
+  const text = String(data?.text ?? data?.lyrics ?? '');
+  const available = typeof data?.available === 'boolean' ? data.available : Boolean(text.trim());
+  return {
+    ...data,
+    available,
+    format: data?.format || (text ? 'lrc' : ''),
+    text,
+    quality: data?.quality || (available ? 'UNVERIFIED' : ''),
+    message: data?.message || (available ? '' : '这首歌暂时没有找到可靠歌词。'),
+  };
+}
+
 function renderLyrics(currentTime = 0) {
   const content = $('#lyrics-content');
-  if (!state.lyrics.available) { content.innerHTML = `<div class="lyrics-empty">${escapeHtml(state.lyrics.message || '这首歌暂时没有找到本地歌词。')}</div>`; return; }
+  if (!state.lyrics.available) { content.innerHTML = `<div class="lyrics-empty">${escapeHtml(state.lyrics.message || '这首歌暂时没有找到可靠歌词。')}</div>`; return; }
   if (!state.lyrics.entries.length) { content.innerHTML = `<pre class="lyrics-plain">${escapeHtml(state.lyrics.text)}</pre>`; return; }
   let active = -1;
   state.lyrics.entries.forEach((entry, index) => { if (entry.time <= currentTime) active = index; });
@@ -196,13 +209,19 @@ async function loadLyrics(url, open = true) {
   if (!url) { renderLyrics(); return; }
   try {
     const response = await fetch(url, { cache: 'no-store' });
-    if (!response.ok) throw new Error('lyrics request failed');
     const data = await response.json();
     if (requestId !== state.lyricsRequest) return;
-    state.lyrics = { ...data, entries: data.available ? parseLyrics(data.text) : [] };
+    if (!response.ok && !data?.available) {
+      state.lyrics = normalizeLyricsPayload(data);
+      renderLyrics();
+      return;
+    }
+    const normalized = normalizeLyricsPayload(data);
+    state.lyrics = { ...normalized, entries: normalized.available ? parseLyrics(normalized.text) : [] };
     renderLyrics($('#audio-player').currentTime || 0);
   } catch {
     if (requestId !== state.lyricsRequest) return;
+    state.lyrics.message = '歌词加载失败，请稍后重试。';
     renderLyrics();
   }
 }
@@ -287,7 +306,10 @@ async function playItem(item, collection = 'library') {
   const isNewTrack = state.currentKey !== key || audio.src !== sourceUrl;
   state.currentKey = key; state.currentCollection = collection; updatePlayer(item); render();
   if (isNewTrack) { audio.pause(); audio.currentTime = 0; audio.src = sourceUrl; }
-  await loadLyrics(item.lyrics_url || (item.track_id ? `/api/tracks/${encodeURIComponent(item.track_id)}/lyrics` : ''), true);
+  const lyricsUrl = collection === 'recommendations' && item.track_id
+    ? `/api/tracks/${encodeURIComponent(item.track_id)}/lyrics`
+    : item.lyrics_url || (item.track_id ? `/api/tracks/${encodeURIComponent(item.track_id)}/lyrics` : '');
+  await loadLyrics(lyricsUrl, true);
   try { await audio.play(); } catch { showToast('试听源加载失败，请稍后重试'); }
 }
 

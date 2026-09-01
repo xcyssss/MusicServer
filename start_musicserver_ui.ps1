@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$ApiPrefix = 'http://127.0.0.1:8787/',
     [string]$UiPrefix = 'http://127.0.0.1:8790/',
     [switch]$NoBrowser,
@@ -14,6 +14,7 @@ $Root = $PSScriptRoot
 $WebRoot = Join-Path $Root 'web'
 $ApiScript = Join-Path $Root 'music_api.ps1'
 $LogRoot = Join-Path $Root 'logs'
+$LyricsReportPath = Join-Path $Root 'lyrics_report.csv'
 $UiLog = Join-Path $LogRoot 'musicserver-ui.log'
 $ApiOutLog = Join-Path $LogRoot 'musicserver-api.stdout.log'
 $ApiErrLog = Join-Path $LogRoot 'musicserver-api.stderr.log'
@@ -139,6 +140,63 @@ function Get-LrcPath {
     $candidate = [System.IO.Path]::ChangeExtension($File, '.lrc')
     if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
     return $null
+}
+
+function Get-LyricQuality {
+    param([Parameter(Mandatory)][string]$File)
+
+    if (-not (Test-Path -LiteralPath $LyricsReportPath -PathType Leaf)) { return 'UNVERIFIED' }
+    try {
+        $fileName = [System.IO.Path]::GetFileName($File)
+        $row = Import-Csv -LiteralPath $LyricsReportPath |
+            Where-Object { [string]$_.File -eq $fileName } |
+            Select-Object -First 1
+        if ($row -and $row.Status) { return ([string]$row.Status).ToUpperInvariant() }
+    } catch {
+        Write-UiLog "Could not read lyric quality for $File : $($_.Exception.Message)"
+    }
+    return 'UNVERIFIED'
+}
+
+function Get-NeteaseIdForTrack {
+    param([Parameter(Mandatory)]$TrackResponse)
+
+    $recommendation = $TrackResponse.recommendation
+    if ($recommendation) {
+        $explicitId = [string]$recommendation.netease_id
+        if (-not [string]::IsNullOrWhiteSpace($explicitId)) { return $explicitId.Trim() }
+        $playbackValue = [string]$recommendation.playback_source
+        if ($playbackValue -match '^netease:(.+)$') { return ([string]$Matches[1]).Trim() }
+    }
+
+    foreach ($identifier in @($TrackResponse.track.identifiers)) {
+        $identifierType = [string]$identifier.type
+        $identifierValue = [string]$identifier.value
+        if ($identifierType.ToLowerInvariant() -eq 'netease' -and -not [string]::IsNullOrWhiteSpace($identifierValue)) {
+            return $identifierValue.Trim()
+        }
+    }
+    return ''
+}
+
+function Get-NetEaseLyricsById {
+    param([Parameter(Mandatory)][string]$SongId)
+
+    $headers = @{
+        'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36'
+        'Referer' = 'https://music.163.com/'
+        'Accept' = 'application/json,text/plain,*/*'
+    }
+    try {
+        $encoded = [System.Uri]::EscapeDataString($SongId)
+        $response = Invoke-RestMethod -Uri "https://music.163.com/api/song/lyric?id=$encoded&lv=1&kv=1&tv=-1" -Headers $headers -TimeoutSec 15
+        if ($response -and $response.lrc -and $response.lrc.lyric) {
+            return [string]$response.lrc.lyric
+        }
+    } catch {
+        Write-UiLog "NetEase lyric request failed song=$SongId : $($_.Exception.Message)"
+    }
+    return ''
 }
 
 function Get-UiLibrary {
@@ -318,7 +376,19 @@ function Send-LibraryLyrics {
     $file = Resolve-UiLibraryFile -Id $Id
     $lrcPath = if ($file) { Get-LrcPath -File $file } else { $null }
     if (-not $lrcPath) {
-        Send-Json -Context $Context -Body @{ error = 'LYRICS_NOT_FOUND'; id = $Id } -StatusCode 404
+        Send-Json -Context $Context -Body @{
+            id = $Id; available = $false; format = 'lrc'; text = ''; quality = 'MISSING'
+            source = 'local'; message = '这首歌暂时没有找到本地歌词。'
+        }
+        return
+    }
+
+    $quality = Get-LyricQuality -File $file
+    if ($quality -in @('SUSPECT','NO_MATCH','NO_LYRIC','ERROR')) {
+        Send-Json -Context $Context -Body @{
+            id = $Id; available = $false; format = 'lrc'; text = ''; quality = $quality
+            source = 'local'; message = '歌词匹配置信度不足，已隐藏，避免显示错误歌词。'
+        }
         return
     }
 
@@ -329,7 +399,55 @@ function Send-LibraryLyrics {
             if ($payload.lrc) { $lyrics = [string]$payload.lrc }
         } catch {}
     }
-    Send-Json -Context $Context -Body @{ id = $Id; lyrics = $lyrics; path = $lrcPath }
+    Send-Json -Context $Context -Body @{
+        id = $Id; available = $true; format = 'lrc'; text = $lyrics; quality = $quality
+        source = 'local'; path = $lrcPath; message = ''
+    }
+}
+
+function Send-TrackLyrics {
+    param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)][string]$TrackId)
+
+    $trackUrl = $ApiPrefix.TrimEnd('/') + '/api/tracks/' + [System.Uri]::EscapeDataString($TrackId)
+    $details = $null
+    try {
+        $details = Invoke-RestMethod -Uri $trackUrl -TimeoutSec 10
+    } catch {
+        Send-Json -Context $Context -Body @{
+            track_id = $TrackId; available = $false; format = 'lrc'; text = ''; quality = 'MISSING'
+            source = 'none'; message = '无法读取歌曲信息，暂时无法获取歌词。'
+        }
+        return
+    }
+
+    $neteaseId = Get-NeteaseIdForTrack -TrackResponse $details
+    if ($neteaseId) {
+        $lyrics = Get-NetEaseLyricsById -SongId $neteaseId
+        if (-not [string]::IsNullOrWhiteSpace($lyrics)) {
+            Send-Json -Context $Context -Body @{
+                track_id = $TrackId; available = $true; format = 'lrc'; text = $lyrics; quality = 'EXACT'
+                source = 'netease'; song_id = $neteaseId; message = ''
+            }
+            return
+        }
+    }
+
+    $playback = $details.playback_source
+    if ($playback -and ([string]$playback.provider).ToLowerInvariant() -eq 'navidrome' -and $playback.id) {
+        Send-LibraryLyrics -Context $Context -Id ([string]$playback.id)
+        return
+    }
+
+    $missingSource = 'none'
+    $missingMessage = '这首歌暂时没有可验证的歌词来源。'
+    if ($neteaseId) {
+        $missingSource = 'netease'
+        $missingMessage = '网易云暂未返回这首歌的歌词。'
+    }
+    Send-Json -Context $Context -Body @{
+        track_id = $TrackId; available = $false; format = 'lrc'; text = ''; quality = 'MISSING'
+        source = $missingSource; message = $missingMessage
+    }
 }
 
 function Proxy-ApiRequest {
@@ -462,6 +580,11 @@ function Handle-Request {
     if ($Context.Request.HttpMethod -eq 'GET' -and $path -match '^/api/library/([^/]+)/lyrics$') {
         $id = [System.Web.HttpUtility]::UrlDecode($Matches[1], [System.Text.Encoding]::UTF8)
         Send-LibraryLyrics -Context $Context -Id $id
+        return
+    }
+    if ($Context.Request.HttpMethod -eq 'GET' -and $path -match '^/api/tracks/([^/]+)/lyrics$') {
+        $trackId = [System.Web.HttpUtility]::UrlDecode($Matches[1], [System.Text.Encoding]::UTF8)
+        Send-TrackLyrics -Context $Context -TrackId $trackId
         return
     }
     if ($path -eq '/health' -or $path.StartsWith('/api/')) {
