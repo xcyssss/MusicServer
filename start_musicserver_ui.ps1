@@ -166,12 +166,14 @@ function Get-NeteaseIdForTrack {
         $explicitId = [string]$recommendation.netease_id
         if (-not [string]::IsNullOrWhiteSpace($explicitId)) { return $explicitId.Trim() }
         $playbackValue = [string]$recommendation.playback_source
-        if ($playbackValue -match '^netease:(.+)$') { return [string]$Matches[1].Trim() }
+        if ($playbackValue -match '^netease:(.+)$') { return ([string]$Matches[1]).Trim() }
     }
 
     foreach ($identifier in @($TrackResponse.track.identifiers)) {
-        if (([string]$identifier.type).ToLowerInvariant() -eq 'netease' -and -not [string]::IsNullOrWhiteSpace([string]$identifier.value)) {
-            return ([string]$identifier.value).Trim()
+        $identifierType = [string]$identifier.type
+        $identifierValue = [string]$identifier.value
+        if ($identifierType.ToLowerInvariant() -eq 'netease' -and -not [string]::IsNullOrWhiteSpace($identifierValue)) {
+            return $identifierValue.Trim()
         }
     }
     return ''
@@ -436,10 +438,15 @@ function Send-TrackLyrics {
         return
     }
 
+    $missingSource = 'none'
+    $missingMessage = '这首歌暂时没有可验证的歌词来源。'
+    if ($neteaseId) {
+        $missingSource = 'netease'
+        $missingMessage = '网易云暂未返回这首歌的歌词。'
+    }
     Send-Json -Context $Context -Body @{
         track_id = $TrackId; available = $false; format = 'lrc'; text = ''; quality = 'MISSING'
-        source = if ($neteaseId) { 'netease' } else { 'none' }
-        message = if ($neteaseId) { '网易云暂未返回这首歌的歌词。' } else { '这首歌暂时没有可验证的歌词来源。' }
+        source = $missingSource; message = $missingMessage
     }
 }
 
