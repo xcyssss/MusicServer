@@ -48,4 +48,13 @@ Describe 'MusicServer web UI safeguards' {
         $js | Should Match "\$\('#shuffle-button'\)\.addEventListener"
         $html | Should Match 'id="shuffle-button"'
     }
+
+    It 'ships a one-command launcher that serves the UI and maps the legacy recommendation route' {
+        $launcher = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\start_musicserver_ui.ps1') -Raw
+        $launcher | Should Match "UiPrefix = 'http://127\.0\.0\.1:8790/'"
+        $launcher | Should Match "Send-StaticFile -Context \$context -RelativePath 'index\.html'"
+        $launcher | Should Match "\^/api/recommendations/today"
+        $launcher | Should Match "'/api/today'"
+        $launcher | Should Match 'Proxy-ApiRequest'
+    }
 }
