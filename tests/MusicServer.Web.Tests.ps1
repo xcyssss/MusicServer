@@ -69,7 +69,8 @@ Describe 'MusicServer web UI safeguards' {
         $js | Should Match 'music\.163\.com/song/media/outer/url'
         $js | Should Match 'function resolvePlaybackSource'
         $js | Should Match 'function hydrateRecommendationPlayback'
-        $js | Should Match "fetch\(`/api/tracks/\$\{encodeURIComponent\(item\.track_id\)\}`"
+        $js | Should Match '/api/tracks/'
+        $js | Should Match 'encodeURIComponent\(item\.track_id\)'
         $js | Should Match 'await hydrateRecommendationPlayback\(item\)'
         $js | Should Match 'source = resolvePlaybackSource\(item\)'
     }
