@@ -60,6 +60,15 @@ Describe 'MusicServer web UI safeguards' {
         $js | Should Match "\$\('#local-count'\)\.textContent\s*=\s*state\.library\.length"
     }
 
+    It 'falls back to the canonical Netease identifier when recommendation playback metadata is incomplete' {
+        $js = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\web\app.js') -Raw
+        $js | Should Match 'function neteasePreviewFromTrack'
+        $js | Should Match 'item\?\.track\?\.identifiers'
+        $js | Should Match 'music\.163\.com/song/media/outer/url'
+        $js | Should Match 'function resolvePlaybackSource'
+        $js | Should Match 'const source = resolvePlaybackSource\(item\)'
+    }
+
     It 'ships a one-command launcher that serves the UI and maps the legacy recommendation route' {
         $launcherPath = Join-Path $PSScriptRoot '..\start_musicserver_ui.ps1'
         $launcher = Get-Content -LiteralPath $launcherPath -Raw
