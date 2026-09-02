@@ -51,7 +51,7 @@ function Wait-TestHealth {
     throw "Health endpoint did not become ready: $BaseUrl"
 }
 
-function Invoke-TestBodylessHttp {
+function Invoke-TestJsonHttp {
     param(
         [Parameter(Mandatory)][string]$Url,
         [Parameter(Mandatory)][string]$Method
@@ -65,10 +65,10 @@ function Invoke-TestBodylessHttp {
         $request.Timeout = 20000
         $request.ReadWriteTimeout = 20000
         $request.ContentType = 'application/json; charset=utf-8'
-        # Browser fetch sends an explicit zero-length request body. Preserve that
-        # at the test-client -> UI boundary so this test isolates UI -> API proxying.
-        if ($request.GetType().GetProperty('ContentLength64')) { $request.ContentLength64 = 0 }
-        else { $request.ContentLength = 0 }
+        $body = [System.Text.Encoding]::UTF8.GetBytes('{}')
+        $request.ContentLength = $body.Length
+        $out = $request.GetRequestStream()
+        try { $out.Write($body, 0, $body.Length) } finally { $out.Dispose() }
         $response = $request.GetResponse()
         try {
             $status = [int]$response.StatusCode
@@ -114,7 +114,11 @@ Describe 'MusicServer live UI API proxy' {
         $script:ProxyTest.Root = $null
     }
 
-    It 'preserves an explicit zero Content-Length for bodyless POST like requests' {
+    It 'forwards browser-style JSON-body POST like requests through the UI gateway' {
+        $app = Get-Content -LiteralPath (Join-Path $ProjectRoot 'web\app.js') -Raw
+        $app | Should Match "headers:\s*\{\s*'Content-Type':\s*'application/json; charset=utf-8'\s*\}"
+        $app | Should Match "body:\s*'\{\}'"
+
         $suffix = [guid]::NewGuid().ToString('N').Substring(0, 8)
         $track = New-CanonicalTrack -Title ('Proxy Track ' + $suffix) -Artist ('Proxy Artist ' + $suffix) -Status 'REMOTE'
         $saved = Save-CanonicalTrackDb -Track $track
@@ -141,8 +145,8 @@ Describe 'MusicServer live UI API proxy' {
         $script:ProxyTest.Processes += $ui
         Wait-TestHealth -BaseUrl $uiPrefix
 
-        $like = Invoke-TestBodylessHttp -Method 'POST' -Url ($uiPrefix.TrimEnd('/') + "/api/tracks/$trackId/like")
-        $like.Status | Should Be 200 -Because "the UI proxy must preserve a bodyless POST; response was [$($like.Text)]"
+        $like = Invoke-TestJsonHttp -Method 'POST' -Url ($uiPrefix.TrimEnd('/') + "/api/tracks/$trackId/like")
+        $like.Status | Should Be 200 -Because "the UI proxy must forward the browser-style JSON body; response was [$($like.Text)]"
         $like.Json.accepted | Should Be $true
         $like.Json.liked | Should Be $true
         $like.Json.action | Should Be 'QUEUED'
