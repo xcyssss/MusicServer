@@ -204,12 +204,18 @@ function Get-UiLibrary {
     $seenFiles = @{}
     $script:LibraryFiles = @{}
 
-    $sql = 'SELECT id, name, artist, album, path, duration, track, addedto, collectionat FROM songs;'
+    # Navidrome 0.63.x stores songs in media_file. Keep the UI response aliases
+    # stable so the frontend does not depend on Navidrome's internal column names.
+    $sql = 'SELECT id, title AS name, artist, album, path, duration, track_number AS track, created_at AS addedto, updated_at AS collectionat FROM media_file WHERE missing = 0;'
     foreach ($row in @(Invoke-NavidromeSqliteJson -Sql $sql)) {
         $file = [string]$row.path
         if ([string]::IsNullOrWhiteSpace($file)) { continue }
         try {
-            if (-not [System.IO.Path]::IsPathRooted($file)) { $file = Join-Path $Root $file }
+            if (-not [System.IO.Path]::IsPathRooted($file)) {
+                $musicRoot = @($Config.MusicDir | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Container) } | Select-Object -First 1)
+                if ($musicRoot.Count -gt 0) { $file = Join-Path ([string]$musicRoot[0]) $file }
+                else { $file = Join-Path $Root $file }
+            }
             $file = [System.IO.Path]::GetFullPath($file)
         } catch { continue }
         if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { continue }

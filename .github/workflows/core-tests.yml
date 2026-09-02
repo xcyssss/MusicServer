@@ -20,6 +20,8 @@ on:
 # Suites are split across two parallel jobs because a serial run exceeds
 # timeout-minutes on Windows PowerShell 5.1 (measured locally: ApiTransaction
 # ~334s, ApiRuntime ~152s, Core+Database+V2+WorkerConcurrency ~480s).
+# UiProxyRuntime is kept first in the API group as a cheap live smoke test for
+# the browser-facing 8790 -> API 8787 request boundary.
 #
 # Suites tagged RequiresLocalRuntime assert against a live MusicServer API and
 # this machine's library / lyrics_report.csv, so they are excluded here and must
@@ -64,7 +66,7 @@ jobs:
           Import-Module Pester -RequiredVersion 3.4.0 -Force
           $groups = @{
             state = @('Core', 'Database', 'V2', 'WorkerConcurrency', 'Recommendation', 'LegacyRetirement', 'Web')
-            api   = @('ApiTransaction', 'ApiRuntime')
+            api   = @('UiProxyRuntime', 'ApiTransaction', 'ApiRuntime')
           }
           $paths = @($groups['${{ matrix.group }}'] | ForEach-Object { ".\tests\MusicServer.$_.Tests.ps1" })
           Write-Host "Suites: $($paths -join ', ')"
