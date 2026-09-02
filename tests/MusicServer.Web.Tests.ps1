@@ -60,6 +60,15 @@ Describe 'MusicServer web UI safeguards' {
         $js | Should Match "\$\('#local-count'\)\.textContent\s*=\s*state\.library\.length"
     }
 
+    It 'sends a small JSON body for like and unlike so HttpListener does not reject browser requests with 411' {
+        $js = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\web\app.js') -Raw
+        $js | Should Match "method:\s*next\s*\?\s*'POST'\s*:\s*'DELETE'"
+        $js | Should Match "'Content-Type':\s*'application/json; charset=utf-8'"
+        $js | Should Match "body:\s*'\{\}'"
+        $js | Should Match '喜欢操作失败'
+        $js | Should Match 'response\.status'
+    }
+
     It 'hydrates old recommendation metadata and recovers the Netease playback id before giving up' {
         $js = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\web\app.js') -Raw
         $js | Should Match 'function neteasePreviewFromTrack'
@@ -138,10 +147,15 @@ Describe 'MusicServer web UI safeguards' {
         $launcher | Should Match 'Stop-Process -Id \$ApiProcess\.Id'
     }
 
-    It 'serves the local library through a safe sqlite invocation instead of the broken flattened argument list' {
+    It 'serves the local library through the current Navidrome media_file schema' {
         $launcher = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\start_musicserver_ui.ps1') -Raw
         $launcher | Should Match 'function Invoke-NavidromeSqliteJson'
         $launcher | Should Match '& \$sqlite.*-readonly.*-json.*\$Config\.NdDb.*\$Sql'
+        $launcher | Should Match 'FROM media_file WHERE missing = 0'
+        $launcher | Should Match 'track_number AS track'
+        $launcher | Should Match 'created_at AS addedto'
+        $launcher | Should Not Match 'FROM songs'
+        $launcher | Should Match '\$Config\.MusicDir'
         $launcher | Should Match "'/api/library'"
         $launcher | Should Match 'function Send-LibraryStream'
         $launcher | Should Match 'function Send-LibraryLyrics'
