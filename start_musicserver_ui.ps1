@@ -8,6 +8,7 @@
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 try { Add-Type -AssemblyName System.Web -ErrorAction SilentlyContinue } catch {}
 try {
     # The UI proxies every /api/* request to the backend over HttpWebRequest while

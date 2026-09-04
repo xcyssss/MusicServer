@@ -8,7 +8,8 @@ Git repo. Branches: `main` (released), `review/musicserver-hardening-v1`, `revie
 
 - **PowerShell modules** — `MusicServer.Core` / `.Database` / `.State` / `.Migration` / `.Providers` / `.DesiredStateWorker`
 - **music_api.ps1** — HTTP listener on `http://127.0.0.1:8787/`, front-end agnostic JSON API
-- **web/** — `index.html` + `app.js` + `styles.css`
+- **src-tauri/** — Tauri v2 Windows desktop shell; the primary client is the packaged APP
+- **web/** — `index.html` + `app.js` + `styles.css`, the shared WebView2 UI loaded by the Tauri APP at `http://127.0.0.1:8790/` (not a separate browser product)
 - **SQLite** — sole runtime source of truth. JSON files are migration input / backups only
 - **Navidrome** v0.63.2 — music server, Subsonic-compatible, runs as Windows service or standalone
 - **yt-dlp** — Bilibili audio extraction (via `C:\Users\dell\anaconda3\Scripts\yt-dlp.exe`)
@@ -28,6 +29,7 @@ E:\Project\MusicServer/
   DailyMix_data/              # Recommendation state (today.csv, history.csv, accepted.csv, rejected.csv)
   cookies.txt                 # Bilibili auth cookie (expires, refresh manually)
   lyrics_report.csv           # Lyrics matching report
+  src-tauri/                  # Tauri v2 desktop shell and release build configuration
 ```
 
 ## Scripts
@@ -46,6 +48,7 @@ E:\Project\MusicServer/
 | `music_api.ps1` | HTTP API server (v2) | `-Prefix`, `-Once`, `-Root` |
 | `wanted_worker.ps1` | Background download worker | see module docs |
 | `start_musicserver.cmd` / `.vbs` | Launch API + worker hidden | None |
+| `tests/verify_tauri_desktop.ps1` | Tauri APP process/HTTP/playback/shutdown smoke verifier | `-Launch`, `-ExercisePlayback`, `-CloseLaunchedApp` |
 
 ## Tests & CI
 
@@ -60,7 +63,7 @@ CI (`.github/workflows/core-tests.yml`, windows-latest + Windows PowerShell 5.1)
 
 | Job | Suites |
 |-----|--------|
-| `state` | Core, Database, V2, WorkerConcurrency, Web |
+| `state` | Core, Database, V2, WorkerConcurrency, Web, Tauri |
 | `api` | ApiTransaction, ApiRuntime |
 
 Measured locally on PS 5.1: ApiTransaction ≈ 334s, ApiRuntime ≈ 152s, the other four ≈ 480s combined. Serial is ~16 min, so keep the split.
@@ -113,6 +116,8 @@ library.mp3 + accepted.csv  -->  NetEase simiSong API  -->  Bilibili search/down
 - **Navidrome DB locking** — scripts copy the DB to a temp file before querying sqlite3; never edit navidrome.db directly while server is running
 - **Lyrics are external .lrc files** — Navidrome reads them in real-time, no scan needed after adding. Priority: `.lrc` > `.txt` > embedded tags (see `navidrome.toml` `LyricsPriority`)
 - **Duration validation** — `daily_recommend.ps1` discards downloads where local duration differs from NetEase metadata by >45s (wrong video matched)
+- **Desktop APP is the product target** — validate UI behavior through the Tauri APP. The APP is a WebView2 shell over `web/`; do not replace the shared UI with a second Rust/native UI or treat browser-only checks as desktop acceptance.
+- **Stale desktop services** — Tauri verifies the `web/app.js` and API `/health` build marker before reusing 8790/8787; if another build owns those ports it uses an isolated fallback pair. `start_musicserver_ui.ps1` accepts `-ApiPrefix` and `-UiPrefix` for that reason.
 - **File names are the metadata** — Bilibili titles are noisy (UP主 names, quality tags, etc). `fetch_lyrics.ps1` strips these via `$NoiseWords` list before searching
 - **m3u playlists auto-import** — Navidrome watches Music/ for .m3u files; `lib_playlist.ps1` writes relative paths and UTF-8 no-BOM
 

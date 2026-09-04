@@ -1,3 +1,8 @@
+// Tauri startup uses this marker to reject a stale 8790 UI process after an
+// upgrade. Keep it in the served bundle so the desktop shell can verify that
+// the WebView is loading the same source revision as the backend.
+const MUSICSERVER_BUILD_MARKER = 'musicserver-listening-stats-v2';
+
 const storedLibraryOrder = (() => {
   try {
     const value = JSON.parse(localStorage.getItem('musicserver-library-order') || '[]');

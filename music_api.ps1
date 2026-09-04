@@ -608,6 +608,7 @@ $listener.Start()
 Write-Host "API listening on $($listener.Prefixes[0])" -ForegroundColor Cyan
 
 $script:requestCount = 0
+$script:BuildMarker = 'musicserver-listening-stats-v2'
 # /api/today is recomputed per request and costs ~5s (each DB read spawns a
 # sqlite3 subprocess; 20 tracks x several reads). The UI polls it every 15s,
 # and because the UI proxies on a single thread, a slow /api/today blocks
@@ -876,7 +877,7 @@ while ($true) {
         elseif ($method -eq 'GET' -and $path -eq '/health') {
             $dbOk = $false
             try { [void](Get-DbStats); $dbOk = $true } catch {}
-            $body = @{ status = if ($dbOk) { 'ok' } else { 'degraded' }; db = $dbOk; uptime_requests = $script:requestCount }
+            $body = @{ status = if ($dbOk) { 'ok' } else { 'degraded' }; db = $dbOk; build = $script:BuildMarker; uptime_requests = $script:requestCount }
             $status = if ($dbOk) { 200 } else { 503 }
             Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = $status })
         }
