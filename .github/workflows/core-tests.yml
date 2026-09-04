@@ -63,7 +63,7 @@ jobs:
         run: |
           Import-Module Pester -RequiredVersion 3.4.0 -Force
           $groups = @{
-            state = @('Core', 'Database', 'V2', 'WorkerConcurrency', 'Recommendation', 'LegacyRetirement', 'Web')
+            state = @('Core', 'Database', 'V2', 'WorkerConcurrency', 'Recommendation', 'LegacyRetirement', 'Listening', 'Web')
             api   = @('ApiTransaction', 'ApiRuntime')
           }
           $paths = @($groups['${{ matrix.group }}'] | ForEach-Object { ".\tests\MusicServer.$_.Tests.ps1" })

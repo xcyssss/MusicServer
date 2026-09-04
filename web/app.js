@@ -9,10 +9,14 @@ const state = {
   items: [],
   library: [],
   librarySequence: [],
+  listening: { mostPlayed: [], rediscover: [], loaded: false },
   libraryOrder: storedLibraryOrder,
   currentKey: null,
   currentCollection: 'library',
+  playbackSession: null,
+  lastRandomId: null,
   mode: localStorage.getItem('musicserver-play-mode') === 'random' && storedLibraryOrder.length ? 'random' : 'sequence',
+  librarySort: localStorage.getItem('musicserver-library-sort') || 'default',
   lyrics: { available: false, format: '', text: '', entries: [], quality: '', message: '' },
   lyricsRequest: 0,
 };
@@ -21,10 +25,36 @@ const labels = { REMOTE: '在线', WANTED: '待下载', RESOLVING: '正在解析
 const $ = (selector) => document.querySelector(selector);
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>'"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[char]));
 const duration = (seconds) => { const value = Number(seconds || 0); return value ? `${Math.floor(value / 60)}:${String(Math.floor(value % 60)).padStart(2, '0')}` : '—'; };
-const keyOf = (item) => String(item?.track_id || item?.id || '');
+const localIdFromItem = (item) => {
+  if (!item) return '';
+  const direct = String(item.library_id || item.id || '');
+  if (/^(library-|na-)/.test(direct)) return direct;
+  const playbackId = String(item.playback_source?.id || '');
+  if (/^(library-|na-)/.test(playbackId)) return playbackId;
+  const stream = String(item.stream_url || item.playback_source?.url || '');
+  const match = /\/api\/library\/([^/]+)\/stream(?:$|\?)/.exec(stream);
+  return match ? decodeURIComponent(match[1]) : '';
+};
+const keyOf = (item) => localIdFromItem(item) || String(item?.track_id || item?.id || '');
 const itemStatus = (item) => item.wanted?.state || item.local_status || 'REMOTE';
 const statusClass = (status) => status === 'LOCAL' ? 'local' : ['DOWNLOADING', 'RESOLVING', 'VALIDATING'].includes(status) ? 'downloading' : ['RETRY_WAIT', 'CANCEL_REQUESTED'].includes(status) ? 'retry' : '';
 const normalizeLibraryItem = (item) => ({ ...item, title: item?.title || item?.name || '' });
+
+const PLAYBACK_MIN_SECONDS = 30;
+const PLAYBACK_MIN_RATIO = 0.25;
+
+function newPlaybackSessionId() {
+  if (globalThis.crypto && crypto.randomUUID) return crypto.randomUUID();
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function localIdOf(item) {
+  return localIdFromItem(item);
+}
+
+function isLocalPlayable(item) {
+  return Boolean(localIdOf(item) && (item?.local_status === 'LOCAL' || item?.source === 'local' || item?.provider === 'navidrome' || String(item?.stream_url || '').includes('/api/library/')));
+}
 
 function showToast(message) {
   const toast = $('#toast'); toast.textContent = message; toast.classList.add('show');
@@ -35,6 +65,27 @@ function filteredLibrary() {
   const query = ($('#library-search')?.value || '').trim().toLocaleLowerCase();
   if (!query) return state.library;
   return state.library.filter((item) => [item.title, item.artist, item.album].some((value) => String(value || '').toLocaleLowerCase().includes(query)));
+}
+
+// Sort displayed library items. 'added' sorts newest-added first using the
+// file modification time carried in item.addedto / item.collectionat.
+function sortLibraryVisible(visible) {
+  if (state.librarySort !== 'added') return visible;
+  const byTime = (item) => {
+    const t = item?.addedto || item?.collectionat || '';
+    if (!t) return 0;
+    const ms = Date.parse(t);
+    if (Number.isFinite(ms)) return ms;
+    // Fallback: parse "MM/dd/yyyy HH:mm:ss" (local) which some browsers reject
+    // via Date.parse. Build a Date from parts to be safe.
+    const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?/.exec(t);
+    if (m) {
+      const d = new Date(Number(m[3]), Number(m[1]) - 1, Number(m[2]), Number(m[4]), Number(m[5]), Number(m[6] || 0));
+      return d.getTime();
+    }
+    return 0;
+  };
+  return [...visible].sort((a, b) => byTime(b) - byTime(a));
 }
 
 function shuffled(items) {
@@ -100,7 +151,7 @@ function reshuffleLibrary() {
 
 function renderLibrary() {
   const list = $('#library-list'); if (!list) return;
-  const visible = filteredLibrary();
+  const visible = sortLibraryVisible(filteredLibrary());
   $('#library-count').textContent = `${state.library.length} 首`;
   $('#library-nav-count').textContent = state.library.length;
   $('#local-count').textContent = state.library.length;
@@ -115,6 +166,7 @@ function renderLibrary() {
       <span class="library-mark">${item.starred ? '♥' : (item.source === 'DailyMix' ? '今日' : '')}</span>
       <span class="track-duration">${duration(item.duration)}</span>
       <button class="lyrics-button" data-action="lyrics" aria-label="查看歌词">词</button>
+      <button class="delete-button" data-action="delete" aria-label="删除这首歌" title="删除">✕</button>
     </article>`;
   }).join('');
 }
@@ -141,7 +193,43 @@ function renderRecommendations() {
   $('#play-first').disabled = !state.items[0];
 }
 
-function playbackCollection() { return state.currentCollection === 'recommendations' ? state.items : filteredLibrary(); }
+function renderListening() {
+  const mostList = $('#most-played-list');
+  const rediscoverList = $('#rediscover-list');
+  if (!mostList || !rediscoverList) return;
+  const most = state.listening.mostPlayed || [];
+  const activeLocalId = state.playbackSession?.libraryId || '';
+  const rediscover = (state.listening.rediscover || []).filter((item) => !activeLocalId || localIdOf(item) !== activeLocalId);
+
+  mostList.innerHTML = most.length
+    ? most.map((item, index) => `<article class="listening-row" data-listening-id="${escapeHtml(item.id || item.library_id || item.identity)}">
+        <span class="listening-rank">${String(index + 1).padStart(2, '0')}</span>
+        <button class="listening-play" data-action="play" type="button" aria-label="播放 ${escapeHtml(item.title)}">▶</button>
+        <div class="listening-main"><div class="listening-title">${escapeHtml(item.title || '未命名歌曲')}</div><div class="listening-artist">${escapeHtml(item.artist || '未知艺术家')}</div></div>
+        <span class="listening-count">${Number(item.play_count || 0)} 次</span>
+      </article>`).join('')
+    : '<div class="listening-empty">播放满 30 秒后，这里会留下你的常听。</div>';
+
+  rediscoverList.innerHTML = rediscover.length
+    ? rediscover.map((item) => `<article class="listening-row rediscover-row" data-listening-id="${escapeHtml(item.id || item.library_id || item.identity)}">
+        <span class="rediscover-mark">✦</span>
+        <button class="listening-play" data-action="play" type="button" aria-label="播放 ${escapeHtml(item.title)}">▶</button>
+        <div class="listening-main"><div class="listening-title">${escapeHtml(item.title || '未命名歌曲')}</div><div class="listening-artist">${escapeHtml(item.artist || '未知艺术家')}</div></div>
+        <span class="listening-count">${Number(item.play_count || 0) ? `${Number(item.play_count)} 次` : '未播放'}</span>
+      </article>`).join('')
+    : '<div class="listening-empty">曲库里的歌都在等你重新发现。</div>';
+}
+
+function listeningCollection() {
+  const items = [...(state.listening.mostPlayed || []), ...(state.listening.rediscover || [])];
+  return [...new Map(items.map((item) => [keyOf(item), item])).values()];
+}
+
+function playbackCollection() {
+  if (state.currentCollection === 'recommendations') return state.items;
+  if (state.currentCollection === 'listening') return listeningCollection();
+  return filteredLibrary();
+}
 
 function updateNavigationButtons() {
   const collection = playbackCollection();
@@ -150,7 +238,7 @@ function updateNavigationButtons() {
   $('#next-button').disabled = disabled;
 }
 
-function render() { renderLibrary(); renderRecommendations(); renderMode(); updateNavigationButtons(); }
+function render() { renderLibrary(); renderRecommendations(); renderListening(); renderMode(); updateNavigationButtons(); }
 
 function renderMode() {
   document.querySelectorAll('.mode-button').forEach((button) => button.classList.toggle('active', button.dataset.mode === state.mode));
@@ -195,9 +283,34 @@ function renderLyrics(currentTime = 0) {
   state.lyrics.entries.forEach((entry, index) => { if (entry.time <= currentTime) active = index; });
   if (state.lyrics.activeIndex === active && content.querySelector('.lyric-line')) return;
   state.lyrics.activeIndex = active;
-  content.innerHTML = state.lyrics.entries.map((entry, index) => `<div class="lyric-line ${index === active ? 'active' : ''}">${escapeHtml(entry.text)}</div>`).join('');
+
+  // Only rebuild the DOM the first time. Thereafter, just move the .active class,
+  // so a user selecting/copying lyrics text is never interrupted by a full
+  // innerHTML rebuild (which would wipe the browser selection on the next line).
+  if (!content.querySelector('.lyric-line')) {
+    content.innerHTML = state.lyrics.entries.map((entry, index) => `<div class="lyric-line ${index === active ? 'active' : ''}">${escapeHtml(entry.text)}</div>`).join('');
+  } else {
+    const lines = content.querySelectorAll('.lyric-line');
+    lines.forEach((line, index) => line.classList.toggle('active', index === active));
+  }
   const activeLine = content.querySelector('.lyric-line.active');
-  if (activeLine) activeLine.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  // Don't auto-scroll while the user is selecting text in the panel: an
+  // auto-scroll would drag the selection anchor and make copying lyrics hard.
+  if (activeLine && !isTextSelecting()) {
+    activeLine.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }
+}
+
+function isTextSelecting() {
+  try {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed) return false;
+    const range = sel.getRangeAt(0);
+    if (!range) return false;
+    // Only treat an in-panel selection as "selecting".
+    const panel = $('#lyrics-content');
+    return panel && (panel.contains(range.startContainer) || panel.contains(range.endContainer));
+  } catch { return false; }
 }
 
 async function loadLyrics(url, open = true) {
@@ -292,25 +405,91 @@ async function hydrateRecommendationPlayback(item) {
   return item;
 }
 
+function maybeRecordPlayback() {
+  const audio = $('#audio-player');
+  const session = state.playbackSession;
+  if (!audio || !session || session.key !== state.currentKey || session.counted || session.pending || audio.paused) return;
+  const current = Number(audio.currentTime || 0);
+  const total = Number(audio.duration || 0);
+  const previous = session.lastAudioTime;
+  if (previous === null || previous === undefined) {
+    session.lastAudioTime = current;
+    return;
+  }
+  const delta = current - previous;
+  if (delta >= 0 && delta <= 5) {
+    session.playedSeconds += delta;
+  } else if (delta < -0.5 || delta > 5) {
+    // A large jump is a seek, not proof that the skipped section was heard.
+    session.seeked = true;
+  }
+  session.lastAudioTime = current;
+  const reachedThreshold = session.playedSeconds >= PLAYBACK_MIN_SECONDS
+    || (!session.seeked && total > 0 && current >= total * PLAYBACK_MIN_RATIO);
+  if (!reachedThreshold) return;
+
+  session.pending = true;
+  fetch(`/api/library/${encodeURIComponent(session.libraryId)}/play`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: session.sessionId }),
+  }).then(async (response) => {
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.message || 'playback record failed');
+    session.pending = false;
+    session.counted = true;
+    if (result.counted) loadListening(true);
+  }).catch(() => {
+    // Keep the session id so a retry is idempotent if the server committed the
+    // event but the response was lost.
+    session.pending = false;
+  });
+}
+
 async function playItem(item, collection = 'library') {
-  const key = keyOf(item); const audio = $('#audio-player');
+  let key = keyOf(item); const audio = $('#audio-player');
   if (!key) return;
   if (state.currentKey === key && !audio.paused) { audio.pause(); return; }
   let source = resolvePlaybackSource(item);
   if (!source && item.track_id) {
     await hydrateRecommendationPlayback(item);
     source = resolvePlaybackSource(item);
+    const hydratedKey = keyOf(item);
+    if (hydratedKey) key = hydratedKey;
   }
   if (!source) { showToast('这首歌暂时没有可用试听源'); return; }
   const sourceUrl = new URL(source, window.location.href).href;
-  const isNewTrack = state.currentKey !== key || audio.src !== sourceUrl;
+  const isNewTrack = state.currentKey !== key || audio.src !== sourceUrl || audio.ended;
   state.currentKey = key; state.currentCollection = collection; updatePlayer(item); render();
-  if (isNewTrack) { audio.pause(); audio.currentTime = 0; audio.src = sourceUrl; }
+  const pt = $('#play-toggle');
+  if (pt) pt.disabled = false;
+  renderPlayerArt(item);
+  if (isNewTrack) {
+    audio.pause(); audio.currentTime = 0; audio.src = sourceUrl;
+    state.playbackSession = isLocalPlayable(item)
+      ? { key, libraryId: localIdOf(item), sessionId: newPlaybackSessionId(), pending: false, counted: false, playedSeconds: 0, lastAudioTime: 0, seeked: false }
+      : null;
+  } else if (isLocalPlayable(item) && !state.playbackSession) {
+    state.playbackSession = { key, libraryId: localIdOf(item), sessionId: newPlaybackSessionId(), pending: false, counted: false, playedSeconds: 0, lastAudioTime: 0, seeked: false };
+  }
   const lyricsUrl = collection === 'recommendations' && item.track_id
     ? `/api/tracks/${encodeURIComponent(item.track_id)}/lyrics`
     : item.lyrics_url || (item.track_id ? `/api/tracks/${encodeURIComponent(item.track_id)}/lyrics` : '');
   await loadLyrics(lyricsUrl, true);
   try { await audio.play(); } catch { showToast('试听源加载失败，请稍后重试'); }
+}
+
+function renderPlayerArt(item) {
+  if (!item) return;
+  const art = $('#player-art');
+  if (!art) return;
+  const cover = item.cover_url || item.recommendation?.cover_url || item.track?.cover_url;
+  if (cover) {
+    art.innerHTML = `<span class="player-cover" style="background-image:url('${escapeHtml(cover)}')"></span>`;
+  } else {
+    const local = item.local_status === 'LOCAL' || item.stream_url;
+    art.innerHTML = `<span>${local ? '♫' : '♪'}</span>`;
+  }
 }
 
 function adjacentItem(direction) {
@@ -356,9 +535,50 @@ async function loadRecommendations(silent = false) {
     if (!response.ok) throw new Error('recommendation request failed');
     const payload = await response.json(); state.items = payload.items || [];
     $('#last-updated').textContent = `更新于 ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+    const weekday = new Date().toLocaleDateString('zh-CN', { weekday: 'long' }).toUpperCase();
+    const dateStr = new Date().toLocaleDateString('zh-CN', { month: 'long', day: 'numeric' });
+    const eyebrow = $('#today-eyebrow');
+    if (eyebrow) eyebrow.textContent = `${weekday} · ${dateStr} · MUSIC DISCOVERY`;
     $('#error-banner').hidden = true; renderRecommendations(); updateNavigationButtons();
     if (!silent && state.items.length) $('#play-first').disabled = false;
   } catch { $('#error-banner').textContent = '暂时无法连接 MusicServer API，请确认 music_api.ps1 正在运行。'; $('#error-banner').hidden = false; if (!silent) renderRecommendations(); }
+}
+
+async function loadListening(silent = false) {
+  try {
+    const response = await fetch('/api/listening/stats', { cache: 'no-store' });
+    if (!response.ok) throw new Error('listening stats request failed');
+    const payload = await response.json();
+    state.listening = {
+      mostPlayed: Array.isArray(payload.most_played) ? payload.most_played : [],
+      rediscover: Array.isArray(payload.rediscover) ? payload.rediscover : [],
+      loaded: true,
+    };
+    renderListening();
+    updateNavigationButtons();
+  } catch {
+    if (!silent) {
+      state.listening.loaded = false;
+      renderListening();
+    }
+  }
+}
+
+async function playRandomListening() {
+  try {
+    const suffix = state.lastRandomId ? `?exclude=${encodeURIComponent(state.lastRandomId)}` : '';
+    const response = await fetch(`/api/listening/random${suffix}`, { cache: 'no-store' });
+    if (!response.ok) throw new Error('random listening request failed');
+    const item = await response.json();
+    state.lastRandomId = item.id || item.library_id || item.identity;
+    await playItem(item, 'listening');
+  } catch {
+    const source = state.library.filter((item) => keyOf(item) !== state.lastRandomId && keyOf(item) !== state.currentKey);
+    if (!source.length) { showToast('本地曲库还没有可随机播放的歌曲'); return; }
+    const item = shuffled(source)[0];
+    state.lastRandomId = item.id;
+    await playItem(item, 'listening');
+  }
 }
 
 async function loadProviderStatus() {
@@ -379,7 +599,39 @@ $('#library-list').addEventListener('click', (event) => {
   const item = state.library.find((candidate) => candidate.id === row.dataset.libraryId); if (!item) return;
   if (event.target.closest('[data-action="lyrics"]')) loadLyrics(item.lyrics_url, true);
   else if (event.target.closest('[data-action="play"]')) playItem(item, 'library');
+  else if (event.target.closest('[data-action="delete"]')) deleteLibraryItem(item);
 });
+
+function listeningItemById(id) {
+  return listeningCollection().find((item) => String(item.id || item.library_id || item.identity) === String(id)) || null;
+}
+
+function handleListeningClick(event) {
+  const row = event.target.closest('[data-listening-id]');
+  if (!row) return;
+  const item = listeningItemById(row.dataset.listeningId);
+  if (item && event.target.closest('[data-action="play"]')) playItem(item, 'listening');
+}
+
+$('#most-played-list').addEventListener('click', handleListeningClick);
+$('#rediscover-list').addEventListener('click', handleListeningClick);
+
+async function deleteLibraryItem(item) {
+  const title = item.title || item.name || '这首歌';
+  if (!window.confirm(`确定要从音乐库删除「${title}」吗？\n\n将同时删除本地音频文件（含歌词），且不可恢复。`)) return;
+  const id = item.id || item.track_id;
+  if (!id) { showToast('无法识别要删除的歌曲'); return; }
+  try {
+    const response = await fetch(`/api/library/${encodeURIComponent(id)}`, { method: 'DELETE', cache: 'no-store' });
+    const result = await response.json();
+    if (!response.ok || !result.accepted) { throw new Error(result.message || '删除请求失败'); }
+    state.library = state.library.filter((candidate) => (candidate.id || candidate.track_id) !== id);
+    showToast(result.message || '已删除');
+    renderLibrary(); updateNavigationButtons();
+  } catch (err) {
+    showToast(`删除失败：${err.message || '请稍后重试'}`);
+  }
+}
 
 $('#recommendation-list').addEventListener('click', (event) => {
   const row = event.target.closest('[data-track-id]'); if (!row) return;
@@ -389,20 +641,115 @@ $('#recommendation-list').addEventListener('click', (event) => {
 });
 
 $('#library-search').addEventListener('input', () => { renderLibrary(); updateNavigationButtons(); });
+$('#library-sort').addEventListener('change', (event) => {
+  state.librarySort = event.target.value || 'default';
+  localStorage.setItem('musicserver-library-sort', state.librarySort);
+  renderLibrary(); updateNavigationButtons();
+});
 document.querySelectorAll('.mode-button').forEach((button) => button.addEventListener('click', () => {
   setPlaybackMode(button.dataset.mode);
 }));
 $('#shuffle-button').addEventListener('click', reshuffleLibrary);
-$('#refresh-button').addEventListener('click', () => { loadLibrary(); loadRecommendations(); loadProviderStatus(); });
+$('#refresh-button').addEventListener('click', () => { loadLibrary(); loadRecommendations(); loadListening(); loadProviderStatus(); });
+$('#listening-refresh').addEventListener('click', () => loadListening());
+$('#rediscover-button').addEventListener('click', () => loadListening());
+$('#random-listening-button').addEventListener('click', playRandomListening);
 $('#play-first').addEventListener('click', () => state.items[0] && playItem(state.items[0], 'recommendations'));
 $('#previous-button').addEventListener('click', previousItem);
 $('#next-button').addEventListener('click', nextItem);
 $('#lyrics-toggle').addEventListener('click', () => { $('#lyrics-panel').hidden = !$('#lyrics-panel').hidden; });
 $('#lyrics-close').addEventListener('click', () => { $('#lyrics-panel').hidden = true; });
-$('#audio-player').addEventListener('ended', nextItem);
-$('#audio-player').addEventListener('timeupdate', () => { if (!$('#lyrics-panel').hidden) renderLyrics($('#audio-player').currentTime); });
-$('#audio-player').addEventListener('play', render);
-$('#audio-player').addEventListener('pause', render);
 
-renderMode(); loadLibrary(); loadRecommendations(); loadProviderStatus();
+// Custom play/pause control.
+const DEFAULT_PLAY_ICON = '▶';
+const DEFAULT_PAUSE_ICON = '❚❚';
+const playToggle = $('#play-toggle');
+
+function setPlayIcon(playing) {
+  if (!playToggle) return;
+  playToggle.textContent = playing ? DEFAULT_PAUSE_ICON : DEFAULT_PLAY_ICON;
+}
+
+$('#play-toggle').addEventListener('click', () => {
+  const audio = $('#audio-player');
+  if (audio.paused) { audio.play().catch(() => {}); } else { audio.pause(); }
+});
+
+// Custom progress bar: click / drag to seek.
+function fmtTime(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
+  const s = Math.floor(seconds);
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
+function updateProgressUI() {
+  const audio = $('#audio-player');
+  const fill = $('#progress-fill');
+  const thumb = $('#progress-thumb');
+  const cur = $('#current-time');
+  const dur = $('#duration-time');
+  if (!fill) return;
+  const duration = audio.duration || 0;
+  const current = audio.currentTime || 0;
+  const pct = duration > 0 ? (current / duration) : 0;
+  fill.style.width = `${(pct * 100).toFixed(2)}%`;
+  if (thumb) thumb.style.left = `${(pct * 100).toFixed(2)}%`;
+  if (cur) cur.textContent = fmtTime(current);
+  if (dur) dur.textContent = fmtTime(duration);
+}
+
+function seekToFraction(frac) {
+  const audio = $('#audio-player');
+  if (!audio.duration) return;
+  const clamped = Math.max(0, Math.min(1, frac));
+  audio.currentTime = clamped * audio.duration;
+}
+
+const progressTrack = $('#progress-track');
+if (progressTrack) {
+  let scrubbing = false;
+  const fractionFromEvent = (event) => {
+    const rect = progressTrack.getBoundingClientRect();
+    if (rect.width <= 0) return 0;
+    return (event.clientX - rect.left) / rect.width;
+  };
+  progressTrack.addEventListener('mousedown', (event) => {
+    if (!event.currentTarget.classList.contains('progress-track')) return;
+    scrubbing = true;
+    seekToFraction(fractionFromEvent(event));
+  });
+  window.addEventListener('mousemove', (event) => { if (scrubbing) seekToFraction(fractionFromEvent(event)); });
+  window.addEventListener('mouseup', () => { scrubbing = false; });
+  progressTrack.addEventListener('click', (event) => {
+    if (event.target.closest('#progress-thumb')) return;
+    seekToFraction(fractionFromEvent(event));
+  });
+  progressTrack.addEventListener('keydown', (event) => {
+    if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') {
+      event.preventDefault();
+      const audio = $('#audio-player');
+      const delta = event.key === 'ArrowRight' ? 5 : -5;
+      audio.currentTime = Math.max(0, Math.min(audio.duration || 0, audio.currentTime + delta));
+    }
+  });
+}
+
+$('#audio-player').addEventListener('ended', nextItem);
+$('#audio-player').addEventListener('seeking', () => {
+  const session = state.playbackSession;
+  const current = Number($('#audio-player').currentTime || 0);
+  if (!session || session.key !== state.currentKey || (current <= 0.5 && session.playedSeconds === 0)) return;
+  session.seeked = true;
+  session.lastAudioTime = current;
+});
+$('#audio-player').addEventListener('timeupdate', () => {
+  updateProgressUI();
+  maybeRecordPlayback();
+  if (!$('#lyrics-panel').hidden) renderLyrics($('#audio-player').currentTime);
+});
+$('#audio-player').addEventListener('loadedmetadata', updateProgressUI);
+$('#audio-player').addEventListener('play', () => { setPlayIcon(true); render(); });
+$('#audio-player').addEventListener('pause', () => { setPlayIcon(false); render(); });
+
+renderMode(); loadLibrary(); loadRecommendations(); loadListening(); loadProviderStatus();
 setInterval(() => { loadLibrary(true); loadRecommendations(true); loadProviderStatus(); }, 15000);

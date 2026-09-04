@@ -7,7 +7,7 @@
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Database.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Core.psm1') -Force
 
-$script:SchemaVersion = 4
+$script:SchemaVersion = 5
 $script:LeaseMinutes = 30
 
 # ================================================================
@@ -156,6 +156,44 @@ CREATE TABLE IF NOT EXISTS events (
 );
 "@
     Invoke-MusicServerSqlNonQuery -Query @"
+CREATE TABLE IF NOT EXISTS listening_stats (
+    identity TEXT PRIMARY KEY,
+    track_id TEXT NOT NULL DEFAULT '',
+    library_id TEXT NOT NULL DEFAULT '',
+    play_count INTEGER NOT NULL DEFAULT 0,
+    last_played_at TEXT,
+    first_played_at TEXT,
+    updated_at TEXT NOT NULL
+);
+"@
+    Invoke-MusicServerSqlNonQuery -Query @"
+CREATE TABLE IF NOT EXISTS listening_play_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    identity TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    track_id TEXT NOT NULL DEFAULT '',
+    library_id TEXT NOT NULL DEFAULT '',
+    played_at TEXT NOT NULL,
+    UNIQUE(identity, session_id)
+);
+"@
+    Invoke-MusicServerSqlNonQuery -Query @"
+CREATE TRIGGER IF NOT EXISTS trg_listening_play_event_stats
+AFTER INSERT ON listening_play_events
+BEGIN
+    INSERT OR IGNORE INTO listening_stats (identity, track_id, library_id, play_count, last_played_at, first_played_at, updated_at)
+    VALUES (NEW.identity, NEW.track_id, NEW.library_id, 0, NULL, NULL, NEW.played_at);
+    UPDATE listening_stats
+       SET track_id = CASE WHEN NEW.track_id != '' THEN NEW.track_id ELSE track_id END,
+           library_id = CASE WHEN NEW.library_id != '' THEN NEW.library_id ELSE library_id END,
+           play_count = play_count + 1,
+           last_played_at = NEW.played_at,
+           first_played_at = COALESCE(first_played_at, NEW.played_at),
+           updated_at = NEW.played_at
+     WHERE identity = NEW.identity;
+END;
+"@
+    Invoke-MusicServerSqlNonQuery -Query @"
 CREATE INDEX IF NOT EXISTS idx_wanted_state ON wanted_queue(state);
 CREATE INDEX IF NOT EXISTS idx_wanted_lease ON wanted_queue(lease_expires_at);
 CREATE INDEX IF NOT EXISTS idx_wanted_lease_epoch ON wanted_queue(lease_expires_epoch);
@@ -166,6 +204,9 @@ CREATE INDEX IF NOT EXISTS idx_daily_date ON daily_recommendations(date);
 CREATE INDEX IF NOT EXISTS idx_feedback_track ON recommendation_feedback(track_id);
 CREATE INDEX IF NOT EXISTS idx_recommendation_files_track ON recommendation_files(track_id);
 CREATE INDEX IF NOT EXISTS idx_recommendation_files_date ON recommendation_files(date);
+CREATE INDEX IF NOT EXISTS idx_listening_stats_track ON listening_stats(track_id);
+CREATE INDEX IF NOT EXISTS idx_listening_stats_last_played ON listening_stats(last_played_at);
+CREATE INDEX IF NOT EXISTS idx_listening_play_events_identity ON listening_play_events(identity);
 "@
     Set-SchemaVersion -Version $script:SchemaVersion
 }
@@ -179,6 +220,15 @@ function Get-CanonicalTrackDb {
     $rows = @(Invoke-MusicServerParamSql -Template 'SELECT * FROM canonical_tracks WHERE id = @track_id LIMIT 1;' -Params @{ track_id = $TrackId })
     if ($rows.Count -eq 0) { return $null }
     return Convert-DbTrackRow -Row $rows[0]
+}
+
+function Get-CanonicalLocalTrackMapDb {
+    $map = @{}
+    foreach ($row in @(Invoke-MusicServerSqlJson -Query "SELECT id, local_song_id, status FROM canonical_tracks WHERE local_song_id IS NOT NULL AND local_song_id != '';")) {
+        $localSongId = [string]$row.local_song_id
+        if ($localSongId) { $map[$localSongId] = $row }
+    }
+    return $map
 }
 
 function Save-CanonicalTrackDb {
@@ -1448,6 +1498,261 @@ function Invoke-UnlikeTrackTransactionDb {
         from_queue       = $fromQueue
         to_queue         = if ($qAfter) { [string]$qAfter.state } else { $null }
         queue_revision   = if ($qAfter) { [int]$qAfter.revision } else { 0 }
+    }
+}
+
+# ====================================================================
+# Listening statistics
+# ====================================================================
+# The public interface is deliberately small: callers submit one completed
+# local-play event and read the aggregate rows. Session de-duplication is
+# enforced by SQLite's UNIQUE(identity, session_id) constraint; the trigger
+# updates listening_stats only when a new event is inserted.
+
+function Get-ListeningStatsDb {
+    [CmdletBinding()]
+    param(
+        [string]$Identity = ''
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Identity)) {
+        $rows = @(Invoke-MusicServerSqlJson -Query @"
+SELECT identity, track_id, library_id, play_count, last_played_at, first_played_at, updated_at
+FROM listening_stats
+ORDER BY play_count DESC, last_played_at DESC, identity ASC;
+"@)
+    } else {
+        $rows = @(Invoke-MusicServerParamSql -Template @"
+SELECT identity, track_id, library_id, play_count, last_played_at, first_played_at, updated_at
+FROM listening_stats
+WHERE identity = @identity
+LIMIT 1;
+"@ -Params @{ identity = $Identity })
+    }
+
+    return @($rows | ForEach-Object {
+        [pscustomobject]@{
+            identity = [string]$_.identity
+            track_id = [string]$_.track_id
+            library_id = [string]$_.library_id
+            play_count = [int]$_.play_count
+            last_played_at = if ($null -eq $_.last_played_at) { $null } else { [string]$_.last_played_at }
+            first_played_at = if ($null -eq $_.first_played_at) { $null } else { [string]$_.first_played_at }
+            updated_at = [string]$_.updated_at
+        }
+    })
+}
+
+function Record-ListeningPlayDb {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$Identity,
+        [string]$TrackId = '',
+        [string]$LibraryId = '',
+        [string]$SessionId = '',
+        [string]$Now = ''
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Identity)) {
+        throw 'LISTENING_IDENTITY_REQUIRED'
+    }
+    if ([string]::IsNullOrWhiteSpace($SessionId)) {
+        $SessionId = 'session_' + [guid]::NewGuid().ToString('N')
+    }
+    if ([string]::IsNullOrWhiteSpace($Now)) {
+        $Now = Get-NowIso
+    }
+
+    $litIdentity = ConvertTo-MusicServerSqlLiteral $Identity
+    $litTrackId = ConvertTo-MusicServerSqlLiteral $TrackId
+    $litLibraryId = ConvertTo-MusicServerSqlLiteral $LibraryId
+    $litSessionId = ConvertTo-MusicServerSqlLiteral $SessionId
+    $litNow = ConvertTo-MusicServerSqlLiteral $Now
+
+    # SELECT changes() is inside the same transaction and immediately follows
+    # INSERT OR IGNORE, so it tells us whether this session was newly counted.
+    $sql = @"
+.bail on
+BEGIN;
+INSERT OR IGNORE INTO listening_play_events (identity, session_id, track_id, library_id, played_at)
+VALUES ($litIdentity, $litSessionId, $litTrackId, $litLibraryId, $litNow);
+SELECT changes() AS counted;
+COMMIT;
+"@
+    $raw = Invoke-MusicServerSqliteScript -Sql $sql -Json
+    $rows = @()
+    if (-not [string]::IsNullOrWhiteSpace($raw)) {
+        $parsed = ConvertFrom-MusicServerSqliteJson -Json ([string]$raw)
+        $rows = @($parsed)
+    }
+    $counted = $false
+    if ($rows.Count -gt 0) {
+        $countRow = $rows | Where-Object { $_.PSObject.Properties['counted'] } | Select-Object -Last 1
+        if ($countRow) { $counted = ([int]$countRow.counted -eq 1) }
+    }
+
+    $stat = @(Get-ListeningStatsDb -Identity $Identity) | Select-Object -First 1
+    if ($null -eq $stat) {
+        throw "LISTENING_STAT_NOT_FOUND: $Identity"
+    }
+    return [pscustomobject]@{
+        identity = [string]$stat.identity
+        track_id = [string]$stat.track_id
+        library_id = [string]$stat.library_id
+        play_count = [int]$stat.play_count
+        last_played_at = $stat.last_played_at
+        first_played_at = $stat.first_played_at
+        updated_at = [string]$stat.updated_at
+        session_id = $SessionId
+        counted = $counted
+    }
+}
+
+function Select-ListeningRandomSubset {
+    param(
+        [AllowEmptyCollection()][object[]]$Items = @(),
+        [int]$Count = 0
+    )
+
+    if ($Count -le 0 -or @($Items).Count -eq 0) { return @() }
+    $copy = New-Object System.Collections.ArrayList
+    foreach ($item in @($Items)) { [void]$copy.Add($item) }
+    for ($i = $copy.Count - 1; $i -gt 0; $i--) {
+        $j = Get-Random -Minimum 0 -Maximum ($i + 1)
+        $temp = $copy[$i]
+        $copy[$i] = $copy[$j]
+        $copy[$j] = $temp
+    }
+    return @($copy | Select-Object -First ([Math]::Min($Count, $copy.Count)))
+}
+
+function ConvertTo-ListeningItemResponse {
+    param([Parameter(Mandatory = $true)]$Item)
+
+    $identity = [string](Get-OptionalProperty $Item 'identity' (Get-OptionalProperty $Item 'listening_identity'))
+    [pscustomobject]@{
+        id = [string](Get-OptionalProperty $Item 'id')
+        library_id = [string](Get-OptionalProperty $Item 'library_id' (Get-OptionalProperty $Item 'id'))
+        identity = $identity
+        track_id = [string](Get-OptionalProperty $Item 'track_id' $identity)
+        title = [string](Get-OptionalProperty $Item 'title' (Get-OptionalProperty $Item 'name'))
+        artist = [string](Get-OptionalProperty $Item 'artist')
+        album = [string](Get-OptionalProperty $Item 'album')
+        duration = [int](Get-OptionalProperty $Item 'duration' 0)
+        cover_url = [string](Get-OptionalProperty $Item 'cover_url')
+        stream_url = [string](Get-OptionalProperty $Item 'stream_url')
+        lyrics_url = [string](Get-OptionalProperty $Item 'lyrics_url')
+        play_count = [int](Get-OptionalProperty $Item 'play_count' 0)
+        last_played_at = Get-OptionalProperty $Item 'last_played_at' $null
+        first_played_at = Get-OptionalProperty $Item 'first_played_at' $null
+        updated_at = [string](Get-OptionalProperty $Item 'updated_at')
+    }
+}
+
+function Get-ListeningOverviewDb {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyCollection()][object[]]$LibraryItems = @(),
+        [int]$MostPlayedLimit = 5,
+        [int]$RediscoverLimit = 5,
+        [int]$RecentCooldownMinutes = 120,
+        [DateTime]$AsOf = [DateTime]::UtcNow
+    )
+
+    $mostLimit = [Math]::Max(0, $MostPlayedLimit)
+    $rediscoverLimit = [Math]::Max(0, $RediscoverLimit)
+    $nowUtc = $AsOf.ToUniversalTime()
+    $statsByIdentity = @{}
+    foreach ($stat in @(Get-ListeningStatsDb)) {
+        $identity = [string]$stat.identity
+        if ($identity) { $statsByIdentity[$identity] = $stat }
+    }
+
+    $joined = @(
+        foreach ($libraryItem in @($LibraryItems)) {
+            if ($null -eq $libraryItem) { continue }
+            $identity = [string](Get-OptionalProperty $libraryItem 'listening_identity')
+            if (-not $identity) { $identity = [string](Get-OptionalProperty $libraryItem 'identity') }
+            if (-not $identity) { $identity = [string](Get-OptionalProperty $libraryItem 'track_id') }
+            if (-not $identity) { $identity = [string](Get-OptionalProperty $libraryItem 'id') }
+            if (-not $identity) { continue }
+
+            $stat = if ($statsByIdentity.ContainsKey($identity)) { $statsByIdentity[$identity] } else { $null }
+            $trackId = [string](Get-OptionalProperty $libraryItem 'track_id')
+            if (-not $trackId) { $trackId = $identity }
+            [pscustomobject]@{
+                id = [string](Get-OptionalProperty $libraryItem 'id')
+                library_id = [string](Get-OptionalProperty $libraryItem 'library_id' (Get-OptionalProperty $libraryItem 'id'))
+                identity = $identity
+                track_id = $trackId
+                title = [string](Get-OptionalProperty $libraryItem 'title' (Get-OptionalProperty $libraryItem 'name'))
+                artist = [string](Get-OptionalProperty $libraryItem 'artist')
+                album = [string](Get-OptionalProperty $libraryItem 'album')
+                duration = [int](Get-OptionalProperty $libraryItem 'duration' 0)
+                cover_url = [string](Get-OptionalProperty $libraryItem 'cover_url')
+                stream_url = [string](Get-OptionalProperty $libraryItem 'stream_url')
+                lyrics_url = [string](Get-OptionalProperty $libraryItem 'lyrics_url')
+                play_count = if ($stat) { [int]$stat.play_count } else { 0 }
+                last_played_at = if ($stat) { $stat.last_played_at } else { $null }
+                first_played_at = if ($stat) { $stat.first_played_at } else { $null }
+                updated_at = if ($stat) { [string]$stat.updated_at } else { '' }
+            }
+        }
+    )
+
+    $most = @()
+    if ($mostLimit -gt 0) {
+        $most = @($joined |
+            Where-Object { [int]$_.play_count -gt 0 } |
+            Sort-Object `
+                @{ Expression = { [int]$_.play_count }; Descending = $true }, `
+                @{ Expression = { [string]$_.last_played_at }; Descending = $true }, `
+                @{ Expression = { [string]$_.identity }; Descending = $false } |
+            Select-Object -First $mostLimit)
+    }
+
+    $rediscover = @()
+    if ($rediscoverLimit -gt 0) {
+        $cutoff = $nowUtc.AddMinutes(-1 * [Math]::Max(0, $RecentCooldownMinutes))
+        $candidates = @(
+            foreach ($item in @($joined)) {
+                $last = Convert-ToUtcDateTime $item.last_played_at
+                # A just-finished or currently playing song should not be sent
+                # back into the rediscovery list immediately.
+                if ($last -and $last -ge $cutoff) { continue }
+                $priority = 3
+                if ($last -and (($nowUtc - $last).TotalDays -ge 30)) {
+                    $priority = 0
+                } elseif ($last -and [int]$item.play_count -le 1) {
+                    $priority = 1
+                } elseif (-not $last -or [int]$item.play_count -eq 0) {
+                    $priority = 2
+                }
+                [pscustomobject]@{
+                    item = $item
+                    priority = $priority
+                    age_days = if ($last) { ($nowUtc - $last).TotalDays } else { [double]::MaxValue }
+                    play_count = [int]$item.play_count
+                    last_played_at = [string]$item.last_played_at
+                }
+            }
+        )
+
+        $poolSize = [Math]::Min($candidates.Count, [Math]::Max($rediscoverLimit * 4, 20))
+        $pool = @($candidates |
+            Sort-Object `
+                @{ Expression = { [int]$_.priority }; Descending = $false }, `
+                @{ Expression = { [int]$_.play_count }; Descending = $false }, `
+                @{ Expression = { [double]$_.age_days }; Descending = $true }, `
+                @{ Expression = { [string]$_.last_played_at }; Descending = $false } |
+            Select-Object -First $poolSize)
+        $rediscover = @(Select-ListeningRandomSubset -Items @($pool | ForEach-Object { $_.item }) -Count $rediscoverLimit |
+            ForEach-Object { ConvertTo-ListeningItemResponse -Item $_ })
+    }
+
+    return [pscustomobject]@{
+        most_played = @($most | ForEach-Object { ConvertTo-ListeningItemResponse -Item $_ })
+        rediscover = $rediscover
     }
 }
 

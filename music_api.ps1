@@ -19,6 +19,9 @@
 #       POST /api/wanted/{id}/retry -> 202 { accepted, queued, wanted }
 #       POST /api/wanted/{id}/cancel -> { accepted, action, wanted }
 #       GET  /api/providers/status -> { items=[local, bilibili_search, bilibili_download] }
+#       GET  /api/listening/stats -> { most_played=[...], rediscover=[...], total_local }
+#       GET  /api/listening/random -> one playable local track
+#       POST /api/library/{id}/play or /api/tracks/{id}/play -> completed local play event
 #       GET  /health               -> { status='ok', ... }
 # ------------------------------------------------------------------
 param(
@@ -129,8 +132,37 @@ function Get-TrackLocalFile {
             if ($resolved) { return $resolved }
             continue
         }
+        # canonical_tracks.local_song_id stores the read-only Navidrome
+        # media_file id, not a filesystem path. Resolve that id through the
+        # current media_file snapshot so canonical local tracks can be played.
+        $navId = if ($value.StartsWith('library-')) { $value.Substring('library-'.Length) } else { $value }
+        try {
+            $navRow = @(Read-NavidromeLibrary | Where-Object { [string]$_.id -eq $navId } | Select-Object -First 1)
+            if ($navRow) {
+                $navPath = [string]$navRow[0].path
+                if ($navPath -and -not [System.IO.Path]::IsPathRooted($navPath)) {
+                    $navPath = Join-Path $Config.MusicDir $navPath
+                }
+                if ($navPath -and (Test-Path -LiteralPath $navPath -PathType Leaf)) {
+                    return ([System.IO.Path]::GetFullPath((Get-Item -LiteralPath $navPath).FullName))
+                }
+            }
+        } catch {}
     }
     return $null
+}
+
+function Get-StableLocalIdentity {
+    param([Parameter(Mandatory)][string]$File)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $fullPath = [System.IO.Path]::GetFullPath($File)
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($fullPath)
+        $hex = [System.BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant()
+        return 'na-' + $hex.Substring(0, 16)
+    } finally {
+        $sha.Dispose()
+    }
 }
 
 function Resolve-LibraryNaPath {
@@ -139,9 +171,9 @@ function Resolve-LibraryNaPath {
     $found = $null
     foreach ($dir in $dirs) {
         if (-not (Test-Path -LiteralPath $dir)) { continue }
-        $files = Get-ChildItem -LiteralPath $dir -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.mp3','.flac','.wav','.aac' }
+        $files = Get-ChildItem -LiteralPath $dir -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.mp3','.flac','.wav','.aac','.m4a' }
         foreach ($file in $files) {
-            $na = 'na-' + ([System.BitConverter]::ToString([System.Security.Cryptography.SHA256]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes((Get-Item -LiteralPath $file.FullName).FullName))).Replace('-', '').Substring(0,16).ToLowerInvariant())
+            $na = Get-StableLocalIdentity -File $file.FullName
             if ($na -eq $NaId) { $found = (Get-Item -LiteralPath $file.FullName).FullName; break }
         }
         if ($found) { break }
@@ -157,13 +189,19 @@ function Invoke-SqliteJson {
     )
     $sqlite = $Config.Sqlite
     if (-not $sqlite) { throw 'SQLite3 executable not found. Set Config.Sqlite or install sqlite3.' }
-    $tempOut = Join-Path ([System.IO.Path]::GetTempPath()) ("navidrome_out_{0}.json" -f [guid]::NewGuid().ToString('N'))
-    $argList = @('-readonly', '-json', $DbPath, $Sql)
-    $proc = Start-Process -FilePath $sqlite -ArgumentList $argList -NoNewWindow -Wait -PassThru -RedirectStandardOutput $tempOut
-    $text = $null
-    if (Test-Path -LiteralPath $tempOut) { $text = Get-Content -LiteralPath $tempOut -Raw; Remove-Item -LiteralPath $tempOut -Force -ErrorAction SilentlyContinue }
-    if ($proc.ExitCode -ne 0) { return @() }
-    if (-not $text) { return @() }
+    if (-not (Test-Path -LiteralPath $DbPath -PathType Leaf)) { return @() }
+    $errorFile = Join-Path ([System.IO.Path]::GetTempPath()) ("navidrome_err_{0}.log" -f [guid]::NewGuid().ToString('N'))
+    try {
+        # Pass SQL as one argument. Start-Process -ArgumentList can flatten a
+        # query containing spaces and make sqlite receive an incomplete query.
+        $output = @(& $sqlite '-readonly' '-json' $DbPath $Sql 2> $errorFile)
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -ne 0) { return @() }
+        $text = ($output -join [Environment]::NewLine)
+    } finally {
+        Remove-Item -LiteralPath $errorFile -Force -ErrorAction SilentlyContinue
+    }
+    if ([string]::IsNullOrWhiteSpace($text)) { return @() }
     $parsed = ConvertFrom-Json -InputObject ([string]$text)
     if (-not $parsed) { return @() }
     return @($parsed)
@@ -172,9 +210,9 @@ function Invoke-SqliteJson {
 function Read-NavidromeLibrary {
     param([AllowEmptyString()][string]$WhereSql = '', [AllowEmptyString()][string[]]$Params = @())
     if ($WhereSql) {
-        $sql = "SELECT id, name, artist, album, path, duration, track, addedto, collectionat FROM songs WHERE $WhereSql;"
+        $sql = "SELECT id, title AS name, artist, album, path, duration, track_number AS track, created_at AS addedto, updated_at AS collectionat FROM media_file WHERE missing = 0 AND $WhereSql;"
     } else {
-        $sql = 'SELECT id, name, artist, album, path, duration, track, addedto, collectionat FROM songs;'
+        $sql = 'SELECT id, title AS name, artist, album, path, duration, track_number AS track, created_at AS addedto, updated_at AS collectionat FROM media_file WHERE missing = 0;'
     }
     return @(Invoke-SqliteJson -DbPath $Config.NdDb -Sql $sql -Params $Params)
 }
@@ -185,16 +223,124 @@ function Get-NavidromeLibrary {
 
 function Get-NavidromeLibraryId {
     param([Parameter(Mandatory)][string]$File)
-    $row = @(Read-NavidromeLibrary | Where-Object { [string]$_.path -eq $File } | Select-Object -First 1)
+    $fullFile = [System.IO.Path]::GetFullPath($File)
+    $row = @(Read-NavidromeLibrary | Where-Object {
+        $rowPath = [string]$_.path
+        if ($rowPath -and -not [System.IO.Path]::IsPathRooted($rowPath)) { $rowPath = Join-Path $Config.MusicDir $rowPath }
+        $rowPath -and ([System.IO.Path]::GetFullPath($rowPath) -eq $fullFile)
+    } | Select-Object -First 1)
     if ($row) { return 'library-' + [string]$row.id }
-    return 'na-' + ([System.BitConverter]::ToString([System.Security.Cryptography.SHA256]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes($File))).Replace('-', '').Substring(0,16).ToLowerInvariant())
+    return Get-StableLocalIdentity -File $File
 }
 
 function Get-NavidromeLibraryItem {
     param([Parameter(Mandatory)][psobject]$Track)
     $file = Get-TrackLocalFile -Track $Track
     if (-not $file) { return $null }
-    return @(Read-NavidromeLibrary | Where-Object { [string]$_.path -eq $file } | Select-Object -First 1)
+    $fullFile = [System.IO.Path]::GetFullPath($file)
+    return @(Read-NavidromeLibrary | Where-Object {
+        $rowPath = [string]$_.path
+        if ($rowPath -and -not [System.IO.Path]::IsPathRooted($rowPath)) { $rowPath = Join-Path $Config.MusicDir $rowPath }
+        $rowPath -and ([System.IO.Path]::GetFullPath($rowPath) -eq $fullFile)
+    } | Select-Object -First 1)
+}
+
+function Get-LocalCanonicalTrackMap {
+    try { return Get-CanonicalLocalTrackMapDb } catch { return @{} }
+}
+
+function New-ListeningLibraryItem {
+    param(
+        [Parameter(Mandatory)][psobject]$Row,
+        [Parameter(Mandatory)][string]$File,
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][string]$LocalId,
+        [Parameter(Mandatory)][hashtable]$CanonicalByLocalId
+    )
+
+    $canonical = $null
+    $rowId = [string](Get-OptionalProperty $Row 'id')
+    if ($rowId -and $CanonicalByLocalId.ContainsKey($rowId)) { $canonical = $CanonicalByLocalId[$rowId] }
+    $identity = if ($canonical) { [string]$canonical.id } else { Get-StableLocalIdentity -File $File }
+    $title = [string](Get-OptionalProperty $Row 'name' (Get-OptionalProperty $Row 'title'))
+    $artist = [string](Get-OptionalProperty $Row 'artist')
+    $album = [string](Get-OptionalProperty $Row 'album')
+    $lrcPath = Get-LrcPath -Path $File
+    $trackId = if ($canonical) { [string]$canonical.id } else { $identity }
+    [pscustomobject]@{
+        id = $LocalId; library_id = $LocalId; source = $Source; provider = 'navidrome'
+        name = $title; title = $title; artist = $artist; album = $album
+        duration = [int](Get-OptionalProperty $Row 'duration' 0); track = [int](Get-OptionalProperty $Row 'track' 0)
+        addedto = [string](Get-OptionalProperty $Row 'addedto')
+        collectionat = [string](Get-OptionalProperty $Row 'collectionat')
+        path = $File; file = $File
+        track_id = $trackId; canonical_track_id = if ($canonical) { [string]$canonical.id } else { '' }
+        listening_identity = $identity; local_status = 'LOCAL'
+        stream_url = "/api/library/$LocalId/stream"
+        lyrics_url = if ($lrcPath) { "/api/library/$LocalId/lyrics" } else { '' }
+        cover_url = ''
+    }
+}
+
+function Get-LocalListeningItems {
+    $canonicalByLocalId = Get-LocalCanonicalTrackMap
+    $items = New-Object System.Collections.ArrayList
+    $seenFiles = @{}
+
+    foreach ($row in @(Get-NavidromeLibrary)) {
+        $file = [string](Get-OptionalProperty $row 'path')
+        if ([string]::IsNullOrWhiteSpace($file)) { continue }
+        try {
+            if (-not [System.IO.Path]::IsPathRooted($file)) { $file = Join-Path $Config.MusicDir $file }
+            $file = [System.IO.Path]::GetFullPath($file)
+        } catch { continue }
+        if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { continue }
+        $fileKey = $file.ToLowerInvariant()
+        if ($seenFiles.ContainsKey($fileKey)) { continue }
+        $seenFiles[$fileKey] = $true
+        $localId = 'library-' + [string]$row.id
+        [void]$items.Add((New-ListeningLibraryItem -Row $row -File $file -Source 'navidrome' -LocalId $localId -CanonicalByLocalId $canonicalByLocalId))
+    }
+
+    foreach ($dir in @($Config.MusicDir)) {
+        if (-not (Test-Path -LiteralPath $dir -PathType Container)) { continue }
+        foreach ($fileInfo in @(Get-ChildItem -LiteralPath $dir -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.mp3','.flac','.wav','.aac','.m4a' })) {
+            $file = [System.IO.Path]::GetFullPath($fileInfo.FullName)
+            $fileKey = $file.ToLowerInvariant()
+            if ($seenFiles.ContainsKey($fileKey)) { continue }
+            $seenFiles[$fileKey] = $true
+            $title = [System.IO.Path]::GetFileNameWithoutExtension($file)
+            $artist = [string](Split-Path -Leaf (Split-Path -Parent $file))
+            $addedAt = ''
+            try { $addedAt = (Get-Item -LiteralPath $file).LastWriteTime.ToString('o') } catch {}
+            $row = [pscustomobject]@{ id = ''; name = $title; artist = $artist; album = $artist; duration = 0; track = 0; addedto = $addedAt; collectionat = $addedAt }
+            $localId = Get-StableLocalIdentity -File $file
+            [void]$items.Add((New-ListeningLibraryItem -Row $row -File $file -Source 'local' -LocalId $localId -CanonicalByLocalId $canonicalByLocalId))
+        }
+    }
+    return @($items)
+}
+
+function Get-LocalListeningItem {
+    param([Parameter(Mandatory)][string]$LocalId)
+    return @(Get-LocalListeningItems | Where-Object {
+        [string]$_.id -eq $LocalId -or [string]$_.track_id -eq $LocalId -or [string]$_.listening_identity -eq $LocalId
+    } | Select-Object -First 1)
+}
+
+function Get-RandomLocalListeningItem {
+    param([string]$ExcludeId = '')
+    $items = @(Get-LocalListeningItems)
+    if ($items.Count -eq 0) { return $null }
+    $candidates = @($items | Where-Object {
+        -not $ExcludeId -or (
+            [string]$_.id -ne $ExcludeId -and
+            [string]$_.track_id -ne $ExcludeId -and
+            [string]$_.listening_identity -ne $ExcludeId
+        )
+    })
+    if ($candidates.Count -eq 0) { $candidates = $items }
+    return $candidates[(Get-Random -Minimum 0 -Maximum $candidates.Count)]
 }
 
 function Read-NeteaseLyrics([string]$Path) {
@@ -227,7 +373,9 @@ function Get-LibraryItemResponse {
         $idPart = $LocalId.Substring('library-'.Length)
         $row = @(Read-NavidromeLibrary | Where-Object { [string]$_.id -eq $idPart } | Select-Object -First 1)
         if ($row) {
-            $file = [System.IO.Path]::GetFullPath([string]$row.path)
+            $file = [string]$row[0].path
+            if (-not [System.IO.Path]::IsPathRooted($file)) { $file = Join-Path $Config.MusicDir $file }
+            $file = [System.IO.Path]::GetFullPath($file)
             return [pscustomobject]@{
                 id = $LocalId; source = 'navidrome'; provider = 'navidrome'
                 name = [string]$row.name; artist = [string]$row.artist; album = [string]$row.album
@@ -273,6 +421,59 @@ function Get-LibraryItemResponse {
         }
     }
     throw 'LIBRARY_NOT_FOUND: ' + $LocalId
+}
+
+function Remove-LibraryTrack {
+    param([Parameter(Mandatory)][string]$LocalId)
+    # Resolve the file for the id. na- ids resolve by scanning the library dirs.
+    $file = $null
+    try {
+        $item = Get-LibraryItemResponse -LocalId $LocalId
+        $file = [string]$item.file
+    } catch { $file = $null }
+    if (-not $file -or -not (Test-Path -LiteralPath $file -PathType Leaf)) {
+        return @{ Error = 'FILE_NOT_FOUND'; Message = '找不到要删除的本地文件。'; File = $file; Deleted = $false; TrackId = '' }
+    }
+    $fullFile = [System.IO.Path]::GetFullPath($file)
+
+    # Before deleting, find any canonical track that is LOCAL and bound to this
+    # file (via Navidrome media_file path) so its state can be reset.
+    $trackId = ''
+    try {
+        $navRows = @(Invoke-SqliteJson -DbPath $Config.NdDb -Sql "SELECT id FROM media_file WHERE path = '" + ([string]$fullFile).Replace("'", "''") + "' LIMIT 1;")
+        if ($navRows.Count -gt 0) {
+            $songId = [string]$navRows[0].id
+            # Find canonical tracks bound to this Navidrome song id.
+            $candRows = @(Invoke-MusicServerParamSql -Template "SELECT id FROM canonical_tracks WHERE local_song_id = @sid AND status = 'LOCAL' LIMIT 5;" -Params @{ sid = $songId })
+            if ($candRows.Count -gt 0) { $trackId = [string]$candRows[0].id }
+        }
+    } catch {}
+
+    # Delete the audio file and its sidecar .lrc.
+    try { Remove-Item -LiteralPath $fullFile -Force -ErrorAction Stop } catch { }
+    $lrcFile = [System.IO.Path]::ChangeExtension($fullFile, '.lrc')
+    if (Test-Path -LiteralPath $lrcFile) { Remove-Item -LiteralPath $lrcFile -Force -ErrorAction SilentlyContinue }
+
+    # Reset canonical track to REMOTE (and drop the local binding) if one was bound.
+    if ($trackId) {
+        try {
+            $track = Get-CanonicalTrackDb -TrackId $trackId
+            if ($track) {
+                $track.status = 'REMOTE'
+                $track.local_song_id = ''
+                Save-CanonicalTrackDb -Track $track | Out-Null
+            }
+        } catch {}
+    }
+
+    # Ask Navidrome to rescan so the deleted file leaves its library.
+    try {
+        if ((Test-Path -LiteralPath $Config.NdExe) -and (Test-Path -LiteralPath $Config.NdConfig)) {
+            & $Config.NdExe -c $Config.NdConfig scan --nobanner 2>$null | Out-Null
+        }
+    } catch {}
+
+    return @{ Error = ''; Message = 'ok'; File = $fullFile; Deleted = $true; TrackId = $trackId }
 }
 
 function Get-TodayRecommendationResponse {
@@ -339,6 +540,52 @@ function Get-TrackResponse {
     }
 }
 
+function Get-ListeningStatsResponse {
+    $library = @(Get-LocalListeningItems)
+    $overview = Get-ListeningOverviewDb -LibraryItems $library -MostPlayedLimit 5 -RediscoverLimit 5 -RecentCooldownMinutes 120
+    return [pscustomobject]@{
+        most_played = @($overview.most_played)
+        rediscover = @($overview.rediscover)
+        total_local = $library.Count
+    }
+}
+
+function Get-ListeningPlayResponse {
+    param(
+        [Parameter(Mandatory)][string]$LocalId,
+        [string]$SessionId = ''
+    )
+    $item = @(Get-LocalListeningItem -LocalId $LocalId) | Select-Object -First 1
+    if ($null -eq $item) { throw 'LIBRARY_NOT_FOUND: ' + $LocalId }
+    $stat = Record-ListeningPlayDb -Identity ([string]$item.listening_identity) -TrackId ([string]$item.track_id) -LibraryId ([string]$item.id) -SessionId $SessionId
+    return [pscustomobject]@{
+        accepted = $true
+        counted = [bool]$stat.counted
+        id = [string]$item.id
+        library_id = [string]$item.id
+        identity = [string]$stat.identity
+        track_id = [string]$item.track_id
+        title = [string]$item.title
+        artist = [string]$item.artist
+        play_count = [int]$stat.play_count
+        last_played_at = $stat.last_played_at
+        first_played_at = $stat.first_played_at
+        updated_at = [string]$stat.updated_at
+        session_id = [string]$stat.session_id
+    }
+}
+
+function Get-ListeningSessionIdFromBody {
+    param([AllowEmptyString()][string]$Body = '')
+    if ([string]::IsNullOrWhiteSpace($Body)) { return '' }
+    try {
+        $payload = ConvertFrom-Json -InputObject $Body
+        return [string](Get-OptionalProperty $payload 'session_id')
+    } catch {
+        return ''
+    }
+}
+
 function Resolve-RouteLikeTransaction {
     # POST/DELETE /api/tracks/{id}/like and the wanted queue routes all funnel
     # through the State-layer transaction functions (single SQLite txn).
@@ -361,6 +608,14 @@ $listener.Start()
 Write-Host "API listening on $($listener.Prefixes[0])" -ForegroundColor Cyan
 
 $script:requestCount = 0
+# /api/today is recomputed per request and costs ~5s (each DB read spawns a
+# sqlite3 subprocess; 20 tracks x several reads). The UI polls it every 15s,
+# and because the UI proxies on a single thread, a slow /api/today blocks
+# playback/health for everyone. Daily recommendations only change once a day
+# (23:00), so a short cache makes the endpoint near-instant without staleness.
+$script:TodayCacheItems = $null
+$script:TodayCacheAt = [DateTime]::MinValue
+$script:TodayCacheSeconds = 60
 while ($true) {
     $script:Context = $listener.GetContext()
     $Context = $script:Context
@@ -371,7 +626,7 @@ while ($true) {
     $bodyText = ''
     try {
         if ($request.ContentLength64 -gt 0) {
-            $stream = $request.GetInputStream()
+            $stream = $request.InputStream
             $bytes = New-Object byte[] $request.ContentLength64
             [void]$stream.Read($bytes, 0, $request.ContentLength64)
             $bodyText = [System.Text.Encoding]::UTF8.GetString($bytes)
@@ -381,44 +636,45 @@ while ($true) {
     $startTime = [DateTime]::UtcNow
     try {
         if ($method -eq 'GET' -and $path -eq '/api/today') {
-            $recItems = @(Get-TodayRecommendationResponse)
-            $body = @{ items = $recItems; total = $recItems.Count }
+            $now = [DateTime]::UtcNow
+            $cacheAge = ($now - $script:TodayCacheAt).TotalSeconds
+            if ($null -eq $script:TodayCacheItems -or $cacheAge -ge $script:TodayCacheSeconds) {
+                $script:TodayCacheItems = @(Get-TodayRecommendationResponse)
+                $script:TodayCacheAt = $now
+            }
+            $body = @{ items = $script:TodayCacheItems; total = @($script:TodayCacheItems).Count }
+            Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 200 })
+        }
+        elseif ($method -eq 'GET' -and $path -eq '/api/listening/stats') {
+            $body = Get-ListeningStatsResponse
+            Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 200 })
+        }
+        elseif ($method -eq 'GET' -and $path -eq '/api/listening/random') {
+            $query = [System.Web.HttpUtility]::ParseQueryString($request.Url.Query)
+            $excludeId = [string]$query['exclude']
+            $randomItem = Get-RandomLocalListeningItem -ExcludeId $excludeId
+            if ($null -eq $randomItem) {
+                $body = @{ error = 'LIBRARY_EMPTY'; message = '本地曲库还没有可播放的歌曲。' }
+                Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 404 })
+            } else {
+                $body = ConvertTo-ListeningItemResponse -Item $randomItem
+                Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 200 })
+            }
+        }
+        elseif ($method -eq 'POST' -and $path -match '^/api/library/([^/]+)/play$') {
+            $localId = [System.Web.HttpUtility]::UrlDecode($Matches[1], [System.Text.Encoding]::UTF8)
+            $sessionId = Get-ListeningSessionIdFromBody -Body $bodyText
+            $body = Get-ListeningPlayResponse -LocalId $localId -SessionId $sessionId
+            Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 200 })
+        }
+        elseif ($method -eq 'POST' -and $path -match '^/api/tracks/([^/]+)/play$') {
+            $trackId = [System.Web.HttpUtility]::UrlDecode($Matches[1], [System.Text.Encoding]::UTF8)
+            $sessionId = Get-ListeningSessionIdFromBody -Body $bodyText
+            $body = Get-ListeningPlayResponse -LocalId $trackId -SessionId $sessionId
             Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 200 })
         }
         elseif ($method -eq 'GET' -and $path -eq '/api/library') {
-            $library = @(Get-NavidromeLibrary)
-            $items = foreach ($row in $library) {
-                $file = [System.IO.Path]::GetFullPath([string]$row.path)
-                $libraryId = 'library-' + [string]$row.id
-                $lrcPath = Get-LrcPath -Path $file
-                [pscustomobject]@{
-                    id = $libraryId; source = 'navidrome'; provider = 'navidrome'
-                    name = [string]$row.name; artist = [string]$row.artist; album = [string]$row.album
-                    duration = [int]$row.duration; track = [int]$row.track
-                    addedto = [string]$row.addedto; collectionat = [string]$row.collectionat
-                    path = [string]$row.path; file = $file
-                    stream_url = "/api/library/$libraryId/stream"
-                    lyrics_url = if ($lrcPath) { "/api/library/$libraryId/lyrics" } else { '' }
-                }
-            }
-            $naItems = foreach ($dir in @($Config.MusicDir)) {
-                if (-not (Test-Path -LiteralPath $dir)) { continue }
-                foreach ($file in @(Get-ChildItem -LiteralPath $dir -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.mp3','.flac','.wav','.aac' })) {
-                    $full = (Get-Item -LiteralPath $file.FullName).FullName
-                    $naId = 'na-' + ([System.BitConverter]::ToString([System.Security.Cryptography.SHA256]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes($full))).Replace('-', '').Substring(0,16).ToLowerInvariant())
-                    $lrcPath = Get-LrcPath -Path $full
-                    $name = [System.IO.Path]::GetFileNameWithoutExtension($full)
-                    $artist = [string](Get-Item -LiteralPath (Split-Path -Parent $full)).Name
-                    [pscustomobject]@{
-                        id = $naId; source = 'local'; provider = 'navidrome'
-                        name = $name; artist = $artist; album = $artist; duration = 0; track = 0
-                        addedto = ''; collectionat = ''; path = $full; file = $full
-                        stream_url = "/api/library/$naId/stream"
-                        lyrics_url = if ($lrcPath) { "/api/library/$naId/lyrics" } else { '' }
-                    }
-                }
-            }
-            $allItems = @($items) + @($naItems)
+            $allItems = @(Get-LocalListeningItems)
             $body = @{ items = $allItems; total = $allItems.Count }
             Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 200 })
         }
@@ -430,11 +686,49 @@ while ($true) {
                 $body = @{ error = 'FILE_NOT_FOUND'; id = $localId }
                 Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 404 })
             } else {
-                $fileBytes = [System.IO.File]::ReadAllBytes($file)
+                # Serve the audio with HTTP Range support so <audio> can seek.
+                $length = (Get-Item -LiteralPath $file).Length
+                $rangeHeader = $Context.Request.Headers['Range']
+                $start = 0; $end = $length - 1; $isPartial = $false
+                if ($rangeHeader -match 'bytes=(\d*)-(\d*)') {
+                    $rS = $Matches[1]; $rE = $Matches[2]
+                    if ($rS -ne '') { $start = [long]$rS }
+                    if ($rE -ne '') { $end = [Math]::Min([long]$rE, $length - 1) }
+                    if ($rS -eq '' -and $rE -ne '') {
+                        $n = [Math]::Min([long]$rE, $length); $start = $length - $n; $end = $length - 1
+                    }
+                    if ($start -ge $length) {
+                        try {
+                            $Context.Response.StatusCode = 416
+                            $Context.Response.Headers['Content-Range'] = "bytes */$length"
+                            $Context.Response.Close()
+                        } catch {}
+                        return
+                    }
+                    $isPartial = $true
+                }
+                $chunkLength = $end - $start + 1
+                $Context.Response.StatusCode = if ($isPartial) { 206 } else { 200 }
                 $Context.Response.ContentType = 'audio/mpeg'
-                $Context.Response.ContentLength64 = $fileBytes.Length
-                $Context.Response.OutputStream.Write($fileBytes, 0, $fileBytes.Length)
-                $Context.Response.OutputStream.Close()
+                $Context.Response.Headers['Accept-Ranges'] = 'bytes'
+                $Context.Response.ContentLength64 = $chunkLength
+                if ($isPartial) { $Context.Response.Headers['Content-Range'] = "bytes $start-$end/$length" }
+                $stream = [System.IO.File]::Open($file, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+                try {
+                    if ($start -gt 0) { [void]$stream.Seek($start, [System.IO.SeekOrigin]::Begin) }
+                    $buffer = New-Object byte[] 65536
+                    $remaining = $chunkLength
+                    while ($remaining -gt 0) {
+                        $toRead = [int][Math]::Min($buffer.Length, $remaining)
+                        $read = $stream.Read($buffer, 0, $toRead)
+                        if ($read -le 0) { break }
+                        $remaining -= $read
+                        $Context.Response.OutputStream.Write($buffer, 0, $read)
+                    }
+                } finally {
+                    $stream.Dispose()
+                    try { $Context.Response.OutputStream.Close() } catch {}
+                }
             }
         }
         elseif ($method -eq 'GET' -and $path -match '^/api/library/([^/]+)/lyrics$') {
@@ -493,6 +787,10 @@ while ($true) {
             } else {
                 $tx = Resolve-RouteLikeTransaction -TrackId $trackId -Unlike
             }
+            # Like state is part of /api/today items: invalidate the cache so the
+            # UI shows the heart/queue status immediately after the action.
+            $script:TodayCacheItems = $null
+            $script:TodayCacheAt = [DateTime]::MinValue
             $body = [pscustomobject]@{
                 accepted = $true
                 liked    = [bool]$tx.Result.liked
@@ -523,6 +821,8 @@ while ($true) {
                 $tx = Resolve-RouteLikeTransaction -TrackId $requestedTrackId
                 $queued = $false
                 if ($tx.Wanted) { $queued = ($tx.Result.action -in @('QUEUED','REQUEUED')) }
+                $script:TodayCacheItems = $null
+                $script:TodayCacheAt = [DateTime]::MinValue
                 $bodyOut = [pscustomobject]@{ accepted = $true; queued = $queued; wanted = $tx.Wanted }
                 Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $bodyOut; StatusCode = 202 })
             }
@@ -531,6 +831,8 @@ while ($true) {
             $trackId = [System.Web.HttpUtility]::UrlDecode($Matches[1], [System.Text.Encoding]::UTF8)
             $tx = Resolve-RouteLikeTransaction -TrackId $trackId
             $queued = ($tx.Result.action -in @('QUEUED','REQUEUED'))
+            $script:TodayCacheItems = $null
+            $script:TodayCacheAt = [DateTime]::MinValue
             $body = [pscustomobject]@{ accepted = $true; queued = $queued; wanted = $tx.Wanted }
             Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 202 })
         }
@@ -538,14 +840,33 @@ while ($true) {
             $trackId = [System.Web.HttpUtility]::UrlDecode($Matches[1], [System.Text.Encoding]::UTF8)
             $tx = Resolve-RouteLikeTransaction -TrackId $trackId
             $queued = ($tx.Result.action -in @('QUEUED','REQUEUED'))
+            $script:TodayCacheItems = $null
+            $script:TodayCacheAt = [DateTime]::MinValue
             $body = [pscustomobject]@{ accepted = $true; queued = $queued; wanted = $tx.Wanted }
             Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 202 })
         }
         elseif ($method -eq 'POST' -and $path -match '^/api/wanted/([^/]+)/cancel$') {
             $trackId = [System.Web.HttpUtility]::UrlDecode($Matches[1], [System.Text.Encoding]::UTF8)
             $tx = Resolve-RouteLikeTransaction -TrackId $trackId -Unlike
+            $script:TodayCacheItems = $null
+            $script:TodayCacheAt = [DateTime]::MinValue
             $body = [pscustomobject]@{ accepted = $true; action = [string]$tx.Result.action; wanted = $tx.Wanted }
             Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 200 })
+        }
+        elseif ($method -eq 'DELETE' -and $path -match '^/api/library/([^/]+)$') {
+            $localId = [System.Web.HttpUtility]::UrlDecode($Matches[1], [System.Text.Encoding]::UTF8)
+            $result = Remove-LibraryTrack -LocalId $localId
+            if ($result.Error) {
+                $body = @{ error = $result.Error; id = $localId; message = $result.Message }
+                Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 404 })
+            } else {
+                $body = [pscustomobject]@{
+                    accepted = $true; id = $localId; deleted = $result.Deleted
+                    file = $result.File; track_id = $result.TrackId
+                    message = "已删除：$([IO.Path]::GetFileName($result.File))"
+                }
+                Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 200 })
+            }
         }
         elseif ($method -eq 'GET' -and $path -eq '/api/providers/status') {
             $providers = @(Get-ProviderStatusesDb)
