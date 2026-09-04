@@ -518,12 +518,31 @@ function previousItem() {
 }
 
 async function toggleLike(item) {
-  const next = !item.liked; item.liked = next; render(); showToast(next ? '已喜欢，加入后台下载队列' : '已取消喜欢');
+  const next = !item.liked;
+  item.liked = next;
+  render();
+  showToast(next ? '已喜欢，加入后台下载队列' : '已取消喜欢');
   try {
-    const response = await fetch(`/api/tracks/${encodeURIComponent(item.track_id)}/like`, { method: next ? 'POST' : 'DELETE' });
-    if (!response.ok) throw new Error('like request failed');
-    const result = await response.json(); item.wanted = result.wanted; render();
-  } catch { item.liked = !next; render(); showToast('操作失败，请稍后重试'); }
+    const response = await fetch(`/api/tracks/${encodeURIComponent(item.track_id)}/like`, {
+      method: next ? 'POST' : 'DELETE',
+      headers: { 'Content-Type': 'application/json; charset=utf-8' },
+      body: '{}',
+    });
+    let result = null;
+    try { result = await response.json(); } catch {}
+    if (!response.ok) {
+      const detail = result?.message || result?.error || `${response.status} ${response.statusText}`;
+      throw new Error(detail);
+    }
+    item.liked = typeof result?.liked === 'boolean' ? result.liked : next;
+    item.wanted = result?.wanted || null;
+    render();
+  } catch (error) {
+    item.liked = !next;
+    render();
+    const detail = String(error?.message || '未知错误');
+    showToast(`喜欢操作失败：${detail}`);
+  }
 }
 
 async function loadLibrary(silent = false) {
