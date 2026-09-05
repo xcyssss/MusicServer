@@ -1,4 +1,4 @@
-Set-StrictMode -Version 3.0
+﻿Set-StrictMode -Version 3.0
 
 # MusicServer.Database.psm1 - SQLite data access layer
 # Provides safe typed SQL-template expansion, transactions, and connection management.
@@ -8,6 +8,12 @@ Set-StrictMode -Version 3.0
 $script:DbPath = $null
 $script:SqliteExe = $null
 $script:InTransaction = $false
+$script:SqliteInvocationCount = [long]0
+
+function Get-MusicServerSqliteInvocationCount {
+    # Counts this module's state DB CLI processes, not Navidrome reads.
+    return $script:SqliteInvocationCount
+}
 
 function ConvertTo-MusicServerSqlLiteral {
     param([AllowNull()]$Value)
@@ -179,7 +185,11 @@ function Invoke-MusicServerSqliteScript {
     if (-not $script:DbPath) { throw 'Database not initialized. Call Initialize-MusicServerDatabase first.' }
     $tmpFile = Join-Path ([IO.Path]::GetTempPath()) "msdb_$([guid]::NewGuid().ToString('N')).sql"
     try {
-        [IO.File]::WriteAllText($tmpFile, $Sql, (New-Object Text.UTF8Encoding($false)))
+        # Connection-local settings must precede any caller BEGIN statement.
+        # Bail on the first SQL error so a later COMMIT cannot persist a partial
+        # transaction; sqlite3 rolls back an open transaction when it exits.
+        $scriptText = ".bail on`nPRAGMA foreign_keys=ON;`n" + $Sql
+        [IO.File]::WriteAllText($tmpFile, $scriptText, (New-Object Text.UTF8Encoding($false)))
         $startInfo = [Diagnostics.ProcessStartInfo]::new()
         $startInfo.FileName = $script:SqliteExe
         $jsonArgument = if ($Json) { '-json ' } else { '' }
@@ -197,6 +207,7 @@ function Invoke-MusicServerSqliteScript {
         $process = [Diagnostics.Process]::new()
         $process.StartInfo = $startInfo
         $process.Start() | Out-Null
+        $script:SqliteInvocationCount++
         $stdout = $process.StandardOutput.ReadToEnd()
         $stderr = $process.StandardError.ReadToEnd()
         $process.WaitForExit()
@@ -223,9 +234,9 @@ function Initialize-MusicServerDatabase {
         New-Item -ItemType Directory -Force -Path $dir | Out-Null
     }
     Invoke-MusicServerSqlNonQuery -Query 'PRAGMA journal_mode=WAL;'
-    Invoke-MusicServerSqlNonQuery -Query 'PRAGMA foreign_keys=ON;'
-    Invoke-MusicServerSqlNonQuery -Query 'PRAGMA busy_timeout=5000;'
-    Invoke-MusicServerSqlNonQuery -Query 'PRAGMA synchronous=NORMAL;'
+    # foreign_keys and busy_timeout are applied on every invocation. Keep the
+    # existing effective synchronous default (FULL); changing write durability
+    # is a separate decision, not part of connection initialization.
     if (-not (Test-Path -LiteralPath $DbPath)) {
         [IO.File]::WriteAllBytes($DbPath, @())
     }

@@ -16,6 +16,7 @@ MusicServer is a Windows-first local music application. The **Tauri v2 desktop A
 
 - `MusicServer.Core.psm1` — configuration/common helpers
 - `MusicServer.Database.psm1` — SQLite access
+- `MusicServer.Http.psm1` — bounded UTF-8 JSON control-request reader shared by API and UI proxy
 - `MusicServer.State.psm1` — canonical transactional state/schema
 - `MusicServer.Providers.psm1` — local/Bilibili provider resolution and health
 - `MusicServer.Migration.psm1` — explicit legacy migration only
@@ -61,7 +62,7 @@ The packaged runtime contains only what the desktop APP needs to boot its own UI
 - `watchdog_ui.ps1`
 - `music_api.ps1`
 - `wanted_worker.ps1`
-- Core/Database/State/Providers modules
+- Core/Database/Http/State/Providers modules
 - `web/`
 - a real `sqlite3.exe`
 
@@ -110,7 +111,7 @@ CI: `.github/workflows/core-tests.yml` on `windows-latest`.
 | Job | Responsibility |
 |---|---|
 | `state` | Core, Database, V2, WorkerConcurrency, Recommendation, LegacyRetirement, Listening, Web, Tauri |
-| `api` | UiProxyRuntime, ApiTransaction, ApiRuntime |
+| `api` | Http, UiProxyRuntime, ApiTransaction, ApiRuntime |
 | `desktop-build` | real Rust/Tauri compile, NSIS installer, installed-app portability smoke, installer artifact |
 
 The desktop gate must include at least:
@@ -139,6 +140,8 @@ Do not replace this with a static grep/Pester-only check.
 - Wanted worker uses its mutex/SQLite lease logic; do not introduce duplicate workers or bypass lease ownership.
 - `bilibili_direct` candidates must not trigger an unnecessary Bilibili search. Search is fallback when no usable local/direct candidate exists.
 - Bilibili 412/rate-limit handling must remain bounded and health-aware; do not add unbounded retry loops.
+- SQLite CLI calls enable foreign keys before caller SQL and stop on the first error; connection-local settings must be applied per invocation. Keep the existing effective synchronous default unless a separate durability change is reviewed.
+- API/proxied JSON control bodies are limited to 64 KiB and a 5-second total read deadline. Empty bodies remain supported; nonempty bodies must be UTF-8 JSON objects. Reject unsupported chunked/compressed bodies before state writes or forwarding.
 
 ## Common local operations
 
@@ -182,4 +185,6 @@ After completing a meaningful task, update this `AGENTS.md` checkpoint when the 
 - CI performs an installed-app portability smoke with the checkout runtime disabled; it verifies packaged runtime staging, current UI/API markers, SQLite state creation and owned-service shutdown.
 - GitHub Actions run #74 passed `state`, `api`, and `desktop-build`, including the source-independent installed-APP smoke and installer artifact upload.
 - P2 closed: historical reports moved to `docs/archive/`, Chinese user guide moved to `docs/`, committed validation logs removed, personal Markdown-association scripts removed, `.editorconfig` added, and Tauri icons reduced to Windows release/source assets.
-- PR #10 remains the active integration PR. **Do not merge it until the user explicitly says to merge.**
+- The local main baseline includes PR #10's merge commit `a63cfef`. Subsequent optimization work uses new feature/review branches; merging any new PR still requires explicit user authorization.
+- The HTTP input module is packaged with the desktop runtime and covered by real PS5.1 API/proxy socket tests in the `api` CI group.
+- `scripts/measure_musicserver_backend.ps1` measures isolated service readiness, endpoint latency and state SQLite process counts with synthetic metadata. It omits the downloader, writes only under `artifacts/`, and does not substitute for Tauri rendering/playback validation.
