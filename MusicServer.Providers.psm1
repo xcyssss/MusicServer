@@ -298,22 +298,36 @@ function Resolve-DownloadCandidates {
     $candidates = @()
     $local = Find-LocalTrack -Config $Config -Title $Track.title -Artist $Track.artist
     if ($local) {
-        $candidates += New-DownloadCandidate -Provider 'local' -Url $local.File.FullName -Title $Track.title -Artist $Track.artist -Duration ([int]$Track.duration) -Priority 100 -Metadata $local
+        $localCandidate = New-DownloadCandidate -Provider 'local' -Url $local.File.FullName -Title $Track.title -Artist $Track.artist -Duration ([int]$Track.duration) -Priority 100 -Metadata $local
+        return @([pscustomobject]@{ Candidate = $localCandidate; Score = (Get-CandidateScore -Track $Track -Candidate $localCandidate -Health $null) })
     }
 
-    # Direct candidates are known resources. Do not spend another search request if download is currently blocked.
+    # NetEase direct download first when the track has a NetEase id: free songs
+    # are served as full 320kbps audio without Bilibili's 412 risk control.
+    $neteaseCandidate = Get-NeteaseCandidate -Config $Config -Track $Track
+    if ($neteaseCandidate) { $candidates += $neteaseCandidate }
+
+    # Direct candidates are known resources. Resolving them must stay metadata-only:
+    # do not consume a search request, require yt-dlp, or claim a download probe yet.
     $direct = @(Get-DirectCandidates -Track $Track)
-    if ($direct.Count -gt 0) {
+    $hasDirectCandidates = ($direct.Count -gt 0)
+    if ($hasDirectCandidates) {
         if (-not (Test-ProviderRequestAvailable -Config $Config -Provider 'bilibili_download')) { return @() }
         $candidates += $direct
     }
 
-    if ($candidates.Count -eq 0) {
-        # A search is useless when the media endpoint cannot be used anyway.
-        if (-not (Test-ProviderRequestAvailable -Config $Config -Provider 'bilibili_download')) { return @() }
-        $search = Search-BilibiliCandidates -Config $Config -Track $Track
-        if (-not $search.Blocked) { $candidates += $search.Candidates }
+    # Search is a fallback only when no known direct Bilibili candidate exists.
+    # A NetEase candidate is still only a try (VIP/paid tracks can have no URL),
+    # so pair it with search when the search circuit is available.
+    if (-not $hasDirectCandidates) {
+        if (Test-ProviderRequestAvailable -Config $Config -Provider 'bilibili_search') {
+            $search = Search-BilibiliCandidates -Config $Config -Track $Track
+            if (-not $search.Blocked) { $candidates += $search.Candidates }
+        } elseif (-not $neteaseCandidate) {
+            return @()
+        }
     }
+
     $downloadHealth = Get-ProviderHealth -Config $Config -Provider 'bilibili_download'
     $ranked = foreach ($candidate in $candidates) {
         if ($candidate.provider -like 'bilibili*' -and -not (Test-ProviderRequestAvailable -Config $Config -Provider 'bilibili_download')) { continue }
@@ -368,6 +382,82 @@ function Invoke-BilibiliDownload {
     }
     Record-ProviderSuccess -Config $Config -Provider 'bilibili_download' -LatencyMs $started.Elapsed.TotalMilliseconds
     return [pscustomobject]@{ Success = $true; Blocked = $false; Error = ''; Path = $target; Output = $joined }
+}
+
+function Get-NeteaseIdFromTrack {
+    param([Parameter(Mandatory)][psobject]$Track)
+    try {
+        $ids = @($Track.identifiers) | Where-Object { $_ -and $_.PSObject.Properties['type'] -and [string]$_.type -eq 'netease' -and [string]$_.value } | Select-Object -First 1
+        if ($ids) { return [string]$ids.value }
+    } catch {}
+    try {
+        if ($Track.PSObject.Properties['netease_id'] -and [string]$Track.netease_id) { return [string]$Track.netease_id }
+    } catch {}
+    return ''
+}
+
+function Get-NeteaseCandidate {
+    <#
+    .SYNOPSIS
+      Builds a download candidate for the track's NetEase id (if any). The
+      NetEase open API (api/song/enhance/player/url) returns full 320kbps
+      audio for free songs and is not subject to Bilibili's 412 risk control,
+      so it is tried before any Bilibili search.
+    #>
+    param([Parameter(Mandatory)][psobject]$Config, [Parameter(Mandatory)][psobject]$Track)
+    $neteaseId = Get-NeteaseIdFromTrack -Track $Track
+    if (-not $neteaseId) { return $null }
+    return New-DownloadCandidate -Provider 'netease' -Url "netease:$neteaseId" -Title $Track.title -Artist $Track.artist -Duration ([int]$Track.duration) -Priority 60 -RequiresSearch $false -Metadata ([pscustomobject]@{ netease_id = $neteaseId })
+}
+
+function Invoke-NeteaseDownload {
+    <#
+    .SYNOPSIS
+      Downloads the full audio for a NetEase track id using the legacy open API
+      endpoint that does not require encrypted weapi params. Free songs (fee=0)
+      return a full-length 320kbps mp3 URL; VIP/paid songs return no usable URL
+      and are reported as a normal failure so the caller can fall through to
+      Bilibili. Mirrors the result shape of Invoke-BilibiliDownload.
+    #>
+    param([Parameter(Mandatory)][psobject]$Config, [Parameter(Mandatory)][psobject]$Track, [Parameter(Mandatory)][psobject]$Candidate)
+    $neteaseId = Get-NeteaseIdFromTrack -Track $Track
+    if (-not $neteaseId) {
+        $m = $Candidate.metadata
+        if ($m -and $m.PSObject.Properties['netease_id']) { $neteaseId = [string]$m.netease_id }
+    }
+    if (-not $neteaseId) {
+        return [pscustomobject]@{ Success = $false; Blocked = $false; Error = 'NO_NETEASE_ID'; Path = ''; Output = '' }
+    }
+    $headers = @{
+        'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36'
+        'Referer' = 'https://music.163.com/'
+        'Accept' = 'application/json,text/plain,*/*'
+    }
+    $target = Join-Path $Config.DailyDir "$(Get-SafeDownloadName -Track $Track).mp3"
+    if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue }
+    $started = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        $resp = Invoke-RestMethod -Uri "https://music.163.com/api/song/enhance/player/url?ids=%5B$neteaseId%5D&br=320000" -Headers $headers -TimeoutSec 20
+        $started.Stop()
+        $datum = $null
+        if ($resp.data -and $resp.data.Count -gt 0) { $datum = $resp.data[0] }
+        $audioUrl = if ($datum) { [string]$datum.url } else { '' }
+        if (-not $audioUrl) {
+            # VIP/paid or region-locked: report NOT_AVAILABLE, caller falls back to Bilibili.
+            return [pscustomobject]@{ Success = $false; Blocked = $false; Error = 'NETEASE_NOT_AVAILABLE'; Path = ''; Output = '' }
+        }
+        Invoke-WebRequest -Uri $audioUrl -Headers @{ 'User-Agent' = $headers['User-Agent']; 'Referer' = 'https://music.163.com/' } -OutFile $target -TimeoutSec 120
+        if (-not (Test-Path -LiteralPath $target) -or (Get-Item -LiteralPath $target).Length -lt 10000) {
+            Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
+            return [pscustomobject]@{ Success = $false; Blocked = $false; Error = 'NETEASE_DOWNLOAD_EMPTY'; Path = ''; Output = '' }
+        }
+        Record-ProviderSuccess -Config $Config -Provider 'netease' -LatencyMs $started.Elapsed.TotalMilliseconds
+        return [pscustomobject]@{ Success = $true; Blocked = $false; Error = ''; Path = $target; Output = '' }
+    } catch {
+        $started.Stop()
+        Record-ProviderFailure -Config $Config -Provider 'netease' -ErrorType 'NETEASE_REQUEST_FAILED' -Message $_.Exception.Message | Out-Null
+        return [pscustomobject]@{ Success = $false; Blocked = $false; Error = 'NETEASE_REQUEST_FAILED'; Path = ''; Output = $_.Exception.Message }
+    }
 }
 
 function New-DownloadProviderRegistry {

@@ -100,8 +100,9 @@ Describe 'MusicServer web UI safeguards' {
         $launcher | Should Match 'netease_id'
         $launcher | Should Match 'playback_source'
         $launcher | Should Match 'source\s*=\s*''netease'''
-        $launcher | Should Match 'available\s*=\s*\$true'
-        $launcher | Should Match 'text\s*=\s*\$lyrics'
+        $launcher | Should Match 'available.:true'
+        $launcher | Should Match 'text.:'
+        $launcher | Should Match 'quality.:"EXACT"'
         $launcher | Should Match '\^/api/tracks/\(\[\^/\]\+\)/lyrics\$'
     }
 
@@ -110,8 +111,8 @@ Describe 'MusicServer web UI safeguards' {
         $launcher | Should Match 'lyrics_report\.csv'
         $launcher | Should Match 'function Get-LyricQuality'
         $launcher | Should Match 'SUSPECT'
-        $launcher | Should Match 'available\s*=\s*\$false'
-        $launcher | Should Match 'quality\s*=\s*\$quality'
+        $launcher | Should Match 'available.:false'
+        $launcher | Should Match 'quality.:'
     }
 
     It 'ships a one-command launcher that serves the UI and maps the legacy recommendation route' {
@@ -160,5 +161,45 @@ Describe 'MusicServer web UI safeguards' {
         $launcher | Should Match 'function Send-LibraryStream'
         $launcher | Should Match 'function Send-LibraryLyrics'
         $launcher | Should Match 'Get-UiLibrary'
+    }
+
+    It 'ships listening statistics controls and records only completed local playback sessions' {
+        $html = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\web\index.html') -Raw
+        $js = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\web\app.js') -Raw
+        $css = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\web\styles.css') -Raw
+        $api = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\music_api.ps1') -Raw
+
+        $html | Should Match 'id="listening-sidebar"'
+        $html | Should Match 'id="most-played-list"'
+        $html | Should Match 'id="rediscover-list"'
+        $html | Should Match 'id="random-listening-button"'
+        $js | Should Match 'function loadListening'
+        $js | Should Match 'function maybeRecordPlayback'
+        $js | Should Match 'localIdFromItem\s*='
+        $js | Should Match 'playedSeconds'
+        $js | Should Match 'seeked'
+        $js | Should Match "addEventListener\('seeking'"
+        $js | Should Match 'PLAYBACK_MIN_SECONDS'
+        $js | Should Match 'PLAYBACK_MIN_RATIO'
+        $js | Should Match 'session.playedSeconds >= PLAYBACK_MIN_SECONDS'
+        $js | Should Match '!session.seeked && total > 0 && current >= total \* PLAYBACK_MIN_RATIO'
+        $js | Should Match 'delta >= 0 && delta <= 5'
+        $js | Should Match 'delta < -0.5 \|\| delta > 5'
+        $js | Should Match 'session_id'
+        $js | Should Match '/api/library/'
+        $js | Should Match '/api/listening/stats'
+        $js | Should Match '/api/listening/random'
+        $js | Should Match 'currentTime'
+        $js | Should Match 'duration'
+        $css | Should Match '\.listening-section'
+        $css | Should Match '\.most-played-list'
+        $css | Should Match '\.rediscover-list'
+        $api | Should Match '/api/listening/stats'
+        $api | Should Match '/api/library/\(\[\^/\]\+\)/play'
+        $api | Should Match 'FROM media_file'
+
+        $interval = [regex]::Match($js, 'setInterval\(\(\) => \{(?<body>[^}]*)\}, 15000\)')
+        $interval.Success | Should Be $true
+        $interval.Groups['body'].Value | Should Not Match 'loadListening'
     }
 }

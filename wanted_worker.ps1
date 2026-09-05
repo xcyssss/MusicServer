@@ -370,10 +370,18 @@ function Complete-DownloadedTrack {
     if ($track) {
         $known = @($track.download_candidates) | Where-Object { [string](Get-OptionalProperty $_ 'url') -eq [string]$Candidate.url }
         if ($known.Count -eq 0) {
-            $track.download_candidates = @($track.download_candidates) + @([pscustomobject]@{
-                provider = 'bilibili_direct'; bvid = $Candidate.bvid; url = $Candidate.url
-                priority = 80; requires_search = $false; duration = $Validation.Duration
-            })
+            if ($Candidate.provider -eq 'netease') {
+                $neteaseId = Get-NeteaseIdFromTrack -Track $Track
+                $track.download_candidates = @($track.download_candidates) + @([pscustomobject]@{
+                    provider = 'netease'; netease_id = $neteaseId; url = $Candidate.url
+                    priority = 80; requires_search = $false; duration = $Validation.Duration
+                })
+            } else {
+                $track.download_candidates = @($track.download_candidates) + @([pscustomobject]@{
+                    provider = 'bilibili_direct'; bvid = $Candidate.bvid; url = $Candidate.url
+                    priority = 80; requires_search = $false; duration = $Validation.Duration
+                })
+            }
         }
         $track.local_song_id = $songId
         $track.status = 'LOCAL'
@@ -453,7 +461,11 @@ function Process-WantedTrack {
         if (-not (Test-OwnsActiveLease -Wanted $Wanted)) { return }
         [void](Reassert-WantedLease -Wanted $Wanted)
 
-        $download = Invoke-BilibiliDownload -Config $Config -Track $track -Candidate $candidate
+        if ($candidate.provider -eq 'netease') {
+            $download = Invoke-NeteaseDownload -Config $Config -Track $track -Candidate $candidate
+        } else {
+            $download = Invoke-BilibiliDownload -Config $Config -Track $track -Candidate $candidate
+        }
         if (Test-WantedCancellation -Wanted $Wanted) {
             Complete-WantedCancellation -Wanted $Wanted -TemporaryPath ([string]$download.Path)
             return
@@ -464,6 +476,12 @@ function Process-WantedTrack {
         }
 
         if (-not $download.Success) {
+            if ($candidate.provider -eq 'netease') {
+                # NetEase miss (VIP / not available) is a normal fall-through, not a
+                # circuit event: log it and try the next candidate (Bilibili).
+                Write-MusicServerEventDb -TrackId $track.id -Provider 'netease' -EventType 'DOWNLOAD_FAILED' -Attempt ([int]$Wanted.attempts) -ErrorType $download.Error
+                continue
+            }
             if ($download.Blocked) {
                 [void](Increment-WantedAttempt -Wanted $Wanted)
                 [void](Set-QueueState -Wanted $Wanted -State 'RETRY_WAIT' -Error $download.Error -NextRetryAt (Get-RetryTime -Wanted $Wanted -Provider 'bilibili_download'))

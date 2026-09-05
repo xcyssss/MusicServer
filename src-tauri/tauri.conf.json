@@ -1,0 +1,45 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "MusicServer",
+  "version": "0.1.0",
+  "identifier": "com.musicserver.desktop",
+  "build": {
+    "beforeDevCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare_tauri_runtime.ps1",
+    "devUrl": "http://127.0.0.1:8790",
+    "beforeBuildCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare_tauri_runtime.ps1",
+    "frontendDist": "../web"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "label": "main",
+        "title": "MusicServer",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 960,
+        "minHeight": 640,
+        "resizable": true,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "resources": [
+      "resources/runtime/**/*"
+    ],
+    "icon": [
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      }
+    }
+  }
+}

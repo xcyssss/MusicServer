@@ -53,3 +53,11 @@ tests/test_db*.ps1
 tests/test_param*.ps1
 tests/test_quotes.ps1
 tests/test_integration.ps1
+
+# Generated backups and scratch output
+/backups/
+/output/
+/artifacts/
+/scan_library_mismatch.ps1
+/start_musicserver.ps1
+/stop_musicserver.ps1

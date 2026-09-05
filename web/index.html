@@ -22,10 +22,34 @@
         </div>
       </aside>
 
+      <aside id="listening-sidebar" class="listening-sidebar expanded" aria-label="我的常听">
+        <button id="listening-collapse" class="listening-collapse" type="button" aria-label="收起常听侧栏" title="收起">‹</button>
+        <div class="listening-content">
+          <div class="listening-header">
+            <span class="section-kicker">YOUR LISTENING</span>
+            <h2>我的常听</h2>
+          </div>
+          <div id="most-played-list" class="most-played-list" aria-live="polite"></div>
+          <div class="rediscover-block">
+            <div class="rediscover-heading">
+              <span class="section-kicker">REDISCOVER</span>
+              <h3>换点口味</h3>
+              <button id="rediscover-button" class="text-button" type="button">换一批</button>
+            </div>
+            <div id="rediscover-list" class="rediscover-list" aria-live="polite"></div>
+          </div>
+          <button id="random-listening-button" class="secondary-button" type="button">✦ 随机来一首</button>
+        </div>
+        <div id="listening-handle" class="listening-handle" hidden>
+          <span class="handle-icon">›</span>
+          <span class="handle-text">常听</span>
+        </div>
+      </aside>
+
       <main class="main-content">
         <header class="topbar">
           <div>
-            <p class="eyebrow">MONDAY · MUSIC DISCOVERY</p>
+            <p class="eyebrow" id="today-eyebrow">MUSIC DISCOVERY</p>
             <h1>今天，听点新的。</h1>
           </div>
           <div class="topbar-actions">
@@ -43,6 +67,13 @@
                 <button class="mode-button active" data-mode="sequence">顺序</button>
                 <button id="shuffle-button" class="shuffle-button" type="button" aria-label="重新随机播放顺序">↻ 重新随机</button>
               </div>
+              <label class="sort-select" aria-label="音乐库排序">
+                <span>排序</span>
+                <select id="library-sort">
+                  <option value="default">默认</option>
+                  <option value="added">按入库时间</option>
+                </select>
+              </label>
             </div>
             <div id="library-list" class="track-list library-list" aria-live="polite"></div>
           </section>
@@ -58,14 +89,14 @@
               <div class="hero-orbit" aria-hidden="true"><span>♪</span><i></i><b></b></div>
             </section>
 
-            <section class="stats-row" aria-label="推荐统计">
-              <div class="stat-card"><span class="stat-label">今日推荐</span><strong id="recommendation-count">—</strong><small>首</small></div>
-              <div class="stat-card"><span class="stat-label">已喜欢</span><strong id="liked-count">—</strong><small>首</small></div>
-              <div class="stat-card"><span class="stat-label">本地曲库</span><strong id="local-count">—</strong><small>首</small></div>
-              <div class="stat-card accent"><span class="stat-label">下载队列</span><strong id="wanted-count">—</strong><small>首</small></div>
-            </section>
+              <section class="stats-row" aria-label="推荐统计">
+                <div class="stat-card"><span class="stat-label">今日推荐</span><strong id="recommendation-count">—</strong><small>首</small></div>
+                <div class="stat-card"><span class="stat-label">已喜欢</span><strong id="liked-count">—</strong><small>首</small></div>
+                <div class="stat-card"><span class="stat-label">本地曲库</span><strong id="local-count">—</strong><small>首</small></div>
+                <div class="stat-card accent"><span class="stat-label">下载队列</span><strong id="wanted-count">—</strong><small>首</small></div>
+              </section>
 
-            <section class="recommendation-section">
+              <section class="recommendation-section">
               <div class="section-heading"><div><span class="section-kicker">DISCOVER MORE</span><h2>今日推荐</h2></div><span id="provider-summary" class="provider-summary">Provider 状态同步中</span></div>
               <div id="error-banner" class="error-banner" hidden></div>
               <div id="recommendation-list" class="track-list" aria-live="polite"></div>
@@ -81,13 +112,36 @@
     </div>
 
     <footer class="player-bar">
-      <div class="now-playing"><div id="player-art" class="player-art">♪</div><div><span class="now-label">正在播放</span><strong id="player-title">选择一首歌开始试听</strong><small id="player-artist">MusicServer</small></div></div>
-      <div class="player-controls" aria-label="播放控制">
-        <button id="previous-button" class="player-nav-button" type="button" aria-label="上一首" disabled>⏮</button>
-        <audio id="audio-player" controls preload="metadata"></audio>
-        <button id="next-button" class="player-nav-button" type="button" aria-label="下一首" disabled>⏭</button>
+      <div class="now-playing">
+        <div id="player-art" class="player-art"><span>♪</span></div>
+        <div class="now-playing-meta">
+          <span class="now-label">正在播放</span>
+          <strong id="player-title">选择一首歌开始试听</strong>
+          <small id="player-artist">MusicServer</small>
+        </div>
       </div>
-      <button id="lyrics-toggle" class="lyrics-toggle" disabled>歌词</button>
+
+      <div class="player-center">
+        <div class="player-controls" aria-label="播放控制">
+          <button id="previous-button" class="player-nav-button" type="button" aria-label="上一首" disabled>⏮</button>
+          <button id="play-toggle" class="play-toggle" type="button" aria-label="播放/暂停" disabled>▶</button>
+          <button id="next-button" class="player-nav-button" type="button" aria-label="下一首" disabled>⏭</button>
+        </div>
+        <div class="player-progress">
+          <span id="current-time" class="time-label">0:00</span>
+          <div id="progress-track" class="progress-track" role="slider" aria-label="播放进度" tabindex="0">
+            <div id="progress-fill" class="progress-fill"></div>
+            <div id="progress-thumb" class="progress-thumb"></div>
+          </div>
+          <span id="duration-time" class="time-label">0:00</span>
+        </div>
+      </div>
+
+      <div class="player-right">
+        <button id="lyrics-toggle" class="lyrics-toggle" disabled>歌词</button>
+      </div>
+
+      <audio id="audio-player" preload="metadata"></audio>
     </footer>
     <aside id="lyrics-panel" class="lyrics-panel" hidden aria-label="歌词">
       <div class="lyrics-heading"><div><span class="section-kicker">NOW PLAYING</span><h2>歌词</h2></div><button id="lyrics-close" class="icon-button" aria-label="关闭歌词">×</button></div>
