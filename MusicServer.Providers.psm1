@@ -298,7 +298,8 @@ function Resolve-DownloadCandidates {
     $candidates = @()
     $local = Find-LocalTrack -Config $Config -Title $Track.title -Artist $Track.artist
     if ($local) {
-        $candidates += New-DownloadCandidate -Provider 'local' -Url $local.File.FullName -Title $Track.title -Artist $Track.artist -Duration ([int]$Track.duration) -Priority 100 -Metadata $local
+        $localCandidate = New-DownloadCandidate -Provider 'local' -Url $local.File.FullName -Title $Track.title -Artist $Track.artist -Duration ([int]$Track.duration) -Priority 100 -Metadata $local
+        return @([pscustomobject]@{ Candidate = $localCandidate; Score = (Get-CandidateScore -Track $Track -Candidate $localCandidate -Health $null) })
     }
 
     # NetEase direct download first when the track has a NetEase id: free songs
