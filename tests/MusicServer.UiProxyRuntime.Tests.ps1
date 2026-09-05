@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 
@@ -12,8 +12,6 @@ $script:ProxyTest = [pscustomobject]@{
 }
 
 function Get-TestTermExe {
-    $cmd = Get-Command pwsh -ErrorAction SilentlyContinue
-    if ($cmd) { return $cmd.Source }
     return (Get-Command powershell.exe -ErrorAction Stop).Source
 }
 
@@ -99,6 +97,13 @@ Describe 'MusicServer live UI API proxy' {
         $null = New-Item -ItemType Directory -Path (Join-Path $root 'DailyMix_data\state') -Force
         $script:ProxyTest.Root = $root
 
+        # Run the gateway from the same isolated home as the API. Launching the
+        # checkout gateway would read the user's library and start its worker.
+        foreach ($file in @('start_musicserver_ui.ps1','watchdog_ui.ps1','music_api.ps1','MusicServer.Core.psm1','MusicServer.Database.psm1','MusicServer.State.psm1','MusicServer.Providers.psm1','MusicServer.Http.psm1')) {
+            Copy-Item -LiteralPath (Join-Path $ProjectRoot $file) -Destination (Join-Path $root $file)
+        }
+        Copy-Item -LiteralPath (Join-Path $ProjectRoot 'web') -Destination (Join-Path $root 'web') -Recurse
+
         $cfg = New-MusicServerConfig -Root $root
         Initialize-MusicServerState -Config $cfg
         $db = Join-Path $cfg.StateDir 'musicserver.db'
@@ -140,7 +145,7 @@ Describe 'MusicServer live UI API proxy' {
 
         $uiOut = Join-Path $script:ProxyTest.Root 'ui.out.log'
         $uiErr = Join-Path $script:ProxyTest.Root 'ui.err.log'
-        $uiArgs = @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $ProjectRoot 'start_musicserver_ui.ps1'),'-ApiPrefix',$apiPrefix,'-UiPrefix',$uiPrefix,'-NoBrowser')
+        $uiArgs = @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $script:ProxyTest.Root 'start_musicserver_ui.ps1'),'-ApiPrefix',$apiPrefix,'-UiPrefix',$uiPrefix,'-NoBrowser')
         $ui = Start-Process -FilePath $term -ArgumentList $uiArgs -WindowStyle Hidden -PassThru -RedirectStandardOutput $uiOut -RedirectStandardError $uiErr
         $script:ProxyTest.Processes += $ui
         Wait-TestHealth -BaseUrl $uiPrefix

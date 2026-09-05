@@ -85,6 +85,7 @@ MusicServer/
 ├─ tests/                         # Pester + 桌面 smoke
 ├─ MusicServer.Core.psm1
 ├─ MusicServer.Database.psm1
+├─ MusicServer.Http.psm1
 ├─ MusicServer.State.psm1
 ├─ MusicServer.Providers.psm1
 ├─ music_api.ps1
@@ -128,7 +129,7 @@ MusicServer/
 | Job | 验证内容 |
 |---|---|
 | `state` | Core / Database / V2 / WorkerConcurrency / Recommendation / LegacyRetirement / Listening / Web / Tauri Pester |
-| `api` | UiProxyRuntime / ApiTransaction / ApiRuntime Pester |
+| `api` | Http / UiProxyRuntime / ApiTransaction / ApiRuntime Pester |
 | `desktop-build` | `cargo fmt --check`、`cargo check --locked`、真实 NSIS 构建、安装包脱离源码 runtime 启动 smoke、artifact 上传 |
 
 `desktop-build` 不只检查源码字符串：它会在干净 GitHub runner 上真正生成安装 EXE，然后静默安装到临时目录，临时禁用 checkout 中的 launcher/API/web，再启动已安装 APP。只有 bundle runtime 能自行部署、UI/API build marker 正常、SQLite 状态库建立且 APP 退出后所拥有的服务树全部停止，才算通过。
@@ -148,3 +149,17 @@ musicserver-windows-installer
 - `artifacts/`、日志、音乐、cookies、本机数据库和生成的 Tauri runtime 都不应提交。
 - `web/` 的 UI 改动必须以 Tauri APP 实际行为作为最终验收，不以浏览器单独可用作为桌面验收。
 - 下载侧遇到 Bilibili 风控时遵守 Provider health/circuit-breaker 逻辑，不做无界重试。
+
+## 性能基线与请求契约
+
+优化进度见 [`docs/OPTIMIZATION_PLAN.zh-CN.md`](docs/OPTIMIZATION_PLAN.zh-CN.md)。可用 Windows PowerShell 5.1 运行隔离后端基线：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/measure_musicserver_backend.ps1
+```
+
+默认测量空库、1,000 和 10,000 条合成元数据，每个端点 30 个后续请求样本、5 次服务启动。测试元数据共用一段静音 WAV，不启动下载 worker；临时服务退出后清理测试库，JSON 报告和 CSV 样本保存在 `artifacts/performance/`。这衡量的是服务与元数据路径；Tauri 窗口、搜索渲染和不同真实音频文件的扫描成本需另行测量。
+
+`MUSICSERVER_DIAGNOSTICS=1` 可让 API JSON 响应携带 `X-MusicServer-State-Sqlite-Calls`，表示该请求经状态库包装器启动的 sqlite3 进程数；它不包括 Navidrome 只读查询，默认关闭。
+
+API 与 UI 代理的 JSON 控制请求最多 64 KiB，完整请求体须在 5 秒内到达。空请求体继续兼容；非空请求体必须是 UTF-8 JSON 对象。非法/不完整 JSON 返回 400，超时返回 408，chunked 请求返回 411，超限返回 413，不支持的压缩编码返回 415；连接已断开时可能无法返回错误正文。

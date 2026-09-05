@@ -1,4 +1,4 @@
-$ProjectRoot = Split-Path -Parent $PSScriptRoot
+﻿$ProjectRoot = Split-Path -Parent $PSScriptRoot
 
 Describe 'MusicServer Tauri desktop shell' {
     It 'uses Tauri v2 and the shared web directory' {
@@ -43,5 +43,26 @@ Describe 'MusicServer Tauri desktop shell' {
         $prepare | Should Match 'wanted_worker\.ps1'
         $prepare | Should Match 'sqlite3\.exe'
         $prepare | Should Not Match 'cookies\.txt'
+    }
+
+    It 'stages an executable runtime containing the shared HTTP input module' {
+        $tempParent = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+        $packageRoot = [IO.Path]::GetFullPath((Join-Path $tempParent ('musicserver_package_' + [guid]::NewGuid().ToString('N'))))
+        if (-not $packageRoot.StartsWith($tempParent, [StringComparison]::OrdinalIgnoreCase)) { throw 'Package fixture escaped the temporary directory.' }
+        try {
+            & (Join-Path $ProjectRoot 'scripts\prepare_tauri_runtime.ps1') -ProjectRoot $ProjectRoot -Destination $packageRoot | Out-Null
+            $manifest = Get-Content -LiteralPath (Join-Path $packageRoot 'runtime-manifest.json') -Raw | ConvertFrom-Json
+            ($manifest.runtime_files -contains 'MusicServer.Http.psm1') | Should Be $true
+            foreach ($relative in $manifest.runtime_files) { (Test-Path -LiteralPath (Join-Path $packageRoot $relative) -PathType Leaf) | Should Be $true }
+            Import-Module (Join-Path $packageRoot 'MusicServer.Http.psm1') -Force
+            $stream = New-Object IO.MemoryStream(,[Text.Encoding]::UTF8.GetBytes('{}'))
+            try {
+                $request = [pscustomobject]@{ Headers = @{}; ContentLength64 = 2; InputStream = $stream }
+                (Read-MusicServerJsonRequest -Request $request).Text | Should Be '{}'
+            } finally { $stream.Dispose() }
+        } finally {
+            Remove-Module MusicServer.Http -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $packageRoot) { Remove-Item -LiteralPath $packageRoot -Recurse -Force }
+        }
     }
 }
