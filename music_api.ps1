@@ -1,4 +1,4 @@
-# music_api.ps1 - 音乐服务器的前端无关 HTTP API（v2 / Phase 3）。
+﻿# music_api.ps1 - 音乐服务器的前端无关 HTTP API（v2 / Phase 3）。
 # ------------------------------------------------------------------
 # Phase 3 契约：
 #   - SQLite 是唯一的运行时状态真源。JSON 仅用于迁移输入 / 备份 / 兼容镜像，
@@ -440,7 +440,8 @@ function Remove-LibraryTrack {
     # file (via Navidrome media_file path) so its state can be reset.
     $trackId = ''
     try {
-        $navRows = @(Invoke-SqliteJson -DbPath $Config.NdDb -Sql "SELECT id FROM media_file WHERE path = '" + ([string]$fullFile).Replace("'", "''") + "' LIMIT 1;")
+        $escapedPath = ([string]$fullFile).Replace("'", "''")
+        $navRows = @(Invoke-SqliteJson -DbPath $Config.NdDb -Sql "SELECT id FROM media_file WHERE path = '$escapedPath' LIMIT 1;")
         if ($navRows.Count -gt 0) {
             $songId = [string]$navRows[0].id
             # Find canonical tracks bound to this Navidrome song id.
