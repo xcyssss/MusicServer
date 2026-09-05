@@ -9,7 +9,7 @@ Tauri APP / WebView2
         │
         ▼
 127.0.0.1:8790  start_musicserver_ui.ps1
-        │  静态 UI + /api/* 代理
+        │  静态 UI + /api/* 代理 + watchdog
         ▼
 127.0.0.1:8787  music_api.ps1
         │
@@ -34,7 +34,7 @@ cargo check --locked
 npx --yes @tauri-apps/cli@2 build --bundles nsis
 ```
 
-构建前 `scripts/prepare_tauri_runtime.ps1` 会自动生成 `src-tauri/resources/runtime/`，收集桌面 APP 真正需要的 PowerShell runtime、`web/` 和 `sqlite3.exe`。生成目录和 Rust `target/` 均不提交到 Git。
+构建前 `scripts/prepare_tauri_runtime.ps1` 会自动生成 `src-tauri/resources/runtime/`，收集桌面 APP 真正需要的 PowerShell runtime（UI/API/worker/watchdog）、`web/` 和 `sqlite3.exe`。生成目录和 Rust `target/` 均不提交到 Git。
 
 NSIS 安装包位于：
 
@@ -89,6 +89,7 @@ MusicServer/
 ├─ MusicServer.Providers.psm1
 ├─ music_api.ps1
 ├─ start_musicserver_ui.ps1
+├─ watchdog_ui.ps1
 └─ wanted_worker.ps1
 ```
 
