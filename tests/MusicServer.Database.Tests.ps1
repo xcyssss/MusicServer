@@ -1,4 +1,4 @@
-$ProjectRoot = Split-Path -Parent $PSScriptRoot
+﻿$ProjectRoot = Split-Path -Parent $PSScriptRoot
 
 function Get-TestSqliteExecutable {
     if ($env:MUSICSERVER_SQLITE) {
@@ -108,5 +108,62 @@ SELECT
         $rows.Count | Should Be 1
         $rows[0].timestamp.GetType().FullName | Should Be 'System.String'
         $rows[0].timestamp | Should Be $timestamp
+    }
+
+    It 'enforces foreign keys on every fresh SQLite process including reconnected databases' {
+        Invoke-MusicServerSqlNonQuery -Query 'CREATE TABLE parent(id INTEGER PRIMARY KEY); CREATE TABLE child(parent_id INTEGER REFERENCES parent(id));'
+        foreach ($reconnect in @($false, $true)) {
+            if ($reconnect) { Connect-MusicServerDatabase -DbPath $DbPath -SqliteExe (Get-TestSqliteExecutable) }
+            $settings = @(Invoke-MusicServerSqlJson -Query 'PRAGMA foreign_keys;')
+            [int]$settings[0].foreign_keys | Should Be 1
+            { Invoke-MusicServerSqlNonQuery -Query 'INSERT INTO child(parent_id) VALUES (99);' } | Should Throw
+        }
+        [int](@(Invoke-MusicServerSqlJson -Query 'SELECT count(*) AS n FROM child;')[0].n) | Should Be 0
+    }
+
+    It 'commits valid transactions and rolls back a foreign-key failure before later statements' {
+        Invoke-MusicServerSqlNonQuery -Query 'CREATE TABLE parent(id INTEGER PRIMARY KEY); CREATE TABLE child(parent_id INTEGER REFERENCES parent(id));'
+        Invoke-MusicServerSqlNonQuery -Query "BEGIN; INSERT INTO parent VALUES (1); INSERT INTO child VALUES (1); COMMIT;"
+        foreach ($failure in @('INSERT INTO child VALUES (999)', 'INSERT INTO missing_table VALUES (999)')) {
+            foreach ($separator in @(' ', "`n")) {
+                $sql = @('BEGIN;', 'INSERT INTO parent VALUES (2);', ($failure + ';'), 'INSERT INTO parent VALUES (3);', 'COMMIT;') -join $separator
+                { Invoke-MusicServerSqlNonQuery -Query $sql } | Should Throw
+                $parents = @(Invoke-MusicServerSqlJson -Query 'SELECT id FROM parent ORDER BY id;')
+                $parents.Count | Should Be 1
+                [int]$parents[0].id | Should Be 1
+            }
+        }
+        [int](@(Invoke-MusicServerSqlJson -Query 'SELECT count(*) AS n FROM child;')[0].n) | Should Be 1
+    }
+
+    It 'stops later autocommit statements after the first failure on the same line' {
+        Invoke-MusicServerSqlNonQuery -Query 'CREATE TABLE bail_test(id INTEGER PRIMARY KEY);'
+        { Invoke-MusicServerSqlNonQuery -Query 'INSERT INTO bail_test VALUES (1); INSERT INTO bail_test VALUES (1); INSERT INTO bail_test VALUES (2);' } | Should Throw
+        $rows = @(Invoke-MusicServerSqlJson -Query 'SELECT id FROM bail_test;')
+        $rows.Count | Should Be 1
+        [int]$rows[0].id | Should Be 1
+    }
+
+    It 'preserves quoted semicolons comments and complete trigger bodies when separating statements' {
+        Invoke-MusicServerSqlNonQuery -Query @'
+CREATE TABLE [source;table](id INTEGER PRIMARY KEY, "text;column" TEXT); CREATE TABLE `audit;table`(value TEXT);
+CREATE TRIGGER audit_insert AFTER INSERT ON [source;table] BEGIN INSERT INTO `audit;table` VALUES (NEW."text;column"); INSERT INTO `audit;table` VALUES ('trigger;second'); END; INSERT INTO [source;table] VALUES (1, 'quote'';@token
+next;line'); -- comment; INSERT INTO missing_table VALUES (1);
+/* comment; ' " ` [ */ INSERT INTO [source;table] VALUES (2, 'last;value');
+'@
+        $rows = @(Invoke-MusicServerSqlJson -Query 'SELECT value FROM `audit;table` ORDER BY rowid;')
+        $rows.Count | Should Be 4
+        $rows[0].value | Should Be "quote';@token`nnext;line"
+        $rows[1].value | Should Be 'trigger;second'
+        $rows[2].value | Should Be 'last;value'
+        $rows[3].value | Should Be 'trigger;second'
+    }
+
+    It 'reconnects without modifying the existing journal mode or schema' {
+        Invoke-MusicServerSqlNonQuery -Query 'PRAGMA journal_mode=DELETE; PRAGMA user_version=17;'
+        Connect-MusicServerDatabase -DbPath $DbPath -SqliteExe (Get-TestSqliteExecutable)
+        [string](@(Invoke-MusicServerSqlJson -Query 'PRAGMA journal_mode;')[0].journal_mode) | Should Be 'delete'
+        (Get-SchemaVersion) | Should Be 17
+        [int](@(Invoke-MusicServerSqlJson -Query 'PRAGMA busy_timeout;')[0].timeout) | Should Be 5000
     }
 }

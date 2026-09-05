@@ -169,6 +169,7 @@ function Start-MusicServerWorker {
 }
 
 Import-Module (Join-Path $Root 'MusicServer.Core.psm1') -Force
+Import-Module (Join-Path $Root 'MusicServer.Http.psm1') -Force
 $Config = New-MusicServerConfig -Root $Root
 
 function Invoke-NavidromeSqliteJson {
@@ -679,6 +680,16 @@ function Proxy-ApiRequest {
     param([Parameter(Mandatory)]$Context)
 
     $request = $Context.Request
+    try {
+        $requestBody = Read-MusicServerJsonRequest -Request $request
+    } catch {
+        if (-not $_.Exception.Data.Contains('HttpStatusCode')) { throw }
+        $Context.Response.KeepAlive = $false
+        Send-Json -Context $Context -StatusCode ([int]$_.Exception.Data['HttpStatusCode']) -Body @{
+            error = [string]$_.Exception.Data['ErrorCode']; message = $_.Exception.Message
+        }
+        return
+    }
     $pathAndQuery = $request.Url.PathAndQuery
     if ($pathAndQuery -match '^/api/recommendations/today(?:\?|$)') {
         $pathAndQuery = $pathAndQuery -replace '^/api/recommendations/today', '/api/today'
@@ -691,10 +702,10 @@ function Proxy-ApiRequest {
     $proxyRequest.Timeout = 20000
     $proxyRequest.ReadWriteTimeout = 20000
     if ($request.ContentType) { $proxyRequest.ContentType = $request.ContentType }
-    if ($request.ContentLength64 -gt 0) {
-        $proxyRequest.ContentLength = $request.ContentLength64
+    if ($requestBody.Bytes.Length -gt 0) {
+        $proxyRequest.ContentLength = $requestBody.Bytes.Length
         $out = $proxyRequest.GetRequestStream()
-        try { $request.InputStream.CopyTo($out) } finally { $out.Dispose() }
+        try { $out.Write($requestBody.Bytes, 0, $requestBody.Bytes.Length) } finally { $out.Dispose() }
     } elseif ($request.HttpMethod -in @('POST','PUT','PATCH','DELETE')) {
         # A bodyless POST/DELETE must still declare Content-Length: 0. HttpWebRequest
         # otherwise leaves the length unspecified and the HttpListener on the API
@@ -713,6 +724,9 @@ function Proxy-ApiRequest {
     try {
         $Context.Response.StatusCode = [int]$proxyResponse.StatusCode
         if ($proxyResponse.ContentType) { $Context.Response.ContentType = $proxyResponse.ContentType }
+        if ($proxyResponse.Headers['X-MusicServer-State-Sqlite-Calls']) {
+            $Context.Response.Headers['X-MusicServer-State-Sqlite-Calls'] = $proxyResponse.Headers['X-MusicServer-State-Sqlite-Calls']
+        }
         if ($proxyResponse.Headers['Location']) { $Context.Response.RedirectLocation = $proxyResponse.Headers['Location'] }
         if ($proxyResponse.ContentLength -ge 0) { $Context.Response.ContentLength64 = [long]$proxyResponse.ContentLength }
         else { $Context.Response.SendChunked = $true }

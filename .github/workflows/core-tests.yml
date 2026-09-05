@@ -64,7 +64,7 @@ jobs:
           Import-Module Pester -RequiredVersion 3.4.0 -Force
           $groups = @{
             state = @('Core', 'Database', 'V2', 'WorkerConcurrency', 'Recommendation', 'LegacyRetirement', 'Listening', 'Web', 'Tauri')
-            api   = @('UiProxyRuntime', 'ApiTransaction', 'ApiRuntime')
+            api   = @('Http', 'UiProxyRuntime', 'ApiTransaction', 'ApiRuntime')
           }
           $paths = @($groups['${{ matrix.group }}'] | ForEach-Object { ".\tests\MusicServer.$_.Tests.ps1" })
           Write-Host "Suites: $($paths -join ', ')"
@@ -200,6 +200,7 @@ jobs:
             foreach ($required in @(
               (Join-Path $appHome 'start_musicserver_ui.ps1'),
               (Join-Path $appHome 'music_api.ps1'),
+              (Join-Path $appHome 'MusicServer.Http.psm1'),
               (Join-Path $appHome 'web\app.js'),
               (Join-Path $appHome 'tools\sqlite3.exe'),
               (Join-Path $appHome 'DailyMix_data\state\musicserver.db')

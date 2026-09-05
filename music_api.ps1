@@ -42,6 +42,7 @@ Import-Module (Join-Path $PSScriptRoot 'MusicServer.Core.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Providers.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Database.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.State.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Http.psm1') -Force
 
 $Config = New-MusicServerConfig -Root $Root
 Initialize-MusicServerState -Config $Config
@@ -71,6 +72,10 @@ function Send-Json([psobject]$Context) {
     $Context.Response.ContentType = 'application/json; charset=utf-8'
     $Context.Response.StatusCode = [int]$Context.StatusCode
     $Context.Response.ContentLength64 = $bodyBytes.Length
+    if ($env:MUSICSERVER_DIAGNOSTICS -eq '1') {
+        $calls = (Get-MusicServerSqliteInvocationCount) - $script:RequestSqliteStart
+        $Context.Response.Headers['X-MusicServer-State-Sqlite-Calls'] = [string]$calls
+    }
     $Context.Response.OutputStream.Write($bodyBytes, 0, $bodyBytes.Length)
     $Context.Response.OutputStream.Close()
 }
@@ -625,18 +630,11 @@ while ($true) {
     $path = [System.Web.HttpUtility]::UrlDecode($request.Url.AbsolutePath, [System.Text.Encoding]::UTF8)
     $method = $request.HttpMethod
     $script:requestCount++
-    $bodyText = ''
-    try {
-        if ($request.ContentLength64 -gt 0) {
-            $stream = $request.InputStream
-            $bytes = New-Object byte[] $request.ContentLength64
-            [void]$stream.Read($bytes, 0, $request.ContentLength64)
-            $bodyText = [System.Text.Encoding]::UTF8.GetString($bytes)
-        }
-    } catch {}
+    $script:RequestSqliteStart = Get-MusicServerSqliteInvocationCount
     Write-Host ("[{0}] {1} {2}  (req #{3})" -f [DateTime]::Now.ToString('HH:mm:ss'), $method, $path, $script:requestCount) -ForegroundColor Gray
     $startTime = [DateTime]::UtcNow
     try {
+        $bodyText = (Read-MusicServerJsonRequest -Request $request).Text
         if ($method -eq 'GET' -and $path -eq '/api/today') {
             $now = [DateTime]::UtcNow
             $cacheAge = ($now - $script:TodayCacheAt).TotalSeconds
@@ -893,16 +891,18 @@ while ($true) {
     } catch {
         $errMsg = $_.Exception.Message
         $statusCode = 500
-        if ($errMsg -match 'TRACK_NOT_FOUND') { $statusCode = 404 }
+        $inputError = $_.Exception.Data.Contains('HttpStatusCode')
+        if ($inputError) { $statusCode = [int]$_.Exception.Data['HttpStatusCode'] }
+        elseif ($errMsg -match 'TRACK_NOT_FOUND') { $statusCode = 404 }
         elseif ($errMsg -match 'LIBRARY_NOT_FOUND') { $statusCode = 404 }
         elseif ($errMsg -match 'Sqlite|sqlite|NOT\s+NULL|constraint|no such table|database is locked') { $statusCode = 500 }
         Write-Host "  ERROR: $errMsg" -ForegroundColor Red
-        if (-not $Context.Response.HasErrors) {
-            try {
-                $body = @{ error = if ($statusCode -eq 404) { 'NOT_FOUND' } else { 'INTERNAL_ERROR' }; message = $errMsg }
-                Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = $statusCode })
-            } catch {}
-        }
+        $errorCode = if ($inputError) { [string]$_.Exception.Data['ErrorCode'] } elseif ($statusCode -eq 404) { 'NOT_FOUND' } else { 'INTERNAL_ERROR' }
+        try {
+            if ($inputError) { $Context.Response.KeepAlive = $false }
+            $body = @{ error = $errorCode; message = $errMsg }
+            Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = $statusCode })
+        } catch { try { $Context.Response.Abort() } catch {} }
     } finally {
         $elapsed = ([DateTime]::UtcNow - $startTime).TotalMilliseconds
         Write-Host ("  done in {0:N0} ms" -f $elapsed) -ForegroundColor DarkGray
