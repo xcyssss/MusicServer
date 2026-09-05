@@ -140,7 +140,7 @@ Do not replace this with a static grep/Pester-only check.
 - Wanted worker uses its mutex/SQLite lease logic; do not introduce duplicate workers or bypass lease ownership.
 - `bilibili_direct` candidates must not trigger an unnecessary Bilibili search. Search is fallback when no usable local/direct candidate exists.
 - Bilibili 412/rate-limit handling must remain bounded and health-aware; do not add unbounded retry loops.
-- SQLite CLI calls enable foreign keys before caller SQL and stop on the first error; connection-local settings must be applied per invocation. Keep the existing effective synchronous default unless a separate durability change is reviewed.
+- SQLite CLI calls use batch mode, enable foreign keys before caller SQL, and separate unquoted statement terminators onto lines so `.bail on` also stops same-line scripts on SQLite 3.53.4. Preserve SQL literals/comments and complete trigger bodies; connection-local settings must be applied per invocation. Keep the existing effective synchronous default unless a separate durability change is reviewed.
 - API/proxied JSON control bodies are limited to 64 KiB and a 5-second total read deadline. Empty bodies remain supported; nonempty bodies must be UTF-8 JSON objects. Reject unsupported chunked/compressed bodies before state writes or forwarding.
 
 ## Common local operations

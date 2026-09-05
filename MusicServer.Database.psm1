@@ -72,10 +72,11 @@ function Test-MusicServerSqlParameterPart {
     return ($Character -eq '_' -or [char]::IsLetterOrDigit($Character))
 }
 
-function Expand-MusicServerSqlTemplate {
+function ConvertTo-MusicServerSqlText {
     param(
         [Parameter(Mandatory)][string]$Template,
-        [Parameter(Mandatory)][hashtable]$Params
+        [hashtable]$Params,
+        [switch]$SeparateStatements
     )
 
     $builder = New-Object Text.StringBuilder
@@ -83,6 +84,17 @@ function Expand-MusicServerSqlTemplate {
     $index = 0
     while ($index -lt $length) {
         $character = $Template[$index]
+
+        # CLI commands occupy a whole line and do not use SQL quoting rules.
+        if ($SeparateStatements -and $character -eq '.' -and ($index -eq 0 -or $Template[$index - 1] -eq "`n")) {
+            while ($index -lt $length) {
+                $commandCharacter = $Template[$index]
+                [void]$builder.Append($commandCharacter)
+                $index++
+                if ($commandCharacter -eq "`n") { break }
+            }
+            continue
+        }
 
         # Preserve SQL strings and quoted identifiers verbatim. Parameter-looking
         # text inside them is data in the template, not a binding token.
@@ -149,7 +161,7 @@ function Expand-MusicServerSqlTemplate {
             continue
         }
 
-        if ($character -eq '@' -and $index + 1 -lt $length -and (Test-MusicServerSqlParameterStart $Template[$index + 1])) {
+        if ($null -ne $Params -and $character -eq '@' -and $index + 1 -lt $length -and (Test-MusicServerSqlParameterStart $Template[$index + 1])) {
             $nameStart = $index + 1
             $end = $nameStart + 1
             while ($end -lt $length -and (Test-MusicServerSqlParameterPart $Template[$end])) { $end++ }
@@ -163,9 +175,20 @@ function Expand-MusicServerSqlTemplate {
         }
 
         [void]$builder.Append($character)
+        if ($SeparateStatements -and $character -eq ';') {
+            [void]$builder.Append("`n")
+        }
         $index++
     }
     return $builder.ToString()
+}
+
+function Expand-MusicServerSqlTemplate {
+    param(
+        [Parameter(Mandatory)][string]$Template,
+        [Parameter(Mandatory)][hashtable]$Params
+    )
+    return ConvertTo-MusicServerSqlText -Template $Template -Params $Params
 }
 
 function ConvertFrom-MusicServerSqliteJson {
@@ -188,7 +211,11 @@ function Invoke-MusicServerSqliteScript {
         # Connection-local settings must precede any caller BEGIN statement.
         # Bail on the first SQL error so a later COMMIT cannot persist a partial
         # transaction; sqlite3 rolls back an open transaction when it exits.
-        $scriptText = ".bail on`nPRAGMA foreign_keys=ON;`n" + $Sql
+        # SQLite 3.53.4 may execute all statements on a line before honoring
+        # .bail. Separate unquoted terminators without changing strings or
+        # comments. The CLI itself keeps CREATE TRIGGER bodies together until
+        # END; completes the statement.
+        $scriptText = ".bail on`nPRAGMA foreign_keys=ON;`n" + (ConvertTo-MusicServerSqlText -Template $Sql -SeparateStatements)
         [IO.File]::WriteAllText($tmpFile, $scriptText, (New-Object Text.UTF8Encoding($false)))
         $startInfo = [Diagnostics.ProcessStartInfo]::new()
         $startInfo.FileName = $script:SqliteExe
@@ -198,7 +225,7 @@ function Invoke-MusicServerSqliteScript {
         # ride along with every execution: without it, concurrent workers hit a
         # hard "database is locked" error instead of waiting for the other
         # writer to commit and then losing the claim race gracefully.
-        $startInfo.Arguments = "$jsonArgument`"$($script:DbPath)`" `".timeout 5000`" `".read $tmpFile`""
+        $startInfo.Arguments = "-batch $jsonArgument`"$($script:DbPath)`" `".timeout 5000`" `".read $tmpFile`""
         $startInfo.UseShellExecute = $false
         $startInfo.CreateNoWindow = $true
         $startInfo.RedirectStandardOutput = $true
