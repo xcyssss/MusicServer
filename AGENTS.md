@@ -1,162 +1,181 @@
 # MusicServer - Agent Guide
 
-Local music server: Bilibili audio downloads + Navidrome streaming + automated daily recommendations.
+MusicServer is a Windows-first local music application. The **Tauri v2 desktop APP is the product target**; `web/` is the shared WebView2 UI rendered inside that APP.
 
-Git repo. Branches: `main` (released), `review/musicserver-hardening-v1`, `review/musicserver-hardening-v2` (active — SQLite as sole runtime truth + atomic API transactions).
+## Non-negotiable architecture rules
 
-## Stack
+- **SQLite is the sole runtime source of truth.** JSON files are migration input, backup, or compatibility output only.
+- **Do not build a second native Rust UI.** `web/index.html`, `web/app.js`, and `web/styles.css` are the desktop UI.
+- **Validate user-facing UI changes in the Tauri APP**, not only in a browser.
+- **Windows PowerShell 5.1 is the compatibility baseline** for formal PowerShell code and tests.
+- `.ps1` / `.psm1` containing non-ASCII text must be UTF-8 BOM. `.editorconfig` enforces this.
+- Never directly edit the live Navidrome DB while Navidrome is running.
+- Generated runtime/build output, local music, cookies, databases, logs, and diagnostic `artifacts/` must not be committed.
 
-- **PowerShell modules** — `MusicServer.Core` / `.Database` / `.State` / `.Migration` / `.Providers` / `.DesiredStateWorker`
-- **music_api.ps1** — HTTP listener on `http://127.0.0.1:8787/`, front-end agnostic JSON API
-- **src-tauri/** — Tauri v2 Windows desktop shell; the primary client is the packaged APP
-- **web/** — `index.html` + `app.js` + `styles.css`, the shared WebView2 UI loaded by the Tauri APP at `http://127.0.0.1:8790/` (not a separate browser product)
-- **SQLite** — sole runtime source of truth. JSON files are migration input / backups only
-- **Navidrome** v0.63.2 — music server, Subsonic-compatible, runs as Windows service or standalone
-- **yt-dlp** — Bilibili audio extraction (via `C:\Users\dell\anaconda3\Scripts\yt-dlp.exe`)
-- **ffmpeg/ffprobe** — transcoding, tag rewriting, duration validation (`C:\Users\dell\AppData\Local\Microsoft\WinGet\Links\ffmpeg.exe`)
-- **sqlite3** — direct queries against `Navidrome\Data\navidrome.db` (starred tracks, library state)
-- **PowerShell** — all scripts are `.ps1`, run from `E:\Project\MusicServer`
+## Core stack
 
-## Key paths
+- `MusicServer.Core.psm1` — configuration/common helpers
+- `MusicServer.Database.psm1` — SQLite access
+- `MusicServer.State.psm1` — canonical transactional state/schema
+- `MusicServer.Providers.psm1` — local/Bilibili provider resolution and health
+- `MusicServer.Migration.psm1` — explicit legacy migration only
+- `MusicServer.DesiredStateWorker.psm1` — desired-state worker helpers
+- `music_api.ps1` — JSON HTTP API, normally `127.0.0.1:8787`
+- `start_musicserver_ui.ps1` — static WebView UI + `/api/*` proxy, normally `127.0.0.1:8790`
+- `wanted_worker.ps1` — asynchronous Wanted Queue downloader
+- `web/` — shared desktop WebView2 UI
+- `src-tauri/` — Tauri desktop shell, runtime deployment, lifecycle and packaging
+- Navidrome — local music server/integration
+- yt-dlp + ffmpeg/ffprobe — optional download/transcode integrations
 
+External executable resolution should prefer environment overrides / PATH rather than new machine-specific absolute paths:
+
+```text
+MUSICSERVER_SQLITE
+MUSICSERVER_YTDLP
+MUSICSERVER_FFMPEG
+MUSICSERVER_FFPROBE
+MUSICSERVER_APP_HOME
 ```
-E:\Project\MusicServer/
-  Music/                      # Main library (mp3 + lrc pairs)
-  Music/DailyMix/             # Today's recommendations (auto-cleaned)
-  Navidrome/bin/navidrome.exe # Server binary
-  Navidrome/navidrome.toml    # Config (port 4533, MusicFolder, ffmpeg path)
-  Navidrome/Data/navidrome.db # SQLite database (DO NOT edit while server runs)
-  DailyMix_data/              # Recommendation state (today.csv, history.csv, accepted.csv, rejected.csv)
-  cookies.txt                 # Bilibili auth cookie (expires, refresh manually)
-  lyrics_report.csv           # Lyrics matching report
-  src-tauri/                  # Tauri v2 desktop shell and release build configuration
+
+## Desktop runtime and release model
+
+A release must work independently of the source checkout.
+
+Build flow:
+
+```text
+clean checkout
+  -> scripts/prepare_tauri_runtime.ps1
+  -> src-tauri/resources/runtime/ (generated)
+  -> cargo/Tauri NSIS build
+  -> installed APP
+  -> packaged runtime copied to writable APP home
+  -> PowerShell UI/API/worker started from APP home
 ```
 
-## Scripts
+The packaged runtime contains only what the desktop APP needs to boot its own UI/API state layer:
 
-| Script | Purpose | Key params |
-|--------|---------|------------|
-| `download_bilibili_favorites.ps1` | Bulk download Bilibili favorites | `-FavoritesUrl`, `-CookieFile` |
-| `add_song.ps1` | Interactive single-video downloader | Paste BV URLs at prompt |
-| `daily_recommend.ps1` | Daily 30-song recommendation pipeline | `-DryRun`, `-Count`, `-SeedCount` |
-| `daily_cleanup.ps1` | Keep ♥'d songs, blacklist the rest | `-DryRun`, `-KeepDays` |
-| `fetch_lyrics.ps1` | Batch LRC lyrics from NetEase | `-DryRun`, `-Force`, `-Filter`, `-Limit` |
-| `fix_one_lyric.ps1` | Manual lyric fix for one song | `-FilePattern`, `-SongId` or `-Search` |
-| `fix_tags.ps1` | Rewrite ID3 tags, set album="B站收藏" | None |
-| `start_navidrome.ps1` | Start server (service or standalone) | `-Port`, `-NoBrowser` |
-| `lib_playlist.ps1` | Shared m3u writer (sourced by recommend/cleanup) | N/A (dot-sourced) |
-| `music_api.ps1` | HTTP API server (v2) | `-Prefix`, `-Once`, `-Root` |
-| `wanted_worker.ps1` | Background download worker | see module docs |
-| `start_musicserver.cmd` / `.vbs` | Launch API + worker hidden | None |
-| `tests/verify_tauri_desktop.ps1` | Tauri APP process/HTTP/playback/shutdown smoke verifier | `-Launch`, `-ExercisePlayback`, `-CloseLaunchedApp` |
+- `start_musicserver_ui.ps1`
+- `music_api.ps1`
+- `wanted_worker.ps1`
+- Core/Database/State/Providers modules
+- `web/`
+- a real `sqlite3.exe`
 
-## Tests & CI
+Do **not** package `cookies.txt`, local databases, music, logs, generated reports, yt-dlp credentials, or user-specific paths.
 
-Formal suites live in `tests/` and are named `MusicServer.*.Tests.ps1` (Pester 3.4, Windows PowerShell 5.1-compatible). Anything else in `tests/` is a throwaway probe and is git-ignored.
+Installed builds default to:
+
+```text
+%LOCALAPPDATA%\com.musicserver.desktop\
+```
+
+for the writable runtime/data home. `MUSICSERVER_APP_HOME` can override it.
+
+A release EXE built and launched from inside a source checkout may detect that checkout from its own executable ancestry and continue using the existing checkout data. This runtime discovery is allowed because it embeds no compile-time absolute path. **Do not reintroduce `CARGO_MANIFEST_DIR` as runtime state/location.**
+
+## Repository layout
+
+```text
+MusicServer/
+├─ .github/workflows/             # CI
+├─ docs/                          # current docs + archived historical reports
+├─ scripts/                       # build/maintenance helpers
+├─ src-tauri/
+│  ├─ src/main.rs
+│  ├─ resources/runtime/          # generated, ignored except placeholder
+│  ├─ icons/                      # Windows release assets only
+│  ├─ Cargo.toml / Cargo.lock
+│  └─ tauri.conf.json
+├─ web/
+├─ tests/
+├─ MusicServer.*.psm1
+├─ music_api.ps1
+├─ start_musicserver_ui.ps1
+└─ wanted_worker.ps1
+```
+
+Historical architecture/hardening reports belong in `docs/archive/`, not in the repository root. Personal Windows file-association helpers do not belong in this product repository.
+
+## Formal tests and CI
+
+Formal suites are `tests/MusicServer.*.Tests.ps1`, Pester 3.4, PS5.1-compatible. Tests that depend on a real local library/API/lyrics report must use the `RequiresLocalRuntime` tag so CI can exclude them.
+
+CI: `.github/workflows/core-tests.yml` on `windows-latest`.
+
+| Job | Responsibility |
+|---|---|
+| `state` | Core, Database, V2, WorkerConcurrency, Recommendation, LegacyRetirement, Listening, Web, Tauri |
+| `api` | UiProxyRuntime, ApiTransaction, ApiRuntime |
+| `desktop-build` | real Rust/Tauri compile, NSIS installer, installed-app portability smoke, installer artifact |
+
+The desktop gate must include at least:
+
+```text
+cargo fmt --check
+cargo check --locked
+Tauri NSIS build
+installer exists
+silent temporary install
+source runtime disabled during launch
+installed UI/API build markers reachable
+bundled sqlite/runtime staged
+APP-owned services stop after APP exits
+installer artifact upload
+```
+
+Do not replace this with a static grep/Pester-only check.
+
+## Runtime behavior rules
+
+- Default UI/API ports: 8790 / 8787.
+- Fallback pairs exist for stale/foreign listeners; do not compete with unidentified port owners.
+- Tauri verifies the UI `app.js` and API `/health` build marker before reusing a service pair.
+- APP shutdown must stop only the launcher/service tree that this APP owns.
+- Wanted worker uses its mutex/SQLite lease logic; do not introduce duplicate workers or bypass lease ownership.
+- `bilibili_direct` candidates must not trigger an unnecessary Bilibili search. Search is fallback when no usable local/direct candidate exists.
+- Bilibili 412/rate-limit handling must remain bounded and health-aware; do not add unbounded retry loops.
+
+## Common local operations
 
 ```powershell
+# Formal examples
 Import-Module Pester -RequiredVersion 3.4.0 -Force
 Invoke-Pester .\tests\MusicServer.Core.Tests.ps1 -PassThru
+
+# Desktop release
+cd src-tauri
+cargo fmt --check
+cargo check --locked
+npx --yes @tauri-apps/cli@2 build --bundles nsis
 ```
 
-CI (`.github/workflows/core-tests.yml`, windows-latest + Windows PowerShell 5.1) runs on push to `main` and `review/**`. It splits suites across two parallel jobs so neither hits the job timeout:
+For live desktop smoke, use `tests/verify_tauri_desktop.ps1` and exercise the actual Tauri APP.
 
-| Job | Suites |
-|-----|--------|
-| `state` | Core, Database, V2, WorkerConcurrency, Web, Tauri |
-| `api` | ApiTransaction, ApiRuntime |
+## Change workflow
 
-Measured locally on PS 5.1: ApiTransaction ≈ 334s, ApiRuntime ≈ 152s, the other four ≈ 480s combined. Serial is ~16 min, so keep the split.
+For non-trivial work:
 
-Two things CI needs that a fresh runner does not have:
+1. inspect current branch/files before modifying;
+2. preserve unrelated local/user work;
+3. make the smallest coherent change;
+4. add/update regression coverage;
+5. run the relevant local tests when possible;
+6. push to a feature/review branch;
+7. verify GitHub CI rather than assuming it is green;
+8. do not merge unless the user explicitly authorizes merge.
 
-- **sqlite3** — `MusicServer.Database.psm1` resolves `sqlite3.exe` from PATH with no fallback path. CI installs it via `choco install sqlite`. Without it every DB-backed suite fails.
-- **Pester 3.4.0** — installed on demand from PSGallery.
+### Checkpoint rule
 
-Suites that assert against a **live** MusicServer (running API, local library, `lyrics_report.csv` — the latter two are git-ignored) must be tagged `RequiresLocalRuntime`; CI passes `-ExcludeTag RequiresLocalRuntime`. Run them locally with:
+After completing a meaningful task, update this `AGENTS.md` checkpoint when the task changes architecture, release behavior, test gates, or important operating rules. Keep only current durable facts; do not accumulate transient debugging notes.
 
-```powershell
-Invoke-Pester .\tests\MusicServer.Web.Tests.ps1 -PassThru   # includes the tagged Describe
-```
+## Current checkpoint — 2026-09-05
 
-Diagnostic scratch output goes to `artifacts/` (git-ignored). Do not commit it.
-
-## Automated schedule
-
-Two Windows scheduled tasks run daily:
-
-| Task | Time | What it does |
-|------|------|--------------|
-| `MusicServer_DailyCleanup` | 06:30 | Reads Navidrome starred status; keeps ♥'d songs in main library, deletes others, updates rejected.csv blacklist |
-| `MusicServer_DailyRecommend` | 07:00 | Seeds from library + accepted.csv, queries NetEase for similar songs, downloads from Bilibili, writes lyrics |
-
-Both run as `powershell.exe -NoProfile -ExecutionPolicy Bypass -File <script>`.
-
-## Data flow
-
-```
-library.mp3 + accepted.csv  -->  NetEase simiSong API  -->  Bilibili search/download
-                                                              |
-                                                         Music/DailyMix/
-                                                              |
-                                                    Navidrome auto-scans (6h)
-                                                              |
-                                                    User hearts or ignores
-                                                              |
-                                               next morning: daily_cleanup
-                                                    /                \
-                                            ♥ -> move to Music/    no ♥ -> delete + blacklist
-                                            accepted.csv           rejected.csv
-```
-
-## Gotchas
-
-- **cookies.txt expires** — when downloads fail with "Unable to extract JSON", re-export from browser
-- **Bilibili rate limits (HTTP 412)** — scripts retry up to 3x with increasing delays; `--sleep-requests` and `--http-chunk-size 1M` help
-- **Navidrome DB locking** — scripts copy the DB to a temp file before querying sqlite3; never edit navidrome.db directly while server is running
-- **Lyrics are external .lrc files** — Navidrome reads them in real-time, no scan needed after adding. Priority: `.lrc` > `.txt` > embedded tags (see `navidrome.toml` `LyricsPriority`)
-- **Duration validation** — `daily_recommend.ps1` discards downloads where local duration differs from NetEase metadata by >45s (wrong video matched)
-- **Desktop APP is the product target** — validate UI behavior through the Tauri APP. The APP is a WebView2 shell over `web/`; do not replace the shared UI with a second Rust/native UI or treat browser-only checks as desktop acceptance.
-- **Stale desktop services** — Tauri verifies the `web/app.js` and API `/health` build marker before reusing 8790/8787; if another build owns those ports it uses an isolated fallback pair. `start_musicserver_ui.ps1` accepts `-ApiPrefix` and `-UiPrefix` for that reason.
-- **File names are the metadata** — Bilibili titles are noisy (UP主 names, quality tags, etc). `fetch_lyrics.ps1` strips these via `$NoiseWords` list before searching
-- **m3u playlists auto-import** — Navidrome watches Music/ for .m3u files; `lib_playlist.ps1` writes relative paths and UTF-8 no-BOM
-
-## Common operations
-
-```powershell
-cd E:\Project\MusicServer
-
-# Download favorites (needs fresh cookies)
-.\download_bilibili_favorites.ps1 -FavoritesUrl "https://www.bilibili.com/medialist/detail/ml..." -CookieFile ".\cookies.txt"
-
-# Dry-run daily recommendation (see what would be downloaded)
-.\daily_recommend.ps1 -DryRun
-
-# Run daily recommendation now
-.\daily_recommend.ps1
-
-# Dry-run cleanup (see what would be kept/deleted)
-.\daily_cleanup.ps1 -DryRun
-
-# Batch fetch lyrics (preview first)
-.\fetch_lyrics.ps1 -DryRun
-.\fetch_lyrics.ps1 -Force          # overwrite existing .lrc files
-.\fetch_lyrics.ps1 -Filter "*Roselia*"  # only process matching files
-
-# Fix a single song's lyrics
-.\fix_one_lyric.ps1 -FilePattern "*若月亮还没来*" -Search "若月亮还没来"
-# Then pick the right SongId from output:
-.\fix_one_lyric.ps1 -FilePattern "*若月亮还没来*" -SongId 1974443814
-
-# Check library state
-sqlite3 Navidrome\Data\navidrome.db "select count(*) from media_file;"
-sqlite3 Navidrome\Data\navidrome.db "select count(*) from annotation where starred=1 and item_type='media_file';"
-```
-
-## Navidrome config notes
-
-- Port: 4533, bound to 0.0.0.0 (LAN accessible)
-- Scanner: auto every 6 hours
-- Auto-import m3u playlists enabled
-- Lyrics priority: `.lrc` first
-- Data folder: `Navidrome/Data/` (DB, cache, scanner logs)
+- P0 PowerShell/API blockers fixed: `music_api.ps1` is PS5.1/BOM-safe and provider direct-candidate fallback no longer leaks into unwanted Bilibili search.
+- P1-A complete: CI has a real `desktop-build` gate on a clean Windows runner.
+- P1-B implemented: release runtime is bundled, SQLite is included, `CARGO_MANIFEST_DIR` runtime dependency is removed, installed runtime uses a writable APP home, and local checkout builds preserve existing checkout data via runtime path discovery.
+- `desktop-build` produces an NSIS setup executable and uploads `musicserver-windows-installer`.
+- CI also performs an installed-app portability smoke with source runtime disabled, so a binary that secretly depends on the checkout must fail.
+- P2 repository cleanup applied: historical reports moved to `docs/archive/`, Chinese user guide moved to `docs/`, committed validation logs removed, personal Markdown-association scripts removed, and Tauri icons reduced to Windows release/source assets.
+- PR #10 remains the active integration PR. **Do not merge it until the user explicitly says to merge.**
