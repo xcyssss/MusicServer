@@ -81,7 +81,7 @@ jobs:
   desktop-build:
     name: desktop-build
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 50
 
     steps:
       - uses: actions/checkout@v4
@@ -128,6 +128,112 @@ jobs:
           $installers = @(Get-ChildItem -LiteralPath '.\src-tauri\target\release\bundle\nsis' -Filter '*.exe' -File -ErrorAction SilentlyContinue)
           if ($installers.Count -eq 0) { throw 'Tauri NSIS installer was not produced.' }
           $installers | ForEach-Object { Write-Host "installer -> $($_.FullName) ($($_.Length) bytes)" }
+
+      - name: Smoke installed APP without source runtime
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $BuildMarker = 'musicserver-listening-stats-v2'
+          $installer = Get-ChildItem -LiteralPath '.\src-tauri\target\release\bundle\nsis' -Filter '*.exe' -File | Select-Object -First 1
+          if (-not $installer) { throw 'Installer not found for smoke test.' }
+
+          $installDir = Join-Path $env:RUNNER_TEMP 'MusicServerInstalled'
+          $appHome = Join-Path $env:RUNNER_TEMP 'MusicServerAppHome'
+          Remove-Item -LiteralPath $installDir,$appHome -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $installDir,$appHome | Out-Null
+
+          $install = Start-Process -FilePath $installer.FullName -ArgumentList @('/S','/NS',("/D={0}" -f $installDir)) -Wait -PassThru
+          if ($install.ExitCode -ne 0) { throw "Silent NSIS install failed with exit code $($install.ExitCode)." }
+
+          $appExe = Get-ChildItem -LiteralPath $installDir -Filter '*.exe' -File -Recurse |
+            Where-Object { $_.Name -notmatch 'unins|uninstall' } |
+            Sort-Object Length -Descending |
+            Select-Object -First 1
+          if (-not $appExe) { throw "Installed MusicServer executable not found under $installDir" }
+          Write-Host "installed app -> $($appExe.FullName)"
+
+          # Prove that the installed APP does not fall back to the checkout that
+          # built it. Old CARGO_MANIFEST_DIR-based binaries fail this smoke.
+          $disabled = @()
+          foreach ($relative in @('start_musicserver_ui.ps1','music_api.ps1','MusicServer.Core.psm1','web')) {
+            $source = Join-Path $env:GITHUB_WORKSPACE $relative
+            if (Test-Path -LiteralPath $source) {
+              $target = $source + '.ci-disabled'
+              Move-Item -LiteralPath $source -Destination $target -Force
+              $disabled += [pscustomobject]@{ Source = $source; Target = $target }
+            }
+          }
+
+          $env:MUSICSERVER_APP_HOME = $appHome
+          $desktop = $null
+          try {
+            $desktop = Start-Process -FilePath $appExe.FullName -WorkingDirectory $installDir -PassThru
+
+            function Test-CurrentPair {
+              foreach ($pair in @(
+                [pscustomobject]@{ Ui = 8790; Api = 8787 },
+                [pscustomobject]@{ Ui = 8791; Api = 8788 },
+                [pscustomobject]@{ Ui = 8792; Api = 8789 }
+              )) {
+                try {
+                  $appJs = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$($pair.Ui)/app.js" -TimeoutSec 3
+                  $health = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$($pair.Api)/health" -TimeoutSec 3
+                  if ($appJs.StatusCode -eq 200 -and $health.StatusCode -eq 200 -and
+                      $appJs.Content.Contains($BuildMarker) -and $health.Content.Contains($BuildMarker)) {
+                    return $pair
+                  }
+                } catch {}
+              }
+              return $null
+            }
+
+            $pair = $null
+            $deadline = [DateTime]::UtcNow.AddSeconds(75)
+            do {
+              if ($desktop.HasExited) { throw "Installed APP exited early with code $($desktop.ExitCode)." }
+              $pair = Test-CurrentPair
+              if ($pair) { break }
+              Start-Sleep -Milliseconds 500
+            } while ([DateTime]::UtcNow -lt $deadline)
+            if (-not $pair) { throw 'Installed APP did not expose current UI/API within 75 seconds.' }
+
+            foreach ($required in @(
+              (Join-Path $appHome 'start_musicserver_ui.ps1'),
+              (Join-Path $appHome 'music_api.ps1'),
+              (Join-Path $appHome 'web\app.js'),
+              (Join-Path $appHome 'tools\sqlite3.exe'),
+              (Join-Path $appHome 'DailyMix_data\state\musicserver.db')
+            )) {
+              if (-not (Test-Path -LiteralPath $required)) { throw "Portable runtime smoke missing: $required" }
+            }
+            Write-Host "portable runtime ready -> $appHome"
+            Write-Host "service pair -> UI=$($pair.Ui) API=$($pair.Api)"
+          } finally {
+            if ($desktop -and -not $desktop.HasExited) {
+              & taskkill.exe /PID $desktop.Id /T /F | Out-Null
+            }
+            foreach ($item in $disabled) {
+              if (Test-Path -LiteralPath $item.Target) {
+                Move-Item -LiteralPath $item.Target -Destination $item.Source -Force
+              }
+            }
+          }
+
+          $deadline = [DateTime]::UtcNow.AddSeconds(20)
+          do {
+            $stillRunning = $false
+            foreach ($port in @(8787,8788,8789,8790,8791,8792)) {
+              try {
+                $client = New-Object Net.Sockets.TcpClient
+                try {
+                  if ($client.ConnectAsync('127.0.0.1',$port).Wait(250)) { $stillRunning = $true; break }
+                } finally { $client.Dispose() }
+              } catch {}
+            }
+            if (-not $stillRunning) { break }
+            Start-Sleep -Milliseconds 500
+          } while ([DateTime]::UtcNow -lt $deadline)
+          if ($stillRunning) { throw 'Tauri-owned services survived installed APP shutdown.' }
 
       - name: Upload Windows installer
         uses: actions/upload-artifact@v4
