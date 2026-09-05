@@ -1,7 +1,7 @@
 // MusicServer 桌面端
 // Tauri v2 壳：负责部署/拉起/停止本地 PowerShell runtime，并把窗口指向
 // start_musicserver_ui.ps1 提供的完整 Web UI。发布版从安装包 resources 读取
-// runtime，再同步到 %LOCALAPPDATA%\MusicServer；不依赖编译机源码路径。
+// runtime，再同步到独立的 LOCALAPPDATA 目录；不依赖编译机源码路径。
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -22,6 +22,7 @@ const FALLBACK_PAIRS: &[(u16, u16)] = &[(8791, 8788), (8792, 8789)];
 const BUILD_MARKER: &str = "musicserver-listening-stats-v2";
 const LAUNCHER: &str = "start_musicserver_ui.ps1";
 const APP_HOME_ENV: &str = "MUSICSERVER_APP_HOME";
+const PACKAGED_APP_HOME_DIR: &str = "com.musicserver.desktop";
 
 struct AppState {
     /// 由本应用拉起的 launcher 进程（若有）。
@@ -113,18 +114,40 @@ fn resolve_bundled_runtime(resource_dir: Option<PathBuf>) -> Option<PathBuf> {
     None
 }
 
-/// Stable writable application home. Users may override this explicitly for a
-/// migrated library, but no compile-time or source-tree path is ever embedded.
+/// A locally built release executable still lives below
+/// <checkout>/src-tauri/target/... . Discover that checkout from the executable
+/// location at runtime so existing development installs keep using their current
+/// Music/, Navidrome/ and state data without embedding a compile-time path.
+fn find_development_checkout() -> Option<PathBuf> {
+    let executable = env::current_exe().ok()?;
+    for ancestor in executable.ancestors() {
+        if has_launcher(ancestor)
+            && ancestor.join("web").is_dir()
+            && ancestor.join("src-tauri").is_dir()
+        {
+            return Some(ancestor.to_path_buf());
+        }
+    }
+    None
+}
+
+/// Stable writable application home. An explicit environment override wins.
+/// Local checkout builds retain the historical checkout root; installed builds
+/// use an identifier-scoped LOCALAPPDATA directory that cannot collide with the
+/// NSIS installation directory.
 fn resolve_app_home() -> PathBuf {
     if let Some(configured) = env::var_os(APP_HOME_ENV) {
         if !configured.is_empty() {
             return PathBuf::from(configured);
         }
     }
-    if let Some(local_app_data) = env::var_os("LOCALAPPDATA") {
-        return PathBuf::from(local_app_data).join("MusicServer");
+    if let Some(checkout) = find_development_checkout() {
+        return checkout;
     }
-    env::temp_dir().join("MusicServer")
+    if let Some(local_app_data) = env::var_os("LOCALAPPDATA") {
+        return PathBuf::from(local_app_data).join(PACKAGED_APP_HOME_DIR);
+    }
+    env::temp_dir().join(PACKAGED_APP_HOME_DIR)
 }
 
 fn copy_runtime_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
