@@ -304,28 +304,30 @@ function Resolve-DownloadCandidates {
 
     # NetEase direct download first when the track has a NetEase id: free songs
     # are served as full 320kbps audio without Bilibili's 412 risk control.
-    $neteaseCandidate = $null
-    if (-not $local) {
-        $neteaseCandidate = Get-NeteaseCandidate -Config $Config -Track $Track
-        if ($neteaseCandidate) { $candidates += $neteaseCandidate }
-    }
+    $neteaseCandidate = Get-NeteaseCandidate -Config $Config -Track $Track
+    if ($neteaseCandidate) { $candidates += $neteaseCandidate }
 
-    # Direct candidates are known resources. Do not spend another search request if download is currently blocked.
+    # Direct candidates are known resources. Resolving them must stay metadata-only:
+    # do not consume a search request, require yt-dlp, or claim a download probe yet.
     $direct = @(Get-DirectCandidates -Track $Track)
-    if ($direct.Count -gt 0) {
+    $hasDirectCandidates = ($direct.Count -gt 0)
+    if ($hasDirectCandidates) {
         if (-not (Test-ProviderRequestAvailable -Config $Config -Provider 'bilibili_download')) { return @() }
         $candidates += $direct
     }
 
-    # Always include a Bilibili search fallback: a NetEase candidate is a *try*
-    # (free songs only). Paid/VIP tracks have no usable NetEase url, and the
-    # search result is what lets the worker fall through instead of giving up.
-    if (-not (Test-ProviderRequestAvailable -Config $Config -Provider 'bilibili_search')) {
-        # Search circuit is open: still fine when we already hold a NetEase try.
-        if (-not $neteaseCandidate) { return @() }
+    # Search is a fallback only when no known direct Bilibili candidate exists.
+    # A NetEase candidate is still only a try (VIP/paid tracks can have no URL),
+    # so pair it with search when the search circuit is available.
+    if (-not $hasDirectCandidates) {
+        if (Test-ProviderRequestAvailable -Config $Config -Provider 'bilibili_search') {
+            $search = Search-BilibiliCandidates -Config $Config -Track $Track
+            if (-not $search.Blocked) { $candidates += $search.Candidates }
+        } elseif (-not $neteaseCandidate) {
+            return @()
+        }
     }
-    $search = Search-BilibiliCandidates -Config $Config -Track $Track
-    if (-not $search.Blocked) { $candidates += $search.Candidates }
+
     $downloadHealth = Get-ProviderHealth -Config $Config -Provider 'bilibili_download'
     $ranked = foreach ($candidate in $candidates) {
         if ($candidate.provider -like 'bilibili*' -and -not (Test-ProviderRequestAvailable -Config $Config -Provider 'bilibili_download')) { continue }
