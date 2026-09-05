@@ -1,4 +1,4 @@
-# MusicServer
+﻿# MusicServer
 
 个人音乐服务器：B 站音频下载 + Navidrome 流媒体 + 每日自动推荐 + Tauri 桌面端。
 
