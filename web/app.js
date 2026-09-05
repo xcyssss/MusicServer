@@ -162,6 +162,10 @@ function renderLibrary() {
   $('#local-count').textContent = state.library.length;
   if (!state.library.length) { list.innerHTML = '<div class="empty-state">本地曲库还没有歌曲。</div>'; return; }
   if (!visible.length) { list.innerHTML = '<div class="empty-state">没有找到匹配的歌曲。</div>'; return; }
+  const signature = visible.map((item) => `${keyOf(item)}|${state.currentKey === keyOf(item)}|${item.starred}|${item.source}`).join('\x00');
+  if (list._sig === signature && !list._dirty) return;
+  list._sig = signature;
+  list._dirty = false;
   list.innerHTML = visible.map((item) => {
     const playing = state.currentKey === keyOf(item);
     const meta = [item.artist || '未知艺术家', item.album || '未知专辑'].filter(Boolean).join(' · ');
@@ -185,6 +189,9 @@ function renderRecommendations() {
   $('#wanted-count').textContent = state.items.filter((item) => item.wanted?.state && item.wanted.state !== 'LOCAL').length;
   $('#queue-count').textContent = state.items.filter((item) => item.wanted?.state && item.wanted.state !== 'LOCAL').length;
   if (!state.items.length) { list.innerHTML = '<div class="empty-state">今天还没有推荐，稍后再来看看。</div>'; return; }
+  const signature = state.items.map((item) => `${item.track_id}|${item.liked}|${itemStatus(item)}|${state.currentKey === keyOf(item)}`).join('\x00');
+  if (list._sig === signature) return;
+  list._sig = signature;
   list.innerHTML = state.items.map((item) => {
     const status = itemStatus(item); const playing = state.currentKey === keyOf(item);
     return `<article class="track-row ${playing ? 'playing' : ''}" data-track-id="${escapeHtml(item.track_id)}">
@@ -233,7 +240,7 @@ function listeningCollection() {
 function playbackCollection() {
   if (state.currentCollection === 'recommendations') return state.items;
   if (state.currentCollection === 'listening') return listeningCollection();
-  return filteredLibrary();
+  return sortLibraryVisible(filteredLibrary());
 }
 
 function updateNavigationButtons() {
@@ -465,7 +472,7 @@ async function playItem(item, collection = 'library') {
   if (!source) { showToast('这首歌暂时没有可用试听源'); return; }
   const sourceUrl = new URL(source, window.location.href).href;
   const isNewTrack = state.currentKey !== key || audio.src !== sourceUrl || audio.ended;
-  state.currentKey = key; state.currentCollection = collection; updatePlayer(item); render();
+  state.currentKey = key; state.currentCollection = collection; updatePlayer(item); $('#library-list')._dirty = true; $('#recommendation-list')._dirty = true; render();
   const pt = $('#play-toggle');
   if (pt) pt.disabled = false;
   renderPlayerArt(item);
@@ -675,9 +682,26 @@ document.querySelectorAll('.mode-button').forEach((button) => button.addEventLis
 }));
 $('#shuffle-button').addEventListener('click', reshuffleLibrary);
 $('#refresh-button').addEventListener('click', () => { loadLibrary(); loadRecommendations(); loadListening(); loadProviderStatus(); });
-$('#listening-refresh').addEventListener('click', () => loadListening());
 $('#rediscover-button').addEventListener('click', () => loadListening());
 $('#random-listening-button').addEventListener('click', playRandomListening);
+
+// Listening sidebar collapse / expand.
+function setListeningCollapsed(collapsed) {
+  const sb = $('#listening-sidebar');
+  if (!sb) return;
+  sb.classList.toggle('collapsed', collapsed);
+  sb.classList.toggle('expanded', !collapsed);
+  const handle = $('#listening-handle');
+  if (handle) handle.hidden = !collapsed;
+  document.querySelector('.app-shell').classList.toggle('listening-collapsed', collapsed);
+  localStorage.setItem('musicserver-listening-collapsed', collapsed ? '1' : '0');
+}
+
+$('#listening-collapse')?.addEventListener('click', () => setListeningCollapsed(true));
+$('#listening-handle')?.addEventListener('click', () => {
+  setListeningCollapsed(false);
+  if (!state.listening.loaded) loadListening();
+});
 $('#play-first').addEventListener('click', () => state.items[0] && playItem(state.items[0], 'recommendations'));
 $('#previous-button').addEventListener('click', previousItem);
 $('#next-button').addEventListener('click', nextItem);
@@ -777,3 +801,34 @@ $('#audio-player').addEventListener('pause', () => { setPlayIcon(false); render(
 
 renderMode(); loadLibrary(); loadRecommendations(); loadListening(); loadProviderStatus();
 setInterval(() => { loadLibrary(true); loadRecommendations(true); loadProviderStatus(); }, 15000);
+
+// Restore listening sidebar collapse preference.
+try {
+  if (localStorage.getItem('musicserver-listening-collapsed') === '1') { setListeningCollapsed(true); }
+} catch {}
+
+// Scroll forwarding: when the mouse wheel is on a non-scrollable area inside
+// .recommendation-panel or .library-panel, forward the scroll to the panel's
+// internal scrollable track-list.  This makes the hero card, stats row, and
+// section headings scrollable without requiring the user to hover exactly on
+// the thin track-list area.
+function forwardScroll(event) {
+  const panel = event.currentTarget;
+  const scroller = panel.querySelector('.track-list');
+  if (!scroller) return;
+  // If the scroller itself can still scroll, let the browser handle it normally
+  // (native overflow-y:auto already works when hovering directly on it).
+  const maxScroll = scroller.scrollHeight - scroller.clientHeight;
+  if (maxScroll <= 0) return;
+  const atTop = scroller.scrollTop <= 0 && event.deltaY < 0;
+  const atBottom = scroller.scrollTop >= maxScroll && event.deltaY > 0;
+  if (!atTop && !atBottom) {
+    scroller.scrollTop += event.deltaY;
+    event.preventDefault();
+  }
+}
+
+const recPanel = $('#recommendations');
+if (recPanel) recPanel.addEventListener('wheel', forwardScroll, { passive: false });
+const libPanel = $('#library');
+if (libPanel) libPanel.addEventListener('wheel', forwardScroll, { passive: false });

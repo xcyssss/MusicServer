@@ -14,12 +14,35 @@
         <nav class="nav" aria-label="主导航">
           <a class="nav-item" href="#library"><span>♫</span> 音乐库 <b id="library-nav-count">0</b></a>
           <a class="nav-item active" href="#recommendations"><span>✦</span> 今日推荐</a>
-          <a class="nav-item" href="#listening"><span>◒</span> 我的常听</a>
           <a class="nav-item" href="#wanted"><span>♥</span> Wanted Queue <b id="queue-count">0</b></a>
         </nav>
         <div class="sidebar-footer">
           <div class="health-label"><span class="status-dot healthy"></span>服务在线</div>
           <p>先试听，再决定是否下载。你的红心会立即进入后台队列。</p>
+        </div>
+      </aside>
+
+      <aside id="listening-sidebar" class="listening-sidebar expanded" aria-label="我的常听">
+        <button id="listening-collapse" class="listening-collapse" type="button" aria-label="收起常听侧栏" title="收起">‹</button>
+        <div class="listening-content">
+          <div class="listening-header">
+            <span class="section-kicker">YOUR LISTENING</span>
+            <h2>我的常听</h2>
+          </div>
+          <div id="most-played-list" class="most-played-list" aria-live="polite"></div>
+          <div class="rediscover-block">
+            <div class="rediscover-heading">
+              <span class="section-kicker">REDISCOVER</span>
+              <h3>换点口味</h3>
+              <button id="rediscover-button" class="text-button" type="button">换一批</button>
+            </div>
+            <div id="rediscover-list" class="rediscover-list" aria-live="polite"></div>
+          </div>
+          <button id="random-listening-button" class="secondary-button" type="button">✦ 随机来一首</button>
+        </div>
+        <div id="listening-handle" class="listening-handle" hidden>
+          <span class="handle-icon">›</span>
+          <span class="handle-text">常听</span>
         </div>
       </aside>
 
@@ -71,20 +94,6 @@
                 <div class="stat-card"><span class="stat-label">已喜欢</span><strong id="liked-count">—</strong><small>首</small></div>
                 <div class="stat-card"><span class="stat-label">本地曲库</span><strong id="local-count">—</strong><small>首</small></div>
                 <div class="stat-card accent"><span class="stat-label">下载队列</span><strong id="wanted-count">—</strong><small>首</small></div>
-              </section>
-
-              <section id="listening" class="listening-section" aria-label="我的常听">
-                <div class="section-heading listening-heading">
-                  <div><span class="section-kicker">YOUR LISTENING</span><h2>我的常听</h2></div>
-                  <button id="listening-refresh" class="text-button" type="button">↻ 刷新</button>
-                </div>
-                <div id="most-played-list" class="most-played-list" aria-live="polite"></div>
-                <div class="rediscover-heading">
-                  <div><span class="section-kicker">REDISCOVER</span><h3>换点口味</h3></div>
-                  <button id="rediscover-button" class="text-button" type="button">换一批</button>
-                </div>
-                <div id="rediscover-list" class="rediscover-list" aria-live="polite"></div>
-                <button id="random-listening-button" class="secondary-button" type="button">✦ 随机来一首</button>
               </section>
 
               <section class="recommendation-section">

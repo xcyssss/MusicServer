@@ -169,7 +169,7 @@ Describe 'MusicServer web UI safeguards' {
         $css = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\web\styles.css') -Raw
         $api = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\music_api.ps1') -Raw
 
-        $html | Should Match 'id="listening"'
+        $html | Should Match 'id="listening-sidebar"'
         $html | Should Match 'id="most-played-list"'
         $html | Should Match 'id="rediscover-list"'
         $html | Should Match 'id="random-listening-button"'
