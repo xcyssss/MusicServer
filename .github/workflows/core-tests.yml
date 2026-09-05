@@ -9,19 +9,19 @@ on:
       - '**/*.ps1'
       - '**/*.psm1'
       - 'web/**'
+      - 'src-tauri/**'
       - '.github/workflows/core-tests.yml'
   pull_request:
     paths:
       - '**/*.ps1'
       - '**/*.psm1'
       - 'web/**'
+      - 'src-tauri/**'
       - '.github/workflows/core-tests.yml'
 
-# Suites are split across two parallel jobs because a serial run exceeds
-# timeout-minutes on Windows PowerShell 5.1 (measured locally: ApiTransaction
-# ~334s, ApiRuntime ~152s, Core+Database+V2+WorkerConcurrency ~480s).
-# UiProxyRuntime is kept first in the API group as a cheap live smoke test for
-# the browser-facing 8790 -> API 8787 request boundary.
+# PowerShell suites stay split across two jobs because a serial run exceeds
+# the practical Windows PowerShell 5.1 budget. Desktop compilation is a third,
+# independent gate so a green Pester suite cannot mask a broken Rust/Tauri app.
 #
 # Suites tagged RequiresLocalRuntime assert against a live MusicServer API and
 # this machine's library / lyrics_report.csv, so they are excluded here and must
@@ -79,3 +79,34 @@ jobs:
             }
             exit 1
           }
+
+  desktop-build:
+    name: desktop-build
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show desktop toolchain
+        shell: powershell
+        run: |
+          rustc --version
+          cargo --version
+          node --version
+          npm --version
+
+      - name: Rust formatting gate
+        working-directory: src-tauri
+        shell: powershell
+        run: cargo fmt --check
+
+      - name: Cargo compile gate
+        working-directory: src-tauri
+        shell: powershell
+        run: cargo check --locked
+
+      - name: Tauri production compile gate
+        working-directory: src-tauri
+        shell: powershell
+        run: npx --yes @tauri-apps/cli@2 build --no-bundle
