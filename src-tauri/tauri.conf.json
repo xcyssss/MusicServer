@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.musicserver.desktop",
   "build": {
-    "beforeDevCommand": "",
+    "beforeDevCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/prepare_tauri_runtime.ps1",
     "devUrl": "http://127.0.0.1:8790",
-    "beforeBuildCommand": "",
+    "beforeBuildCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/prepare_tauri_runtime.ps1",
     "frontendDist": "../web"
   },
   "app": {
@@ -30,6 +30,9 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": [
+      "resources/runtime/**/*"
+    ],
     "icon": [
       "icons/icon.ico"
     ],
