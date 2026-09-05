@@ -1,158 +1,149 @@
 ﻿# MusicServer
 
-个人音乐服务器：B 站音频下载 + Navidrome 流媒体 + 每日自动推荐 + Tauri 桌面端。
+个人音乐服务器：本地音乐库 + 每日推荐 + Wanted 下载队列 + 歌词 + 播放统计，主客户端为 **Tauri v2 Windows 桌面 APP**。
 
-## 架构
+## 当前架构
 
+```text
+Tauri APP / WebView2
+        │
+        ▼
+127.0.0.1:8790  start_musicserver_ui.ps1
+        │  静态 UI + /api/* 代理
+        ▼
+127.0.0.1:8787  music_api.ps1
+        │
+        ├─ SQLite 状态库（唯一运行时真源）
+        ├─ Music/ 本地音乐
+        ├─ Wanted worker
+        └─ Navidrome / yt-dlp / ffmpeg 等本机集成
 ```
-┌─ Tauri 桌面端 (WebView2) ─┐    ┌─ 音乐服务器 ──────────────┐
-│                            │    │                            │
-│  WebView → 127.0.0.1:8790  │───→│  start_musicserver_ui.ps1  │
-│  (UI 代理层：歌词门控、     │    │    ├─ API (8787)           │
-│   Range seek、心跳、库管理)  │    │    ├─ Worker (后台下载)    │
-│                            │    │    └─ Watchdog (守护进程)   │
-└────────────────────────────┘    └────────────────────────────┘
-                                           │
-                                    ┌──────┴──────┐
-                                    │  Navidrome   │
-                                    │  (4533)      │
-                                    └─────────────┘
-```
 
-### 核心组件
+`web/` 是 Tauri WebView2 加载的共享 UI，不是另一套独立产品。桌面端代码位于 `src-tauri/`。
 
-| 组件 | 端口 | 职责 |
-|------|------|------|
-| `music_api.ps1` | 8787 | JSON API（推荐/库/下载/歌词/播放记录） |
-| `start_musicserver_ui.ps1` | 8790 | UI 代理层 + WebView 静态文件服务 |
-| `wanted_worker.ps1` | — | 后台下载 worker（点赞→下载→入库） |
-| `watchdog_ui.ps1` | — | UI 进程守护（心跳检测，卡死自动重启） |
-| Navidrome | 4533 | 音乐流媒体服务器（Subsonic 协议） |
+## Windows 桌面版
 
-## 快速开始
+### 从源码构建
 
-### 环境要求
-
-- **Windows 10/11** + PowerShell 5.1（系统自带）
-- **Navidrome** v0.63.2+（放在 `Navidrome/` 目录）
-- **yt-dlp**（B 站下载器）
-- **ffmpeg/ffprobe**（音频处理）
-- **sqlite3**（数据库查询）
-
-### 安装步骤
+需要 Rust stable、Node/npm 与 Windows WebView2 构建环境：
 
 ```powershell
-cd E:\Project\MusicServer
-
-# 1. 安装 yt-dlp（用 conda 或 pip）
-pip install yt-dlp
-
-# 2. 安装 sqlite3（可选，CI 用 choco install sqlite）
-# 本地通常已有，Navidrome 内置了 SQLite
-
-# 3. 下载 Navidrome
-# 从 https://github.com/navidrome/navidrome/releases 下载 Windows 版
-# 解压到 Navidrome/bin/navidrome.exe
-
-# 4. 准备 B 站 cookies（用于下载）
-# 浏览器登录 bilibili.com，导出 cookies.txt 放在项目根目录
-
-# 5. 启动
-.\start_musicserver_ui.ps1    # 启动 UI + API + Worker
-# 或双击 start_musicserver_ui.bat
-```
-
-### 桌面端（Tauri）
-
-```powershell
-# 需要先安装 Rust
-rustup install stable
-
-# 构建
 cd src-tauri
-cargo tauri build
-
-# 生成的 exe 在 target/release/musicserver-desktop.exe
+cargo fmt --check
+cargo check --locked
+npx --yes @tauri-apps/cli@2 build --bundles nsis
 ```
 
-## 日常使用
+构建前 `scripts/prepare_tauri_runtime.ps1` 会自动生成 `src-tauri/resources/runtime/`，收集桌面 APP 真正需要的 PowerShell runtime、`web/` 和 `sqlite3.exe`。生成目录和 Rust `target/` 均不提交到 Git。
 
-### 自动推荐（每日定时任务）
+NSIS 安装包位于：
 
-| 任务 | 时间 | 功能 |
-|------|------|------|
-| `MusicServer_DailyCleanup` | 06:30 | 清理未红心的推荐歌，更新黑名单 |
-| `MusicServer_DailyRecommend` | 07:00 | 生成 30 首推荐，下载、抓歌词 |
-
-### 手动操作
-
-```powershell
-# 下载单首歌
-.\add_song.ps1    # 粘贴 BV 号
-
-# 批量抓歌词
-.\fetch_lyrics.ps1 -Force          # 重抓所有歌词
-.\fetch_lyrics.ps1 -Filter "*Roselia*"  # 只抓特定歌
-
-# 修复单首歌词
-.\fix_one_lyric.ps1 -FilePattern "*若月亮还没来*" -Search "若月亮还没来"
-
-# 查看音乐库状态
-sqlite3 Navidrome\Data\navidrome.db "select count(*) from media_file;"
+```text
+src-tauri/target/release/bundle/nsis/*.exe
 ```
 
-## 项目结构
+### 可移植运行时
 
+发布版 **不再依赖 `CARGO_MANIFEST_DIR` 或编译机源码路径**。安装后的 APP 从 bundle resources 读取 runtime，并同步到可写目录：
+
+```text
+%LOCALAPPDATA%\com.musicserver.desktop\
 ```
+
+可通过环境变量 `MUSICSERVER_APP_HOME` 覆盖该位置。为了不破坏现有开发机数据，从源码目录本地构建并直接运行的 EXE 会在运行时识别 checkout，并继续使用该 checkout 下已有的 `Music/`、`DailyMix_data/`、`Navidrome/` 等数据；这里不包含任何编译时绝对路径。
+
+安装包内包含 SQLite，因此 UI/API 和状态库启动不要求用户另装 sqlite3。Bilibili 下载、转码和 Navidrome 集成仍分别需要 yt-dlp、ffmpeg/ffprobe、Navidrome；这些大型/外部组件不塞进桌面 runtime。
+
+## 开发环境
+
+项目仍以 Windows PowerShell 5.1 为正式脚本兼容基线。常用外部工具可从 PATH 找到，也可用环境变量覆盖：
+
+```text
+MUSICSERVER_SQLITE
+MUSICSERVER_YTDLP
+MUSICSERVER_FFMPEG
+MUSICSERVER_FFPROBE
+MUSICSERVER_APP_HOME
+```
+
+含中文的 `.ps1` / `.psm1` 必须保持 UTF-8 BOM；仓库 `.editorconfig` 已固定这一规则。
+
+## 核心目录
+
+```text
 MusicServer/
-├── web/                          # Web UI（WebView2 / 桌面端）
-│   ├── index.html                # 主页面
-│   ├── app.js                    # 前端逻辑（播放、库、推荐、常听侧栏）
-│   └── styles.css                # 样式（暗色主题、三栏布局）
-├── src-tauri/                    # Tauri v2 桌面端
-│   ├── src/main.rs               # Rust 后端（服务管理、窗口加载）
-│   ├── tauri.conf.json           # Tauri 配置
-│   └── Cargo.toml                # Rust 依赖
-├── music_api.ps1                 # HTTP API 服务器（v2）
-├── start_musicserver_ui.ps1      # UI 启动器（代理 + 文件服务 + Worker 管理）
-├── wanted_worker.ps1             # 后台下载 worker
-├── MusicServer.Core.psm1         # 核心工具函数
-├── MusicServer.Database.psm1     # SQLite 数据库层
-├── MusicServer.State.psm1        # 业务状态管理
-├── MusicServer.Providers.psm1    # 下载渠道（网易云 + B站）
-├── fetch_lyrics.ps1              # 歌词批量抓取（网易云）
-├── daily_recommend.ps1           # 每日推荐管道
-├── daily_cleanup.ps1             # 每日清理
-├── Music/                        # 本地音乐库（.mp3 + .lrc）
-│   └── DailyMix/                 # 每日推荐（自动清理）
-├── Navidrome/                    # Navidrome 服务
-│   ├── bin/navidrome.exe
-│   ├── navidrome.toml            # 配置（端口 4533、音乐目录、ffmpeg 路径）
-│   └── Data/navidrome.db         # 数据库
-└── tests/                        # 测试套件
-    └── MusicServer.*.Tests.ps1   # Pester 3.4（PS 5.1 兼容）
+├─ .github/workflows/             # CI
+├─ docs/                          # 当前说明 + 历史审计归档
+├─ scripts/                       # 构建/维护脚本
+├─ src-tauri/                     # Tauri v2 Windows shell
+│  ├─ src/main.rs                 # runtime 部署、服务生命周期、窗口导航
+│  ├─ resources/runtime/          # 构建生成；Git 仅保留占位文件
+│  ├─ icons/                      # Windows 构建所需图标
+│  ├─ Cargo.toml / Cargo.lock
+│  └─ tauri.conf.json
+├─ web/                           # WebView2 UI
+├─ tests/                         # Pester + 桌面 smoke
+├─ MusicServer.Core.psm1
+├─ MusicServer.Database.psm1
+├─ MusicServer.State.psm1
+├─ MusicServer.Providers.psm1
+├─ music_api.ps1
+├─ start_musicserver_ui.ps1
+└─ wanted_worker.ps1
 ```
 
-## 数据流
+历史架构审计和加固报告已移到 [`docs/archive/`](docs/archive/)。中文详细使用说明见 [`docs/USER_GUIDE.zh-CN.md`](docs/USER_GUIDE.zh-CN.md)。
 
-```
-点赞歌曲 → wanted_queue → Worker 下载 → Music/ → Navidrome 扫描 → UI 显示
-                                                              ↓
-                                                        歌词匹配（fetch_lyrics）
-```
+## 启动与日常操作
 
-## 测试
+源码 checkout 中可直接：
 
 ```powershell
-Import-Module Pester -RequiredVersion 3.4.0 -Force
-Invoke-Pester .\tests\MusicServer.Web.Tests.ps1 -PassThru
+.\start_musicserver_ui.ps1
 ```
 
-CI 在 `.github/workflows/core-tests.yml`，分为 `state` 和 `api` 两个并行 job。
+常用维护：
 
-## 关键技术点
+```powershell
+# 推荐
+.\daily_recommend.ps1 -DryRun
+.\daily_recommend.ps1
 
-- **PowerShell 5.1 UTF-8 BOM**：所有 `.ps1` 文件必须有 UTF-8 BOM，否则中文字符会被 ANSI 编码读取导致乱码
-- **HTTP Range 支持**：音频流支持 Range 请求（206 Partial Content），浏览器 `<audio>` 元素才能 seek
-- **Canonical 权威匹配**：歌词抓取优先使用数据库中已确认的网易云 song ID，避免同名不同歌的错配
-- **UI 自动停机**：带 `-NoBrowser` 启动时不自动停机；不带时，无浏览器心跳 90 秒后自动关闭
+# 清理
+.\daily_cleanup.ps1 -DryRun
+
+# 歌词
+.\fetch_lyrics.ps1 -DryRun
+.\fetch_lyrics.ps1 -Force
+
+# 单曲歌词修复
+.\fix_one_lyric.ps1 -FilePattern "*歌曲名*" -Search "歌曲名"
+```
+
+## CI 与发布门禁
+
+`.github/workflows/core-tests.yml` 在 `windows-latest` 上运行三个独立 gate：
+
+| Job | 验证内容 |
+|---|---|
+| `state` | Core / Database / V2 / WorkerConcurrency / Recommendation / LegacyRetirement / Listening / Web / Tauri Pester |
+| `api` | UiProxyRuntime / ApiTransaction / ApiRuntime Pester |
+| `desktop-build` | `cargo fmt --check`、`cargo check --locked`、真实 NSIS 构建、安装包脱离源码 runtime 启动 smoke、artifact 上传 |
+
+`desktop-build` 不只检查源码字符串：它会在干净 GitHub runner 上真正生成安装 EXE，然后静默安装到临时目录，临时禁用 checkout 中的 launcher/API/web，再启动已安装 APP。只有 bundle runtime 能自行部署、UI/API build marker 正常、SQLite 状态库建立且 APP 退出后所拥有的服务树全部停止，才算通过。
+
+成功构建会上传名为：
+
+```text
+musicserver-windows-installer
+```
+
+的 GitHub Actions artifact。
+
+## 运行规则
+
+- SQLite 是 MusicServer 唯一运行时状态真源；JSON 仅用于迁移输入、备份或兼容输出。
+- 不要在 Navidrome 运行时直接写其 live DB。
+- `artifacts/`、日志、音乐、cookies、本机数据库和生成的 Tauri runtime 都不应提交。
+- `web/` 的 UI 改动必须以 Tauri APP 实际行为作为最终验收，不以浏览器单独可用作为桌面验收。
+- 下载侧遇到 Bilibili 风控时遵守 Provider health/circuit-breaker 逻辑，不做无界重试。
