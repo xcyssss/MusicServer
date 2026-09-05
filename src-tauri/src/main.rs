@@ -1,12 +1,15 @@
 // MusicServer 桌面端
-// Tauri v2 壳：负责拉起/停止本地 PowerShell 后端服务，并把窗口指向
-// start_musicserver_ui.ps1 提供的完整 Web UI。正常情况下使用 8790/8787；
-// 如果旧版服务占用了默认端口，则使用隔离端口，避免桌面 APP 静默加载旧资源。
+// Tauri v2 壳：负责部署/拉起/停止本地 PowerShell runtime，并把窗口指向
+// start_musicserver_ui.ps1 提供的完整 Web UI。发布版从安装包 resources 读取
+// runtime，再同步到 %LOCALAPPDATA%\MusicServer；不依赖编译机源码路径。
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::env;
+use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -17,10 +20,8 @@ const DEFAULT_UI_PORT: u16 = 8790;
 const DEFAULT_API_PORT: u16 = 8787;
 const FALLBACK_PAIRS: &[(u16, u16)] = &[(8791, 8788), (8792, 8789)];
 const BUILD_MARKER: &str = "musicserver-listening-stats-v2";
-
-/// 启动器脚本（与桌面快捷方式一致，但 -NoBrowser 避免弹浏览器窗口；
-/// launcher 的 -NoBrowser 分支不会自动停机，由本应用退出时主动停止）。
 const LAUNCHER: &str = "start_musicserver_ui.ps1";
+const APP_HOME_ENV: &str = "MUSICSERVER_APP_HOME";
 
 struct AppState {
     /// 由本应用拉起的 launcher 进程（若有）。
@@ -71,18 +72,108 @@ fn service_is_current(ui_port: u16, api_port: u16) -> bool {
     http_contains(ui_port, "/app.js", BUILD_MARKER) && api_is_current(api_port)
 }
 
+fn has_launcher(path: &Path) -> bool {
+    path.join(LAUNCHER).is_file()
+}
+
+/// Tauri bundle resources preserve their relative `resources/runtime` path.
+/// Keep a second candidate for compatibility with alternate Tauri resource
+/// layouts and a debug-only working-directory fallback for `tauri dev`.
+fn resolve_bundled_runtime(resource_dir: Option<PathBuf>) -> Option<PathBuf> {
+    if let Some(resource_dir) = resource_dir {
+        let candidates = [
+            resource_dir.join("resources").join("runtime"),
+            resource_dir.join("runtime"),
+        ];
+        for candidate in candidates {
+            if has_launcher(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    {
+        if let Ok(cwd) = env::current_dir() {
+            let candidates = [
+                cwd.join("resources").join("runtime"),
+                cwd.join("src-tauri").join("resources").join("runtime"),
+                cwd.parent()
+                    .map(|p| p.join("src-tauri").join("resources").join("runtime"))
+                    .unwrap_or_default(),
+            ];
+            for candidate in candidates {
+                if has_launcher(&candidate) {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+/// Stable writable application home. Users may override this explicitly for a
+/// migrated library, but no compile-time or source-tree path is ever embedded.
+fn resolve_app_home() -> PathBuf {
+    if let Some(configured) = env::var_os(APP_HOME_ENV) {
+        if !configured.is_empty() {
+            return PathBuf::from(configured);
+        }
+    }
+    if let Some(local_app_data) = env::var_os("LOCALAPPDATA") {
+        return PathBuf::from(local_app_data).join("MusicServer");
+    }
+    env::temp_dir().join("MusicServer")
+}
+
+fn copy_runtime_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(destination)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        if entry.file_name() == ".gitkeep" {
+            continue;
+        }
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_runtime_tree(&source_path, &destination_path)?;
+        } else {
+            if let Some(parent) = destination_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(&source_path, &destination_path)?;
+        }
+    }
+    Ok(())
+}
+
+/// Synchronize only packaged runtime files into the writable APP home. Existing
+/// Music/, DailyMix_data/, Navidrome/, logs/ and user files are not deleted.
+fn stage_runtime(bundle_runtime: &Path, app_home: &Path) -> std::io::Result<()> {
+    copy_runtime_tree(bundle_runtime, app_home)?;
+    if !has_launcher(app_home) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "staged MusicServer launcher is missing",
+        ));
+    }
+    Ok(())
+}
+
 /// 拉起指定端口的 launcher 并返回子进程。失败返回 None（调用方会继续尝试）。
-fn spawn_launcher(root: &str, ui_port: u16, api_port: u16) -> Option<Child> {
-    let launcher_path = std::path::Path::new(root).join(LAUNCHER);
+fn spawn_launcher(root: &Path, ui_port: u16, api_port: u16) -> Option<Child> {
+    let launcher_path = root.join(LAUNCHER);
     if !launcher_path.exists() {
         eprintln!("launcher not found: {}", launcher_path.display());
         return None;
     }
     let ui_prefix = endpoint_url(ui_port);
     let api_prefix = endpoint_url(api_port);
-    // powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass
-    // -File <root>\start_musicserver_ui.ps1 -ApiPrefix <api> -UiPrefix <ui> -NoBrowser
-    let child = Command::new("powershell.exe")
+    let sqlite_path = root.join("tools").join("sqlite3.exe");
+
+    let mut command = Command::new("powershell.exe");
+    command
         .args([
             "-NoProfile",
             "-WindowStyle",
@@ -100,10 +191,13 @@ fn spawn_launcher(root: &str, ui_port: u16, api_port: u16) -> Option<Child> {
         .current_dir(root)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok();
-    child
+        .stderr(Stdio::null());
+
+    if sqlite_path.is_file() {
+        command.env("MUSICSERVER_SQLITE", sqlite_path);
+    }
+
+    command.spawn().ok()
 }
 
 fn stop_owned_launcher(state: &AppState) {
@@ -113,11 +207,13 @@ fn stop_owned_launcher(state: &AppState) {
     }
 }
 
-/// 确保当前版本的 UI/API 可用。旧版服务只要缺少 build marker，就不会被
-/// 静默复用；桌面 APP 会在隔离端口拉起自己的服务树。
-fn ensure_ui_ready(root: &str, state: &AppState) -> Option<String> {
+/// 确保当前版本的 UI/API 可用。若已有当前版本服务则直接复用，不触碰
+/// runtime 文件；只有需要启动自己的服务树时才把 bundle runtime 同步到
+/// APP home。旧版服务占用默认端口时使用隔离端口。
+fn ensure_ui_ready(bundle_runtime: &Path, app_home: &Path, state: &AppState) -> Option<String> {
     let mut pairs = vec![(DEFAULT_UI_PORT, DEFAULT_API_PORT)];
     pairs.extend_from_slice(FALLBACK_PAIRS);
+    let mut runtime_staged = false;
 
     for (ui_port, api_port) in pairs {
         if service_is_current(ui_port, api_port) {
@@ -130,9 +226,17 @@ fn ensure_ui_ready(root: &str, state: &AppState) -> Option<String> {
             continue;
         }
 
+        if !runtime_staged {
+            if let Err(error) = stage_runtime(bundle_runtime, app_home) {
+                eprintln!("failed to stage MusicServer runtime: {error}");
+                return None;
+            }
+            runtime_staged = true;
+        }
+
         let mut guard = state.child.lock().unwrap();
         if guard.is_none() {
-            *guard = spawn_launcher(root, ui_port, api_port);
+            *guard = spawn_launcher(app_home, ui_port, api_port);
         }
         drop(guard);
 
@@ -150,25 +254,20 @@ fn ensure_ui_ready(root: &str, state: &AppState) -> Option<String> {
 }
 
 fn main() {
-    // 项目根：src-tauri 的上一级（E:\Project\MusicServer）
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let root = std::path::Path::new(manifest_dir)
-        .parent()
-        .and_then(|p| p.to_str())
-        .unwrap_or(".")
-        .to_string();
-
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(AppState {
             child: Mutex::new(None),
         })
-        .setup(move |app| {
+        .setup(|app| {
             let state: tauri::State<AppState> = app.state();
+            let resource_dir = app.path().resource_dir().ok();
+            let bundle_runtime = resolve_bundled_runtime(resource_dir);
+            let app_home = resolve_app_home();
 
-            // 先拉起/确认服务，再让主窗口跳转到 UI。首次启动可能稍慢，
-            // 窗口初始内容用本地 loading 页避免白屏。
-            let ui_url = ensure_ui_ready(&root, &state);
+            let ui_url = bundle_runtime
+                .as_deref()
+                .and_then(|runtime| ensure_ui_ready(runtime, &app_home, &state));
 
             if let Some(window) = app.get_webview_window("main") {
                 if let Some(ui_url) = ui_url {
@@ -176,8 +275,9 @@ fn main() {
                         ui_url.parse::<tauri::Url>().expect("invalid ui url"),
                     );
                 } else {
+                    let app_home_text = app_home.to_string_lossy().replace('\\', "\\\\");
                     let _ = window.eval(&format!(
-                        "document.body.innerHTML='<div style=\"font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;background:#0b0f14;color:#f4f7fb;\">MusicServer 服务启动超时，请手动运行 start_musicserver_ui.bat</div>';"
+                        "document.body.innerHTML='<div style=\"font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;background:#0b0f14;color:#f4f7fb;text-align:center;padding:32px;\">MusicServer runtime 启动失败。<br><small style=\"opacity:.65\">APP home: {app_home_text}</small></div>';"
                     ));
                 }
             }
@@ -190,7 +290,6 @@ fn main() {
                 let state: tauri::State<AppState> = app.state();
                 let mut guard = state.child.lock().unwrap();
                 if let Some(child) = guard.take() {
-                    // 结束整个 launcher 进程树（powershell 会派生 music_api）
                     let _ = kill_process_tree(child.id());
                 }
             }
@@ -201,7 +300,6 @@ fn main() {
 
 #[cfg(windows)]
 fn kill_process_tree(pid: u32) -> std::io::Result<()> {
-    // taskkill /PID <pid> /T /F 结束进程树
     Command::new("taskkill")
         .args(["/PID", &pid.to_string(), "/T", "/F"])
         .stdin(Stdio::null())
@@ -214,7 +312,6 @@ fn kill_process_tree(pid: u32) -> std::io::Result<()> {
 
 #[cfg(not(windows))]
 fn kill_process_tree(pid: u32) -> std::io::Result<()> {
-    // 非 Windows 直接杀进程（本应用面向 Windows，保留占位）
     let _ = pid;
     Ok(())
 }
