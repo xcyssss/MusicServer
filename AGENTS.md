@@ -22,6 +22,7 @@ MusicServer is a Windows-first local music application. The **Tauri v2 desktop A
 - `MusicServer.DesiredStateWorker.psm1` — desired-state worker helpers
 - `music_api.ps1` — JSON HTTP API, normally `127.0.0.1:8787`
 - `start_musicserver_ui.ps1` — static WebView UI + `/api/*` proxy, normally `127.0.0.1:8790`
+- `watchdog_ui.ps1` — external UI heartbeat watchdog/restart helper
 - `wanted_worker.ps1` — asynchronous Wanted Queue downloader
 - `web/` — shared desktop WebView2 UI
 - `src-tauri/` — Tauri desktop shell, runtime deployment, lifecycle and packaging
@@ -51,12 +52,13 @@ clean checkout
   -> cargo/Tauri NSIS build
   -> installed APP
   -> packaged runtime copied to writable APP home
-  -> PowerShell UI/API/worker started from APP home
+  -> PowerShell UI/API/worker/watchdog started from APP home
 ```
 
 The packaged runtime contains only what the desktop APP needs to boot its own UI/API state layer:
 
 - `start_musicserver_ui.ps1`
+- `watchdog_ui.ps1`
 - `music_api.ps1`
 - `wanted_worker.ps1`
 - Core/Database/State/Providers modules
@@ -93,6 +95,7 @@ MusicServer/
 ├─ MusicServer.*.psm1
 ├─ music_api.ps1
 ├─ start_musicserver_ui.ps1
+├─ watchdog_ui.ps1
 └─ wanted_worker.ps1
 ```
 
@@ -172,10 +175,11 @@ After completing a meaningful task, update this `AGENTS.md` checkpoint when the 
 
 ## Current checkpoint — 2026-09-05
 
-- P0 PowerShell/API blockers fixed: `music_api.ps1` is PS5.1/BOM-safe and provider direct-candidate fallback no longer leaks into unwanted Bilibili search.
-- P1-A complete: CI has a real `desktop-build` gate on a clean Windows runner.
-- P1-B implemented: release runtime is bundled, SQLite is included, `CARGO_MANIFEST_DIR` runtime dependency is removed, installed runtime uses a writable APP home, and local checkout builds preserve existing checkout data via runtime path discovery.
+- P0 closed: `music_api.ps1` is PS5.1/BOM-safe and provider direct-candidate fallback no longer leaks into unwanted Bilibili search.
+- P1-A closed: CI has a real `desktop-build` gate on a clean Windows runner.
+- P1-B closed: release runtime is bundled, SQLite and the UI watchdog are included, `CARGO_MANIFEST_DIR` runtime dependency is removed, installed runtime uses a writable APP home, and local checkout builds preserve existing checkout data via runtime path discovery.
 - `desktop-build` produces an NSIS setup executable and uploads `musicserver-windows-installer`.
-- CI also performs an installed-app portability smoke with source runtime disabled, so a binary that secretly depends on the checkout must fail.
-- P2 repository cleanup applied: historical reports moved to `docs/archive/`, Chinese user guide moved to `docs/`, committed validation logs removed, personal Markdown-association scripts removed, and Tauri icons reduced to Windows release/source assets.
+- CI performs an installed-app portability smoke with the checkout runtime disabled; it verifies packaged runtime staging, current UI/API markers, SQLite state creation and owned-service shutdown.
+- GitHub Actions run #74 passed `state`, `api`, and `desktop-build`, including the source-independent installed-APP smoke and installer artifact upload.
+- P2 closed: historical reports moved to `docs/archive/`, Chinese user guide moved to `docs/`, committed validation logs removed, personal Markdown-association scripts removed, `.editorconfig` added, and Tauri icons reduced to Windows release/source assets.
 - PR #10 remains the active integration PR. **Do not merge it until the user explicitly says to merge.**
