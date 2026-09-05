@@ -19,7 +19,7 @@ use tauri::Manager;
 const DEFAULT_UI_PORT: u16 = 8790;
 const DEFAULT_API_PORT: u16 = 8787;
 const FALLBACK_PAIRS: &[(u16, u16)] = &[(8791, 8788), (8792, 8789)];
-const BUILD_MARKER: &str = "musicserver-listening-stats-v2";
+const BUILD_MARKER: &str = "musicserver-single-page-v3";
 const LAUNCHER: &str = "start_musicserver_ui.ps1";
 const APP_HOME_ENV: &str = "MUSICSERVER_APP_HOME";
 const PACKAGED_APP_HOME_DIR: &str = "com.musicserver.desktop";

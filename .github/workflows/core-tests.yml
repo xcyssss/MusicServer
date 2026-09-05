@@ -9,6 +9,7 @@ on:
       - '**/*.ps1'
       - '**/*.psm1'
       - 'web/**'
+      - 'tests/*.cjs'
       - 'src-tauri/**'
       - '.github/workflows/core-tests.yml'
   pull_request:
@@ -16,6 +17,7 @@ on:
       - '**/*.ps1'
       - '**/*.psm1'
       - 'web/**'
+      - 'tests/*.cjs'
       - 'src-tauri/**'
       - '.github/workflows/core-tests.yml'
 

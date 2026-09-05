@@ -1,4 +1,4 @@
-# This Describe needs a LIVE MusicServer UI host plus this machine's library and
+﻿# This Describe needs a LIVE MusicServer UI host plus this machine's library and
 # lyrics_report.csv (git-ignored), so it can never pass on a clean CI checkout.
 # Tagged RequiresLocalRuntime and excluded in .github/workflows/core-tests.yml.
 Describe 'MusicServer web playback safeguards' -Tag @('RequiresLocalRuntime') {
@@ -27,6 +27,11 @@ Describe 'MusicServer web playback safeguards' -Tag @('RequiresLocalRuntime') {
 
 # Static markup assertions. These read web/launcher files only and are safe on a clean checkout.
 Describe 'MusicServer web UI safeguards' {
+
+    It 'passes the shipped JavaScript timing and state behavior regressions' {
+        & node --test (Join-Path $PSScriptRoot 'web-ui.behavior.test.cjs')
+        $LASTEXITCODE | Should Be 0
+    }
 
     It 'ships explicit previous and next controls with queue navigation' {
         $html = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\web\index.html') -Raw

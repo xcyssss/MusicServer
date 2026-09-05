@@ -3,26 +3,14 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#0d1117" />
-    <title>MusicServer · 今日推荐</title>
+    <meta name="theme-color" content="#101412" />
+    <title>MusicServer · 音乐工作台</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <div class="app-shell">
-      <aside class="sidebar">
-        <div class="brand"><span class="brand-mark">♪</span><span>MusicServer</span></div>
-        <nav class="nav" aria-label="主导航">
-          <a class="nav-item" href="#library"><span>♫</span> 音乐库 <b id="library-nav-count">0</b></a>
-          <a class="nav-item active" href="#recommendations"><span>✦</span> 今日推荐</a>
-          <a class="nav-item" href="#wanted"><span>♥</span> Wanted Queue <b id="queue-count">0</b></a>
-        </nav>
-        <div class="sidebar-footer">
-          <div class="health-label"><span class="status-dot healthy"></span>服务在线</div>
-          <p>先试听，再决定是否下载。你的红心会立即进入后台队列。</p>
-        </div>
-      </aside>
-
-      <aside id="listening-sidebar" class="listening-sidebar expanded" aria-label="我的常听">
+    <a class="skip-link" href="#library-search">跳到音乐搜索</a>
+    <div class="app-shell listening-collapsed">
+      <aside id="listening-sidebar" class="listening-sidebar collapsed" aria-label="我的常听">
         <button id="listening-collapse" class="listening-collapse" type="button" aria-label="收起常听侧栏" title="收起">‹</button>
         <div class="listening-content">
           <div class="listening-header">
@@ -46,76 +34,48 @@
         </div>
       </aside>
 
+
       <main class="main-content">
         <header class="topbar">
-          <div>
-            <p class="eyebrow" id="today-eyebrow">MUSIC DISCOVERY</p>
-            <h1>今天，听点新的。</h1>
-          </div>
+          <div class="brand"><span class="brand-mark" aria-hidden="true">♪</span><div><h1>MusicServer<span class="brand-caption">音乐，都在这一页。</span></h1><p class="eyebrow" id="today-eyebrow">YOUR EVERYDAY SOUNDTRACK</p></div></div>
           <div class="topbar-actions">
-            <span id="last-updated" class="muted">正在同步…</span>
-            <button id="refresh-button" class="icon-button" aria-label="刷新推荐">↻</button>
+            <span id="last-updated" class="muted" role="status">正在同步…</span>
+            <button id="listening-toggle" class="secondary-button" aria-controls="listening-sidebar" aria-expanded="false">我的常听</button>
+            <button id="queue-toggle" class="secondary-button" aria-controls="wanted" aria-expanded="false">下载动态 <b id="queue-count">0</b></button>
+            <button id="refresh-button" class="icon-button" aria-label="刷新音乐库与推荐" title="刷新音乐库与推荐">↻</button>
           </div>
         </header>
-
         <div class="workspace-grid">
           <section id="library" class="library-panel" aria-label="本地音乐库">
-            <div class="section-heading library-heading"><div><span class="section-kicker">YOUR LIBRARY</span><h2>音乐库</h2></div><span id="library-count" class="provider-summary">同步中…</span></div>
+            <div class="section-heading"><div><span class="section-kicker">YOUR COLLECTION</span><h2>音乐库 <span id="library-nav-count" class="count-badge">0</span></h2></div><span class="panel-hint">随时播放，留在本地</span></div>
             <div class="library-tools">
-              <label class="search-box"><span>⌕</span><input id="library-search" type="search" placeholder="搜索歌名、艺术家或专辑" autocomplete="off" /></label>
-              <div class="play-mode" aria-label="播放顺序">
-                <button class="mode-button active" data-mode="sequence">顺序</button>
-                <button id="shuffle-button" class="shuffle-button" type="button" aria-label="重新随机播放顺序">↻ 重新随机</button>
-              </div>
-              <label class="sort-select" aria-label="音乐库排序">
-                <span>排序</span>
-                <select id="library-sort">
-                  <option value="default">默认</option>
-                  <option value="added">按入库时间</option>
-                </select>
-              </label>
+              <label class="search-box"><span aria-hidden="true">⌕</span><input id="library-search" type="search" aria-label="搜索音乐库" placeholder="搜索歌名、艺术家、专辑" autocomplete="off" /><kbd>Ctrl K</kbd></label>
+              <div class="library-options"><div class="play-mode" aria-label="播放顺序"><button class="mode-button active" data-mode="sequence" aria-pressed="true">顺序播放</button><button id="shuffle-button" class="shuffle-button" type="button" aria-pressed="false" aria-label="重新随机播放顺序">随机排列</button></div><label class="sort-select"><span class="sr-only">音乐库排序</span><select id="library-sort" aria-label="音乐库排序"><option value="default">默认排序</option><option value="added">最近入库</option></select></label></div>
             </div>
-            <div id="library-list" class="track-list library-list" aria-live="polite"></div>
+            <div class="list-caption"><span>歌曲 / 艺术家</span><span id="library-count" role="status">同步中…</span></div>
+            <div id="library-list" class="track-list library-list" aria-label="曲库歌曲" tabindex="0"></div><button id="library-more" class="text-button" hidden>显示更多</button>
           </section>
-
           <section id="recommendations" class="recommendation-panel" aria-label="今日推荐">
             <section class="hero-card" aria-label="今日推荐概览">
-              <div class="hero-copy">
-                <span class="hero-kicker">DAILY MIX</span>
-                <h2>为你挑的 <span id="hero-count">20</span> 首歌</h2>
-                <p>在线试听，喜欢的歌曲再加入本地曲库。</p>
-                <button id="play-first" class="primary-button"><span>▶</span> 播放第一首</button>
-              </div>
-              <div class="hero-orbit" aria-hidden="true"><span>♪</span><i></i><b></b></div>
+              <div class="hero-copy"><span class="hero-kicker">DAILY MIX / 今日灵感</span><h2>让好音乐，<br />自然发生。</h2><p>为你精选 <span id="hero-count">0</span> 首。先听听，再留下喜欢的。</p><button id="play-first" class="primary-button" disabled><span aria-hidden="true">▶</span> 开始听推荐</button></div>
+              <div class="record-art" aria-hidden="true"><div class="record-disc"><span>m.</span></div><span class="record-caption">A LITTLE DISCOVERY<br />EVERY DAY</span></div>
             </section>
-
-              <section class="stats-row" aria-label="推荐统计">
-                <div class="stat-card"><span class="stat-label">今日推荐</span><strong id="recommendation-count">—</strong><small>首</small></div>
-                <div class="stat-card"><span class="stat-label">已喜欢</span><strong id="liked-count">—</strong><small>首</small></div>
-                <div class="stat-card"><span class="stat-label">本地曲库</span><strong id="local-count">—</strong><small>首</small></div>
-                <div class="stat-card accent"><span class="stat-label">下载队列</span><strong id="wanted-count">—</strong><small>首</small></div>
-              </section>
-
-              <section class="recommendation-section">
-              <div class="section-heading"><div><span class="section-kicker">DISCOVER MORE</span><h2>今日推荐</h2></div><span id="provider-summary" class="provider-summary">Provider 状态同步中</span></div>
-              <div id="error-banner" class="error-banner" hidden></div>
-              <div id="recommendation-list" class="track-list" aria-live="polite"></div>
+            <section class="stats-row" aria-label="推荐统计"><div class="stat-card"><span class="stat-label">推荐</span><strong id="recommendation-count">0</strong></div><div class="stat-card"><span class="stat-label">喜欢</span><strong id="liked-count">0</strong></div><div class="stat-card"><span class="stat-label">本地</span><strong id="local-count">0</strong></div><div class="stat-card"><span class="stat-label">待下载</span><strong id="wanted-count">0</strong></div></section>
+            <section class="recommendation-section">
+              <div class="section-heading"><h2>今日推荐</h2><span id="provider-summary" class="provider-summary">正在检查音乐来源…</span></div>
+              <div id="error-banner" class="error-banner" role="status" hidden></div>
+              <div id="recommendation-list" class="track-list" aria-label="推荐歌曲" tabindex="0"></div>
             </section>
-
-            <section id="wanted" class="wanted-callout">
-              <div class="callout-icon">♥</div>
-              <div><strong>喜欢的歌会自己回家</strong><p>点一下红心，后台会完成解析、下载、校验和 Navidrome 入库。页面会自动更新状态。</p></div>
-            </section>
+            <details id="wanted" class="wanted-callout"><summary>本次推荐的下载动态 <span>点红心，喜欢的歌自动加入曲库</span></summary><div id="wanted-list" class="wanted-list" role="status"></div></details>
           </section>
         </div>
       </main>
     </div>
-
     <footer class="player-bar">
       <div class="now-playing">
         <div id="player-art" class="player-art"><span>♪</span></div>
         <div class="now-playing-meta">
-          <span class="now-label">正在播放</span>
+          <span id="playback-status" class="now-label" role="status">准备就绪</span>
           <strong id="player-title">选择一首歌开始试听</strong>
           <small id="player-artist">MusicServer</small>
         </div>
@@ -129,7 +89,7 @@
         </div>
         <div class="player-progress">
           <span id="current-time" class="time-label">0:00</span>
-          <div id="progress-track" class="progress-track" role="slider" aria-label="播放进度" tabindex="0">
+          <div id="progress-track" class="progress-track" role="slider" aria-label="播放进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" tabindex="0">
             <div id="progress-fill" class="progress-fill"></div>
             <div id="progress-thumb" class="progress-thumb"></div>
           </div>
@@ -138,7 +98,7 @@
       </div>
 
       <div class="player-right">
-        <button id="lyrics-toggle" class="lyrics-toggle" disabled>歌词</button>
+        <label class="volume-control">音量<input id="volume-control" type="range" min="0" max="1" step="0.05" value="1" aria-label="音量" /></label><button id="lyrics-toggle" class="lyrics-toggle" aria-controls="lyrics-panel" aria-expanded="false" disabled>歌词</button>
       </div>
 
       <audio id="audio-player" preload="metadata"></audio>

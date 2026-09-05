@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$Root = '',
     [string]$Executable = '',
@@ -8,7 +8,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$BuildMarker = 'musicserver-listening-stats-v2'
+$BuildMarker = 'musicserver-single-page-v3'
 $launchedDesktopPid = $null
 if (-not $Root) {
     $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
@@ -20,8 +20,12 @@ if (-not $Executable) {
 try {
 function Get-DesktopProcess {
     return @(Get-CimInstance Win32_Process | Where-Object {
-        $_.ExecutablePath -eq $Executable -or
-        $_.CommandLine -match [regex]::Escape($Executable)
+        # The verifier command line itself contains -Executable. Match the
+        # image name first so that PowerShell is not counted as a second APP.
+        $_.Name -eq [IO.Path]::GetFileName($Executable) -and (
+            $_.ExecutablePath -eq $Executable -or
+            $_.CommandLine -match [regex]::Escape($Executable)
+        )
     })
 }
 
@@ -161,7 +165,7 @@ if ($desktop.Count -ne 1) { throw "Expected one Tauri desktop process, found $($
 if (-not $pair) { throw "Current MusicServer UI/API build marker was not found within 70 seconds." }
 
 $index = Get-HttpResult -Uri "http://127.0.0.1:$($pair.UiPort)/"
-if (-not $index -or $index.StatusCode -ne 200 -or -not $index.Text.Contains('id="listening"')) {
+if (-not $index -or $index.StatusCode -ne 200 -or -not $index.Text.Contains('id="listening-sidebar"')) {
     throw 'The Tauri-served UI did not expose the listening section.'
 }
 

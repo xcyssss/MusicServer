@@ -614,7 +614,7 @@ $listener.Start()
 Write-Host "API listening on $($listener.Prefixes[0])" -ForegroundColor Cyan
 
 $script:requestCount = 0
-$script:BuildMarker = 'musicserver-listening-stats-v2'
+$script:BuildMarker = 'musicserver-single-page-v3'
 # /api/today is recomputed per request and costs ~5s (each DB read spawns a
 # sqlite3 subprocess; 20 tracks x several reads). The UI polls it every 15s,
 # and because the UI proxies on a single thread, a slow /api/today blocks
