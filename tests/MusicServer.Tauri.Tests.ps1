@@ -25,4 +25,23 @@ Describe 'MusicServer Tauri desktop shell' {
         $smoke | Should Match 'CloseLaunchedApp'
         $smoke | Should Match 'ServicesStopped'
     }
+
+    It 'packages a writable portable runtime instead of embedding the source-tree path' {
+        $configText = Get-Content -LiteralPath (Join-Path $ProjectRoot 'src-tauri\tauri.conf.json') -Raw
+        $config = ConvertFrom-Json -InputObject $configText
+        $main = Get-Content -LiteralPath (Join-Path $ProjectRoot 'src-tauri\src\main.rs') -Raw
+        $prepare = Get-Content -LiteralPath (Join-Path $ProjectRoot 'scripts\prepare_tauri_runtime.ps1') -Raw
+
+        $config.build.beforeBuildCommand | Should Match 'prepare_tauri_runtime\.ps1'
+        @($config.bundle.resources) -join ' ' | Should Match 'resources/runtime'
+        $main | Should Not Match 'CARGO_MANIFEST_DIR'
+        $main | Should Match 'LOCALAPPDATA'
+        $main | Should Match 'stage_runtime'
+        $main | Should Match 'MUSICSERVER_SQLITE'
+        $prepare | Should Match 'start_musicserver_ui\.ps1'
+        $prepare | Should Match 'music_api\.ps1'
+        $prepare | Should Match 'wanted_worker\.ps1'
+        $prepare | Should Match 'sqlite3\.exe'
+        $prepare | Should Not Match 'cookies\.txt'
+    }
 }
