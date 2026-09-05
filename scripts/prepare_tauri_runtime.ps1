@@ -1,12 +1,20 @@
 ﻿[CmdletBinding()]
 param(
-    [string]$ProjectRoot = (Split-Path -Parent $PSScriptRoot),
+    [string]$ProjectRoot = '',
     [string]$Destination = ''
 )
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
+if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
+    $scriptPath = [string]$MyInvocation.MyCommand.Path
+    if ([string]::IsNullOrWhiteSpace($scriptPath)) {
+        throw 'Unable to resolve prepare_tauri_runtime.ps1 location.'
+    }
+    $scriptRoot = Split-Path -Parent $scriptPath
+    $ProjectRoot = Split-Path -Parent $scriptRoot
+}
 $ProjectRoot = [IO.Path]::GetFullPath($ProjectRoot)
 if ([string]::IsNullOrWhiteSpace($Destination)) {
     $Destination = Join-Path $ProjectRoot 'src-tauri\resources\runtime'
