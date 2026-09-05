@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.musicserver.desktop",
   "build": {
-    "beforeDevCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/prepare_tauri_runtime.ps1",
+    "beforeDevCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare_tauri_runtime.ps1",
     "devUrl": "http://127.0.0.1:8790",
-    "beforeBuildCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/prepare_tauri_runtime.ps1",
+    "beforeBuildCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/prepare_tauri_runtime.ps1",
     "frontendDist": "../web"
   },
   "app": {
