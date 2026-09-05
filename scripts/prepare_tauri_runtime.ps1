@@ -33,6 +33,7 @@ Get-ChildItem -LiteralPath $Destination -Force -ErrorAction SilentlyContinue |
 
 $runtimeFiles = @(
     'start_musicserver_ui.ps1',
+    'watchdog_ui.ps1',
     'music_api.ps1',
     'wanted_worker.ps1',
     'MusicServer.Core.psm1',
