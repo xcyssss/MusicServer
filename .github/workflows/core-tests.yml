@@ -213,7 +213,12 @@ jobs:
             Write-Host "service pair -> UI=$($pair.Ui) API=$($pair.Api)"
           } finally {
             if ($desktop -and -not $desktop.HasExited) {
-              & taskkill.exe /PID $desktop.Id /T /F | Out-Null
+              $kill = Start-Process -FilePath 'taskkill.exe' `
+                -ArgumentList @('/PID', "$($desktop.Id)", '/T', '/F') `
+                -Wait -PassThru -NoNewWindow
+              if ($kill.ExitCode -ne 0) {
+                Write-Warning "taskkill returned exit code $($kill.ExitCode); the APP may have already exited."
+              }
             }
             foreach ($item in $disabled) {
               if (Test-Path -LiteralPath $item.Target) {
