@@ -2,7 +2,7 @@
 
 制定日期：2026-09-05。范围：稳定性、性能、界面与使用体验、代码维护、测试及发布。
 
-本计划已进入实施，首批分支为 `codex/opt-a-correctness-baseline`，审查入口为 [PR #1](https://github.com/yangzhexian/MusicServer/pull/1)：逐连接外键检查及失败即停、共享 HTTP 输入校验和隔离后端测量已实现，正在完成集成验证。B–E 阶段尚未实施。下面的性能目标不是已测得的收益。
+本计划已进入实施。A2/A3 与后端基线已经完成并通过 CI。根据用户后续要求，C 阶段前端设计与 UI 优先于 B 阶段推进，保持 **all in one page**：曲库、推荐和播放器共处一页，常听、歌词与下载动态在页内展开。UI 版本为 `38b9c76`；后续测试修复在 `codex/test-single-page-ui`。B、D、E 的其余任务继续保留，下面的性能目标不是已测得的收益。
 
 ## 1. 目标与边界
 
@@ -120,7 +120,12 @@
 - [x] A3：API/代理共用 64 KiB / 5 秒读取与 JSON 对象校验，真实 socket 已覆盖分段、非法、超限、chunked、压缩、超时与断开。
 - [x] PS5.1 本地回归：state 139 通过、api 28 通过，共 167 项，排除 `RequiresLocalRuntime`；包含实际 runtime staging 验证。
 - [x] 建立当前优化的 [PR #1](https://github.com/yangzhexian/MusicServer/pull/1)。
-- [ ] 验证修复后的提交在 GitHub CI 的 state、api、desktop-build 三组门禁全部通过，然后进入 B 阶段。
+- [x] A 阶段提交 `a074ebe` 的 state、api、desktop-build 三组 CI 全部通过。
+- [x] C 阶段首批单页 UI：紧凑双列工作台、常驻播放器、页内常听/歌词/下载动态、音量及键盘焦点。
+- [x] 前端行为回归：150 ms 中文输入法搜索、200 条分批渲染、请求合并与旧响应保护、歌词取消、音频不等待歌词、播放状态刷新；8 项 Node 行为测试纳入 Web Pester。
+- [x] 独立测试数据上的实际 Tauri 验证：默认及最小 960×640 内容区、本地播放/切歌/歌词、中文搜索；桌面 smoke 覆盖 Range 和播放事件去重。
+- [ ] 完成 150%/200% Windows 显示缩放及搜索 p95 测量。WebView 快捷键未能确认缩放生效，不把该项视为已验收。
+- [ ] 验证 UI 后续修复的 GitHub CI；继续 B 阶段性能优化及 C/D/E 剩余验收。
 
 ## 6. 首批后端基线记录（2026-09-05）
 

@@ -20,8 +20,8 @@ Describe 'MusicServer Tauri desktop shell' {
         $main | Should Match 'FALLBACK_PAIRS'
         $main | Should Match '-UiPrefix'
         $main | Should Match '-ApiPrefix'
-        $web | Should Match 'musicserver-listening-stats-v2'
-        $api | Should Match "BuildMarker = 'musicserver-listening-stats-v2'"
+        $web | Should Match 'musicserver-single-page-v3'
+        $api | Should Match "BuildMarker = 'musicserver-single-page-v3'"
         $smoke | Should Match 'CloseLaunchedApp'
         $smoke | Should Match 'ServicesStopped'
     }
@@ -43,6 +43,17 @@ Describe 'MusicServer Tauri desktop shell' {
         $prepare | Should Match 'wanted_worker\.ps1'
         $prepare | Should Match 'sqlite3\.exe'
         $prepare | Should Not Match 'cookies\.txt'
+    }
+
+    It 'keeps installed CI smoke and desktop service markers in sync with the served UI' {
+        $web = Get-Content -LiteralPath (Join-Path $ProjectRoot 'web\app.js') -Raw -Encoding UTF8
+        $marker = [regex]::Match($web, "MUSICSERVER_BUILD_MARKER\s*=\s*'([^']+)'").Groups[1].Value
+        [string]::IsNullOrWhiteSpace($marker) | Should Be $false
+        foreach ($relative in @('music_api.ps1', 'src-tauri\src\main.rs', 'tests\verify_tauri_desktop.ps1', '.github\workflows\core-tests.yml')) {
+            $text = Get-Content -LiteralPath (Join-Path $ProjectRoot $relative) -Raw -Encoding UTF8
+            $actual = [regex]::Match($text, '(?i)(?:BuildMarker|BUILD_MARKER)(?:\s*:\s*&str)?\s*=\s*[''"]([^''"]+)[''"]').Groups[1].Value
+            $actual | Should Be $marker
+        }
     }
 
     It 'stages an executable runtime containing the shared HTTP input module' {

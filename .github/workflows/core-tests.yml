@@ -9,6 +9,7 @@ on:
       - '**/*.ps1'
       - '**/*.psm1'
       - 'web/**'
+      - 'tests/*.cjs'
       - 'src-tauri/**'
       - '.github/workflows/core-tests.yml'
   pull_request:
@@ -16,6 +17,7 @@ on:
       - '**/*.ps1'
       - '**/*.psm1'
       - 'web/**'
+      - 'tests/*.cjs'
       - 'src-tauri/**'
       - '.github/workflows/core-tests.yml'
 
@@ -133,7 +135,7 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $BuildMarker = 'musicserver-listening-stats-v2'
+          $BuildMarker = 'musicserver-single-page-v3'
           $installer = Get-ChildItem -LiteralPath '.\src-tauri\target\release\bundle\nsis' -Filter '*.exe' -File | Select-Object -First 1
           if (-not $installer) { throw 'Installer not found for smoke test.' }
 
@@ -211,7 +213,12 @@ jobs:
             Write-Host "service pair -> UI=$($pair.Ui) API=$($pair.Api)"
           } finally {
             if ($desktop -and -not $desktop.HasExited) {
-              & taskkill.exe /PID $desktop.Id /T /F | Out-Null
+              $kill = Start-Process -FilePath 'taskkill.exe' `
+                -ArgumentList @('/PID', "$($desktop.Id)", '/T', '/F') `
+                -Wait -PassThru -NoNewWindow
+              if ($kill.ExitCode -ne 0) {
+                Write-Warning "taskkill returned exit code $($kill.ExitCode); the APP may have already exited."
+              }
             }
             foreach ($item in $disabled) {
               if (Test-Path -LiteralPath $item.Target) {

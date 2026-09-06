@@ -1,4 +1,4 @@
-# This Describe needs a LIVE MusicServer UI host plus this machine's library and
+﻿# This Describe needs a LIVE MusicServer UI host plus this machine's library and
 # lyrics_report.csv (git-ignored), so it can never pass on a clean CI checkout.
 # Tagged RequiresLocalRuntime and excluded in .github/workflows/core-tests.yml.
 Describe 'MusicServer web playback safeguards' -Tag @('RequiresLocalRuntime') {
@@ -28,9 +28,14 @@ Describe 'MusicServer web playback safeguards' -Tag @('RequiresLocalRuntime') {
 # Static markup assertions. These read web/launcher files only and are safe on a clean checkout.
 Describe 'MusicServer web UI safeguards' {
 
+    It 'passes the shipped JavaScript timing and state behavior regressions' {
+        & node --test (Join-Path $PSScriptRoot 'web-ui.behavior.test.cjs')
+        $LASTEXITCODE | Should Be 0
+    }
+
     It 'ships explicit previous and next controls with queue navigation' {
-        $html = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\web\index.html') -Raw
-        $js = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\web\app.js') -Raw
+        $html = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\web\index.html') -Raw -Encoding UTF8
+        $js = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\web\app.js') -Raw -Encoding UTF8
         $html | Should Match 'id="previous-button"'
         $html | Should Match 'id="next-button"'
         $js | Should Match 'function previousItem'
@@ -38,9 +43,9 @@ Describe 'MusicServer web UI safeguards' {
     }
 
     It 'keeps the page fixed and scrolls only the music lists' {
-        $css = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\web\styles.css') -Raw
-        $js = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\web\app.js') -Raw
-        $html = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\web\index.html') -Raw
+        $css = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\web\styles.css') -Raw -Encoding UTF8
+        $js = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\web\app.js') -Raw -Encoding UTF8
+        $html = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\web\index.html') -Raw -Encoding UTF8
         $css | Should Match '\.library-list\s*\{[^}]*overflow-y'
         $css | Should Match '\.recommendation-section \.track-list\s*\{[^}]*overflow-y'
         $css | Should Match 'html, body \{ height: 100%; overflow: hidden; \}'
@@ -53,7 +58,7 @@ Describe 'MusicServer web UI safeguards' {
     }
 
     It 'normalizes Navidrome name to title and counts the real local library' {
-        $js = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\web\app.js') -Raw
+        $js = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\web\app.js') -Raw -Encoding UTF8
         $js | Should Match 'normalizeLibraryItem'
         $js | Should Match 'title:\s*item\?\.title\s*\|\|\s*item\?\.name'
         $js | Should Match 'items\.map\(normalizeLibraryItem\)'
@@ -61,7 +66,7 @@ Describe 'MusicServer web UI safeguards' {
     }
 
     It 'sends a small JSON body for like and unlike so HttpListener does not reject browser requests with 411' {
-        $js = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\web\app.js') -Raw
+        $js = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\web\app.js') -Raw -Encoding UTF8
         $js | Should Match "method:\s*next\s*\?\s*'POST'\s*:\s*'DELETE'"
         $js | Should Match "'Content-Type':\s*'application/json; charset=utf-8'"
         $js | Should Match "body:\s*'\{\}'"
@@ -70,7 +75,7 @@ Describe 'MusicServer web UI safeguards' {
     }
 
     It 'hydrates old recommendation metadata and recovers the Netease playback id before giving up' {
-        $js = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\web\app.js') -Raw
+        $js = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\web\app.js') -Raw -Encoding UTF8
         $js | Should Match 'function neteasePreviewFromTrack'
         $js | Should Match 'function neteasePreviewFromRecommendation'
         $js | Should Match 'recommendation\.netease_id'
@@ -85,7 +90,7 @@ Describe 'MusicServer web UI safeguards' {
     }
 
     It 'normalizes both legacy lyrics payloads and the explicit lyric contract' {
-        $js = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\web\app.js') -Raw
+        $js = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\web\app.js') -Raw -Encoding UTF8
         $js | Should Match 'function normalizeLyricsPayload'
         $js | Should Match 'data\?\.lyrics'
         $js | Should Match 'normalized\.available'
@@ -93,7 +98,7 @@ Describe 'MusicServer web UI safeguards' {
     }
 
     It 'uses the recommendation Netease id for lyrics before any local fuzzy lyric file' {
-        $launcher = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\start_musicserver_ui.ps1') -Raw
+        $launcher = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\start_musicserver_ui.ps1') -Raw -Encoding UTF8
         $launcher | Should Match 'function Get-NeteaseIdForTrack'
         $launcher | Should Match 'function Get-NetEaseLyricsById'
         $launcher | Should Match 'function Send-TrackLyrics'
@@ -107,7 +112,7 @@ Describe 'MusicServer web UI safeguards' {
     }
 
     It 'quality-gates local lrc files using lyrics_report before exposing them' {
-        $launcher = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\start_musicserver_ui.ps1') -Raw
+        $launcher = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\start_musicserver_ui.ps1') -Raw -Encoding UTF8
         $launcher | Should Match 'lyrics_report\.csv'
         $launcher | Should Match 'function Get-LyricQuality'
         $launcher | Should Match 'SUSPECT'
@@ -117,7 +122,7 @@ Describe 'MusicServer web UI safeguards' {
 
     It 'ships a one-command launcher that serves the UI and maps the legacy recommendation route' {
         $launcherPath = Join-Path $PSScriptRoot '..\start_musicserver_ui.ps1'
-        $launcher = Get-Content -LiteralPath $launcherPath -Raw
+        $launcher = Get-Content -LiteralPath $launcherPath -Raw -Encoding UTF8
         $launcher | Should Match "UiPrefix = 'http://127\.0\.0\.1:8790/'"
         $launcher | Should Match 'Send-IndexHtml'
         $launcher | Should Match "\^/api/recommendations/today"
@@ -132,8 +137,8 @@ Describe 'MusicServer web UI safeguards' {
     }
 
     It 'runs silently and stops owned services after the last browser client closes' {
-        $launcher = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\start_musicserver_ui.ps1') -Raw
-        $bat = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\start_musicserver_ui.bat') -Raw
+        $launcher = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\start_musicserver_ui.ps1') -Raw -Encoding UTF8
+        $bat = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\start_musicserver_ui.bat') -Raw -Encoding UTF8
         $bat | Should Match '-WindowStyle Hidden'
         $launcher | Should Match '-WindowStyle Hidden'
         $launcher | Should Match 'RedirectStandardOutput'
@@ -149,7 +154,7 @@ Describe 'MusicServer web UI safeguards' {
     }
 
     It 'serves the local library through the current Navidrome media_file schema' {
-        $launcher = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\start_musicserver_ui.ps1') -Raw
+        $launcher = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\start_musicserver_ui.ps1') -Raw -Encoding UTF8
         $launcher | Should Match 'function Invoke-NavidromeSqliteJson'
         $launcher | Should Match '& \$sqlite.*-readonly.*-json.*\$Config\.NdDb.*\$Sql'
         $launcher | Should Match 'FROM media_file WHERE missing = 0'
@@ -164,10 +169,10 @@ Describe 'MusicServer web UI safeguards' {
     }
 
     It 'ships listening statistics controls and records only completed local playback sessions' {
-        $html = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\web\index.html') -Raw
-        $js = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\web\app.js') -Raw
-        $css = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\web\styles.css') -Raw
-        $api = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\music_api.ps1') -Raw
+        $html = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\web\index.html') -Raw -Encoding UTF8
+        $js = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\web\app.js') -Raw -Encoding UTF8
+        $css = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\web\styles.css') -Raw -Encoding UTF8
+        $api = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\music_api.ps1') -Raw -Encoding UTF8
 
         $html | Should Match 'id="listening-sidebar"'
         $html | Should Match 'id="most-played-list"'

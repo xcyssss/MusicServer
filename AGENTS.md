@@ -6,6 +6,7 @@ MusicServer is a Windows-first local music application. The **Tauri v2 desktop A
 
 - **SQLite is the sole runtime source of truth.** JSON files are migration input, backup, or compatibility output only.
 - **Do not build a second native Rust UI.** `web/index.html`, `web/app.js`, and `web/styles.css` are the desktop UI.
+- **Keep the product all in one page.** Library and recommendations share the workspace; playback stays visible, and listening, lyrics and download details open within that page.
 - **Validate user-facing UI changes in the Tauri APP**, not only in a browser.
 - **Windows PowerShell 5.1 is the compatibility baseline** for formal PowerShell code and tests.
 - `.ps1` / `.psm1` containing non-ASCII text must be UTF-8 BOM. `.editorconfig` enforces this.
@@ -187,4 +188,5 @@ After completing a meaningful task, update this `AGENTS.md` checkpoint when the 
 - P2 closed: historical reports moved to `docs/archive/`, Chinese user guide moved to `docs/`, committed validation logs removed, personal Markdown-association scripts removed, `.editorconfig` added, and Tauri icons reduced to Windows release/source assets.
 - The local main baseline includes PR #10's merge commit `a63cfef`. Subsequent optimization work uses new feature/review branches; merging any new PR still requires explicit user authorization.
 - The HTTP input module is packaged with the desktop runtime and covered by real PS5.1 API/proxy socket tests in the `api` CI group.
+- The Web Pester suite runs `tests/web-ui.behavior.test.cjs` with Node to cover frontend timing/state behavior. Read UTF-8 web assets explicitly in PS5.1 tests; Tauri tests compare UI/API/Rust/local-smoke/installed-CI build markers.
 - `scripts/measure_musicserver_backend.ps1` measures isolated service readiness, endpoint latency and state SQLite process counts with synthetic metadata. It omits the downloader, writes only under `artifacts/`, and does not substitute for Tauri rendering/playback validation.

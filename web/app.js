@@ -1,7 +1,7 @@
 // Tauri startup uses this marker to reject a stale 8790 UI process after an
 // upgrade. Keep it in the served bundle so the desktop shell can verify that
 // the WebView is loading the same source revision as the backend.
-const MUSICSERVER_BUILD_MARKER = 'musicserver-listening-stats-v2';
+const MUSICSERVER_BUILD_MARKER = 'musicserver-single-page-v3';
 
 const storedLibraryOrder = (() => {
   try {
@@ -24,6 +24,11 @@ const state = {
   librarySort: localStorage.getItem('musicserver-library-sort') || 'default',
   lyrics: { available: false, format: '', text: '', entries: [], quality: '', message: '' },
   lyricsRequest: 0,
+  playRequest: 0,
+  libraryRevision: 0,
+  recommendationRevision: 0,
+  libraryLimit: 200,
+  searchQuery: '',
 };
 
 const labels = { REMOTE: '在线', WANTED: '待下载', RESOLVING: '正在解析', DOWNLOADING: '下载中', VALIDATING: '校验中', CANCEL_REQUESTED: '正在取消', LOCAL: '已本地化', RETRY_WAIT: '等待重试', UNAVAILABLE: '暂不可用' };
@@ -48,6 +53,52 @@ const normalizeLibraryItem = (item) => ({ ...item, title: item?.title || item?.n
 const PLAYBACK_MIN_SECONDS = 30;
 const PLAYBACK_MIN_RATIO = 0.25;
 
+const refreshes = new Map();
+const pendingLikes = new Set();
+async function fetchJson(url, options = {}) {
+  const controller = new AbortController();
+  const cancel = () => controller.abort();
+  if (options.signal?.aborted) cancel();
+  options.signal?.addEventListener('abort', cancel, { once: true });
+  const timer = setTimeout(cancel, 12000);
+  try {
+    const response = await fetch(url, { ...options, cache: 'no-store', signal: controller.signal });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload?.message || `请求失败 (${response.status})`);
+    return payload;
+  } finally {
+    clearTimeout(timer);
+    options.signal?.removeEventListener('abort', cancel);
+  }
+}
+
+function refreshOnce(key, action) {
+  if (refreshes.has(key)) return refreshes.get(key);
+  const pending = Promise.resolve().then(action).finally(() => refreshes.delete(key));
+  refreshes.set(key, pending);
+  return pending;
+}
+
+function replaceList(list, html) {
+  const focused = document.activeElement;
+  const row = list.contains(focused) ? focused.closest('article') : null;
+  const attribute = row?.hasAttribute('data-library-id') ? 'data-library-id' : 'data-track-id';
+  const id = row?.getAttribute(attribute);
+  const action = focused?.getAttribute('data-action');
+  const scrollTop = list.scrollTop;
+  list.innerHTML = html;
+  list.scrollTop = scrollTop;
+  if (id && action) list.querySelector(`[${attribute}="${CSS.escape(id)}"] [data-action="${CSS.escape(action)}"]`)?.focus({ preventScroll: true });
+}
+
+function setLyricsOpen(open, returnFocus = false) {
+  $('#lyrics-panel').hidden = !open;
+  $('#lyrics-toggle').setAttribute('aria-expanded', String(open));
+  if (returnFocus) $('#lyrics-toggle').focus();
+}
+
+function setPlaybackStatus(message) { $('#playback-status').textContent = message; }
+
 function newPlaybackSessionId() {
   if (globalThis.crypto && crypto.randomUUID) return crypto.randomUUID();
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -67,9 +118,9 @@ function showToast(message) {
 }
 
 function filteredLibrary() {
-  const query = ($('#library-search')?.value || '').trim().toLocaleLowerCase();
+  const query = state.searchQuery;
   if (!query) return state.library;
-  return state.library.filter((item) => [item.title, item.artist, item.album].some((value) => String(value || '').toLocaleLowerCase().includes(query)));
+  return state.library.filter((item) => item.searchText.includes(query));
 }
 
 // Sort displayed library items. 'added' sorts newest-added first using the
@@ -116,6 +167,7 @@ function persistLibraryOrder() {
 
 function syncLibrary(items) {
   const incoming = Array.isArray(items) ? items.map(normalizeLibraryItem) : [];
+  incoming.forEach((item) => { item.searchText = [item.title, item.artist, item.album].map((value) => String(value || '').toLocaleLowerCase()).join('\n'); });
   state.librarySequence = incoming;
   if (state.mode === 'random' && state.libraryOrder.length) {
     state.library = orderByKeys(incoming, state.libraryOrder);
@@ -156,52 +208,59 @@ function reshuffleLibrary() {
 
 function renderLibrary() {
   const list = $('#library-list'); if (!list) return;
-  const visible = sortLibraryVisible(filteredLibrary());
-  $('#library-count').textContent = `${state.library.length} 首`;
+  const matches = sortLibraryVisible(filteredLibrary());
+  const visible = matches.slice(0, state.libraryLimit);
+  $('#library-count').textContent = state.searchQuery ? `找到 ${matches.length} 首` : `${state.library.length} 首`;
+  $('#library-more').hidden = matches.length <= visible.length;
+  $('#library-more').textContent = `显示更多（${visible.length} / ${matches.length}）`;
   $('#library-nav-count').textContent = state.library.length;
   $('#local-count').textContent = state.library.length;
-  if (!state.library.length) { list.innerHTML = '<div class="empty-state">本地曲库还没有歌曲。</div>'; return; }
-  if (!visible.length) { list.innerHTML = '<div class="empty-state">没有找到匹配的歌曲。</div>'; return; }
-  const signature = visible.map((item) => `${keyOf(item)}|${state.currentKey === keyOf(item)}|${item.starred}|${item.source}`).join('\x00');
+  if (!state.library.length) { list._sig = null; list.innerHTML = '<div class="empty-state">曲库还是空的。<br />从右侧推荐开始，点红心收藏喜欢的音乐。</div>'; return; }
+  if (!visible.length) { list._sig = null; list.innerHTML = '<div class="empty-state">没有找到匹配的歌曲。<br />试试歌手名，或清空搜索。</div>'; return; }
+  const signature = JSON.stringify(visible.map((item) => [keyOf(item), state.currentKey === keyOf(item), $('#audio-player').paused, item.starred, item.source, item.title, item.artist, item.album, item.duration]));
   if (list._sig === signature && !list._dirty) return;
   list._sig = signature;
   list._dirty = false;
-  list.innerHTML = visible.map((item) => {
+  replaceList(list, visible.map((item) => {
     const playing = state.currentKey === keyOf(item);
     const meta = [item.artist || '未知艺术家', item.album || '未知专辑'].filter(Boolean).join(' · ');
     return `<article class="track-row library-row ${playing ? 'playing' : ''}" data-library-id="${escapeHtml(item.id)}">
-      <button class="play-button" data-action="play" aria-label="播放 ${escapeHtml(item.title)}">${playing && !$('#audio-player').paused ? '❚❚' : '▶'}</button>
+      <button class="play-button" data-action="play" aria-label="${playing && !$('#audio-player').paused ? '暂停' : '播放'} ${escapeHtml(item.title)}">${playing && !$('#audio-player').paused ? '❚❚' : '▶'}</button>
       <div class="track-main"><div class="track-title">${escapeHtml(item.title || '未命名歌曲')}</div><div class="track-artist">${escapeHtml(meta)}</div></div>
       <span class="library-mark">${item.starred ? '♥' : (item.source === 'DailyMix' ? '今日' : '')}</span>
       <span class="track-duration">${duration(item.duration)}</span>
       <button class="lyrics-button" data-action="lyrics" aria-label="查看歌词">词</button>
       <button class="delete-button" data-action="delete" aria-label="删除这首歌" title="删除">✕</button>
     </article>`;
-  }).join('');
+  }).join(''));
 }
 
 function renderRecommendations() {
   const list = $('#recommendation-list');
   $('#recommendation-count').textContent = state.items.length;
-  $('#hero-count').textContent = state.items.length || 20;
+  $('#hero-count').textContent = state.items.length;
+  $('#play-first').disabled = !state.items.length;
   $('#liked-count').textContent = state.items.filter((item) => item.liked).length;
   $('#local-count').textContent = state.library.length;
   $('#wanted-count').textContent = state.items.filter((item) => item.wanted?.state && item.wanted.state !== 'LOCAL').length;
   $('#queue-count').textContent = state.items.filter((item) => item.wanted?.state && item.wanted.state !== 'LOCAL').length;
-  if (!state.items.length) { list.innerHTML = '<div class="empty-state">今天还没有推荐，稍后再来看看。</div>'; return; }
-  const signature = state.items.map((item) => `${item.track_id}|${item.liked}|${itemStatus(item)}|${state.currentKey === keyOf(item)}`).join('\x00');
-  if (list._sig === signature) return;
+  const wanted = state.items.filter((item) => item.wanted?.state && item.wanted.state !== 'LOCAL');
+  $('#wanted-list').innerHTML = wanted.length ? wanted.map((item) => `<div class="wanted-row"><span>${escapeHtml(item.title)}</span><span class="status-badge ${statusClass(itemStatus(item))}">${escapeHtml(labels[itemStatus(item)] || itemStatus(item))}</span></div>`).join('') : '当前推荐没有待下载歌曲。';
+  if (!state.items.length) { list._sig = null; list.innerHTML = '<div class="empty-state">今天的推荐还在准备中。<br />先从音乐库选一首，或稍后刷新。</div>'; return; }
+  const signature = JSON.stringify(state.items.map((item) => [item.track_id, item.liked, itemStatus(item), state.currentKey === keyOf(item), $('#audio-player').paused, item.title, item.artist, item.reason, item.duration, pendingLikes.has(item.track_id)]));
+  if (list._sig === signature && !list._dirty) return;
   list._sig = signature;
-  list.innerHTML = state.items.map((item) => {
+  list._dirty = false;
+  replaceList(list, state.items.map((item) => {
     const status = itemStatus(item); const playing = state.currentKey === keyOf(item);
     return `<article class="track-row ${playing ? 'playing' : ''}" data-track-id="${escapeHtml(item.track_id)}">
-      <button class="play-button" data-action="play" aria-label="播放 ${escapeHtml(item.title)}">${playing && !$('#audio-player').paused ? '❚❚' : '▶'}</button>
+      <button class="play-button" data-action="play" aria-label="${playing && !$('#audio-player').paused ? '暂停' : '播放'} ${escapeHtml(item.title)}">${playing && !$('#audio-player').paused ? '❚❚' : '▶'}</button>
       <div class="track-main"><div class="track-title">${escapeHtml(item.title)}</div><div class="track-artist">${escapeHtml(item.artist || '未知艺术家')}</div><div class="track-reason">${escapeHtml(item.reason || '为你推荐')}</div></div>
       <span class="status-badge ${statusClass(status)}">${escapeHtml(labels[status] || status)}</span>
       <span class="track-duration">${duration(item.duration)}</span>
-      <button class="heart-button ${item.liked ? 'liked' : ''}" data-action="like" aria-label="${item.liked ? '取消喜欢' : '喜欢'}" aria-pressed="${item.liked}">${item.liked ? '♥' : '♡'}</button>
+      <button class="heart-button ${item.liked ? 'liked' : ''}" data-action="like" ${pendingLikes.has(item.track_id) ? 'disabled' : ''} aria-label="${item.liked ? '取消喜欢' : '喜欢'}" aria-pressed="${item.liked}">${item.liked ? '♥' : '♡'}</button>
     </article>`;
-  }).join('');
+  }).join(''));
   $('#play-first').disabled = !state.items[0];
 }
 
@@ -255,6 +314,8 @@ function render() { renderLibrary(); renderRecommendations(); renderListening();
 function renderMode() {
   document.querySelectorAll('.mode-button').forEach((button) => button.classList.toggle('active', button.dataset.mode === state.mode));
   $('#shuffle-button').classList.toggle('active', state.mode === 'random');
+  document.querySelectorAll('.mode-button').forEach((button) => button.setAttribute('aria-pressed', String(button.dataset.mode === state.mode)));
+  $('#shuffle-button').setAttribute('aria-pressed', String(state.mode === 'random'));
 }
 
 function updatePlayer(item) {
@@ -327,20 +388,16 @@ function isTextSelecting() {
 
 async function loadLyrics(url, open = true) {
   const requestId = ++state.lyricsRequest;
+  state.lyricsController?.abort();
+  state.lyricsController = new AbortController();
   state.lyrics = { available: false, format: '', text: '', entries: [], quality: '', message: '' };
   $('#lyrics-toggle').disabled = false;
-  if (open) $('#lyrics-panel').hidden = false;
+  if (open) setLyricsOpen(true);
   $('#lyrics-content').innerHTML = '<div class="lyrics-empty">正在加载歌词…</div>';
   if (!url) { renderLyrics(); return; }
   try {
-    const response = await fetch(url, { cache: 'no-store' });
-    const data = await response.json();
+    const data = await fetchJson(url, { signal: state.lyricsController.signal });
     if (requestId !== state.lyricsRequest) return;
-    if (!response.ok && !data?.available) {
-      state.lyrics = normalizeLyricsPayload(data);
-      renderLyrics();
-      return;
-    }
     const normalized = normalizeLyricsPayload(data);
     state.lyrics = { ...normalized, entries: normalized.available ? parseLyrics(normalized.text) : [] };
     renderLyrics($('#audio-player').currentTime || 0);
@@ -405,9 +462,7 @@ function resolvePlaybackSource(item) {
 async function hydrateRecommendationPlayback(item) {
   if (!item?.track_id) return item;
   try {
-    const response = await fetch(`/api/tracks/${encodeURIComponent(item.track_id)}`, { cache: 'no-store' });
-    if (!response.ok) return item;
-    const details = await response.json();
+    const details = await fetchJson(`/api/tracks/${encodeURIComponent(item.track_id)}`);
     if (details.track) item.track = details.track;
     if (details.recommendation) item.recommendation = details.recommendation;
     if (details.playback_source) item.playback_source = details.playback_source;
@@ -459,17 +514,20 @@ function maybeRecordPlayback() {
 }
 
 async function playItem(item, collection = 'library') {
+  const requestId = ++state.playRequest;
   let key = keyOf(item); const audio = $('#audio-player');
   if (!key) return;
   if (state.currentKey === key && !audio.paused) { audio.pause(); return; }
   let source = resolvePlaybackSource(item);
   if (!source && item.track_id) {
+    setPlaybackStatus('正在准备试听…');
     await hydrateRecommendationPlayback(item);
+    if (requestId !== state.playRequest) return;
     source = resolvePlaybackSource(item);
     const hydratedKey = keyOf(item);
     if (hydratedKey) key = hydratedKey;
   }
-  if (!source) { showToast('这首歌暂时没有可用试听源'); return; }
+  if (!source) { setPlaybackStatus(audio.paused ? '暂不可用 · 请选择其他歌曲' : '正在播放'); showToast('这首歌暂时没有可用试听源'); return; }
   const sourceUrl = new URL(source, window.location.href).href;
   const isNewTrack = state.currentKey !== key || audio.src !== sourceUrl || audio.ended;
   state.currentKey = key; state.currentCollection = collection; updatePlayer(item); $('#library-list')._dirty = true; $('#recommendation-list')._dirty = true; render();
@@ -478,6 +536,7 @@ async function playItem(item, collection = 'library') {
   renderPlayerArt(item);
   if (isNewTrack) {
     audio.pause(); audio.currentTime = 0; audio.src = sourceUrl;
+    updateProgressUI();
     state.playbackSession = isLocalPlayable(item)
       ? { key, libraryId: localIdOf(item), sessionId: newPlaybackSessionId(), pending: false, counted: false, playedSeconds: 0, lastAudioTime: 0, seeked: false }
       : null;
@@ -487,8 +546,14 @@ async function playItem(item, collection = 'library') {
   const lyricsUrl = collection === 'recommendations' && item.track_id
     ? `/api/tracks/${encodeURIComponent(item.track_id)}/lyrics`
     : item.lyrics_url || (item.track_id ? `/api/tracks/${encodeURIComponent(item.track_id)}/lyrics` : '');
-  await loadLyrics(lyricsUrl, true);
-  try { await audio.play(); } catch { showToast('试听源加载失败，请稍后重试'); }
+  setPlaybackStatus('正在加载…');
+  // Lyrics must not hold up audio or reopen a panel the listener closed.
+  void loadLyrics(lyricsUrl, false);
+  try { await audio.play(); } catch {
+    if (requestId !== state.playRequest) return;
+    setPlaybackStatus('播放失败 · 点击播放重试');
+    showToast('试听源加载失败，点击播放按钮重试');
+  }
 }
 
 function renderPlayerArt(item) {
@@ -525,6 +590,9 @@ function previousItem() {
 }
 
 async function toggleLike(item) {
+  if (pendingLikes.has(item.track_id)) return;
+  pendingLikes.add(item.track_id);
+  state.recommendationRevision++;
   const next = !item.liked;
   item.liked = next;
   render();
@@ -549,37 +617,48 @@ async function toggleLike(item) {
     render();
     const detail = String(error?.message || '未知错误');
     showToast(`喜欢操作失败：${detail}`);
+  } finally {
+    pendingLikes.delete(item.track_id);
+    state.recommendationRevision++;
+    renderRecommendations();
   }
 }
 
 async function loadLibrary(silent = false) {
+  return refreshOnce('library', async () => {
+  const revision = state.libraryRevision;
   try {
-    const response = await fetch('/api/library', { cache: 'no-store' });
-    if (!response.ok) throw new Error('library request failed');
-    const payload = await response.json(); syncLibrary(payload.items || []); renderLibrary(); updateNavigationButtons();
-  } catch { if (!silent) { $('#library-list').innerHTML = '<div class="empty-state">暂时无法读取 Navidrome 音乐库。</div>'; showToast('音乐库同步失败'); } }
+    const payload = await fetchJson('/api/library');
+    if (revision !== state.libraryRevision) return;
+    if (!Array.isArray(payload.items)) throw new Error('Invalid library response');
+    syncLibrary(payload.items); renderLibrary(); updateNavigationButtons();
+  } catch { if (!silent) { if (!state.library.length) { $('#library-list')._sig = null; $('#library-list').innerHTML = '<div class="empty-state">暂时无法读取音乐库。<br />点击右上角刷新重试。</div>'; } showToast('音乐库同步失败，请刷新重试'); } }
+  });
 }
 
 async function loadRecommendations(silent = false) {
+  return refreshOnce('recommendations', async () => {
+  const revision = state.recommendationRevision;
   try {
-    const response = await fetch('/api/recommendations/today', { cache: 'no-store' });
-    if (!response.ok) throw new Error('recommendation request failed');
-    const payload = await response.json(); state.items = payload.items || [];
-    $('#last-updated').textContent = `更新于 ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+    const payload = await fetchJson('/api/recommendations/today');
+    if (revision !== state.recommendationRevision || pendingLikes.size) return;
+    if (!Array.isArray(payload.items)) throw new Error('Invalid recommendation response');
+    state.items = payload.items;
+    $('#last-updated').textContent = `推荐更新于 ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
     const weekday = new Date().toLocaleDateString('zh-CN', { weekday: 'long' }).toUpperCase();
     const dateStr = new Date().toLocaleDateString('zh-CN', { month: 'long', day: 'numeric' });
     const eyebrow = $('#today-eyebrow');
     if (eyebrow) eyebrow.textContent = `${weekday} · ${dateStr} · MUSIC DISCOVERY`;
     $('#error-banner').hidden = true; renderRecommendations(); updateNavigationButtons();
     if (!silent && state.items.length) $('#play-first').disabled = false;
-  } catch { $('#error-banner').textContent = '暂时无法连接 MusicServer API，请确认 music_api.ps1 正在运行。'; $('#error-banner').hidden = false; if (!silent) renderRecommendations(); }
+  } catch { $('#error-banner').textContent = '推荐暂时同步失败。可以继续播放已有音乐，点击右上角刷新重试。'; $('#error-banner').hidden = false; if (!silent) renderRecommendations(); }
+  });
 }
 
 async function loadListening(silent = false) {
+  return refreshOnce('listening', async () => {
   try {
-    const response = await fetch('/api/listening/stats', { cache: 'no-store' });
-    if (!response.ok) throw new Error('listening stats request failed');
-    const payload = await response.json();
+    const payload = await fetchJson('/api/listening/stats');
     state.listening = {
       mostPlayed: Array.isArray(payload.most_played) ? payload.most_played : [],
       rediscover: Array.isArray(payload.rediscover) ? payload.rediscover : [],
@@ -593,6 +672,7 @@ async function loadListening(silent = false) {
       renderListening();
     }
   }
+  });
 }
 
 async function playRandomListening() {
@@ -613,16 +693,18 @@ async function playRandomListening() {
 }
 
 async function loadProviderStatus() {
+  return refreshOnce('providers', async () => {
   try {
-    const response = await fetch('/api/providers/status', { cache: 'no-store' }); const data = await response.json();
+    const data = await fetchJson('/api/providers/status');
     const blocked = (data.items || []).filter((item) => String(item.provider || '').startsWith('bilibili_') && item.state === 'OPEN');
     if (blocked.length) {
       const names = blocked.map((item) => item.provider === 'bilibili_search' ? '搜索' : '下载').join(' / ');
       $('#provider-summary').textContent = `Bilibili ${names}冷却中 · 不影响试听`;
     } else {
-      $('#provider-summary').textContent = '本地优先 · Provider 正常';
+      $('#provider-summary').textContent = '本地优先 · 音乐来源可用';
     }
-  } catch { $('#provider-summary').textContent = 'Provider 状态暂不可用'; }
+  } catch { $('#provider-summary').textContent = '音乐来源状态暂不可用'; }
+  });
 }
 
 $('#library-list').addEventListener('click', (event) => {
@@ -652,11 +734,24 @@ async function deleteLibraryItem(item) {
   if (!window.confirm(`确定要从音乐库删除「${title}」吗？\n\n将同时删除本地音频文件（含歌词），且不可恢复。`)) return;
   const id = item.id || item.track_id;
   if (!id) { showToast('无法识别要删除的歌曲'); return; }
+  state.libraryRevision++;
   try {
     const response = await fetch(`/api/library/${encodeURIComponent(id)}`, { method: 'DELETE', cache: 'no-store' });
     const result = await response.json();
     if (!response.ok || !result.accepted) { throw new Error(result.message || '删除请求失败'); }
     state.library = state.library.filter((candidate) => (candidate.id || candidate.track_id) !== id);
+    state.librarySequence = state.librarySequence.filter((candidate) => (candidate.id || candidate.track_id) !== id);
+    state.libraryRevision++;
+    if (state.mode === 'random') persistLibraryOrder();
+    if (state.currentKey === keyOf(item)) {
+      state.playRequest++;
+      $('#audio-player').pause();
+      $('#audio-player').removeAttribute('src');
+      $('#audio-player').load();
+      state.currentKey = null; state.playbackSession = null;
+      $('#play-toggle').disabled = true;
+      setPlaybackStatus('歌曲已移除');
+    }
     showToast(result.message || '已删除');
     renderLibrary(); updateNavigationButtons();
   } catch (err) {
@@ -671,7 +766,22 @@ $('#recommendation-list').addEventListener('click', (event) => {
   else if (event.target.closest('[data-action="play"]')) playItem(item, 'recommendations');
 });
 
-$('#library-search').addEventListener('input', () => { renderLibrary(); updateNavigationButtons(); });
+let searchTimer;
+let composingSearch = false;
+function scheduleSearch() {
+  clearTimeout(searchTimer);
+  if (composingSearch) return;
+  searchTimer = setTimeout(() => {
+    state.searchQuery = $('#library-search').value.trim().toLocaleLowerCase();
+    state.libraryLimit = 200;
+    $('#library-list').scrollTop = 0;
+    renderLibrary(); updateNavigationButtons();
+  }, 150);
+}
+$('#library-search').addEventListener('input', scheduleSearch);
+$('#library-search').addEventListener('compositionstart', () => { composingSearch = true; clearTimeout(searchTimer); });
+$('#library-search').addEventListener('compositionend', () => { composingSearch = false; scheduleSearch(); });
+$('#library-more').addEventListener('click', () => { state.libraryLimit += 200; renderLibrary(); });
 $('#library-sort').addEventListener('change', (event) => {
   state.librarySort = event.target.value || 'default';
   localStorage.setItem('musicserver-library-sort', state.librarySort);
@@ -681,7 +791,12 @@ document.querySelectorAll('.mode-button').forEach((button) => button.addEventLis
   setPlaybackMode(button.dataset.mode);
 }));
 $('#shuffle-button').addEventListener('click', reshuffleLibrary);
-$('#refresh-button').addEventListener('click', () => { loadLibrary(); loadRecommendations(); loadListening(); loadProviderStatus(); });
+$('#refresh-button').addEventListener('click', async () => {
+  $('#refresh-button').disabled = true;
+  $('#refresh-button').setAttribute('aria-busy', 'true');
+  try { await Promise.all([loadLibrary(), loadRecommendations(), loadListening(), loadProviderStatus()]); }
+  finally { $('#refresh-button').disabled = false; $('#refresh-button').setAttribute('aria-busy', 'false'); }
+});
 $('#rediscover-button').addEventListener('click', () => loadListening());
 $('#random-listening-button').addEventListener('click', playRandomListening);
 
@@ -695,9 +810,17 @@ function setListeningCollapsed(collapsed) {
   if (handle) handle.hidden = !collapsed;
   document.querySelector('.app-shell').classList.toggle('listening-collapsed', collapsed);
   localStorage.setItem('musicserver-listening-collapsed', collapsed ? '1' : '0');
+  $('#listening-toggle').setAttribute('aria-expanded', String(!collapsed));
 }
 
 $('#listening-collapse')?.addEventListener('click', () => setListeningCollapsed(true));
+$('#listening-toggle').addEventListener('click', () => {
+  const collapsed = $('#listening-sidebar').classList.contains('collapsed');
+  setListeningCollapsed(!collapsed);
+  if (collapsed) $('#listening-collapse').focus();
+});
+$('#queue-toggle').addEventListener('click', () => { $('#wanted').open = !$('#wanted').open; });
+$('#wanted').addEventListener('toggle', () => $('#queue-toggle').setAttribute('aria-expanded', String($('#wanted').open)));
 $('#listening-handle')?.addEventListener('click', () => {
   setListeningCollapsed(false);
   if (!state.listening.loaded) loadListening();
@@ -705,8 +828,17 @@ $('#listening-handle')?.addEventListener('click', () => {
 $('#play-first').addEventListener('click', () => state.items[0] && playItem(state.items[0], 'recommendations'));
 $('#previous-button').addEventListener('click', previousItem);
 $('#next-button').addEventListener('click', nextItem);
-$('#lyrics-toggle').addEventListener('click', () => { $('#lyrics-panel').hidden = !$('#lyrics-panel').hidden; });
-$('#lyrics-close').addEventListener('click', () => { $('#lyrics-panel').hidden = true; });
+$('#lyrics-toggle').addEventListener('click', () => { setLyricsOpen($('#lyrics-panel').hidden); if (!$('#lyrics-panel').hidden) $('#lyrics-close').focus(); });
+$('#lyrics-close').addEventListener('click', () => setLyricsOpen(false, true));
+$('#volume-control').addEventListener('input', (event) => { $('#audio-player').volume = Number(event.target.value); });
+document.addEventListener('keydown', (event) => {
+  if (event.ctrlKey && event.key.toLowerCase() === 'k') { event.preventDefault(); $('#library-search').focus(); }
+  if (event.key === 'Escape') {
+    if (!$('#lyrics-panel').hidden) setLyricsOpen(false, true);
+    else if (!$('#listening-sidebar').classList.contains('collapsed')) { setListeningCollapsed(true); $('#listening-toggle').focus(); }
+    else if ($('#wanted').open) { $('#wanted').open = false; $('#queue-toggle').focus(); }
+  }
+});
 
 // Custom play/pause control.
 const DEFAULT_PLAY_ICON = '▶';
@@ -716,11 +848,12 @@ const playToggle = $('#play-toggle');
 function setPlayIcon(playing) {
   if (!playToggle) return;
   playToggle.textContent = playing ? DEFAULT_PAUSE_ICON : DEFAULT_PLAY_ICON;
+  playToggle.setAttribute('aria-label', playing ? '暂停' : '播放');
 }
 
 $('#play-toggle').addEventListener('click', () => {
   const audio = $('#audio-player');
-  if (audio.paused) { audio.play().catch(() => {}); } else { audio.pause(); }
+  if (audio.paused) { audio.play().catch(() => { setPlaybackStatus('播放失败 · 点击播放重试'); showToast('播放失败，请检查歌曲是否可用'); }); } else { audio.pause(); }
 });
 
 // Custom progress bar: click / drag to seek.
@@ -744,6 +877,8 @@ function updateProgressUI() {
   if (thumb) thumb.style.left = `${(pct * 100).toFixed(2)}%`;
   if (cur) cur.textContent = fmtTime(current);
   if (dur) dur.textContent = fmtTime(duration);
+  $('#progress-track').setAttribute('aria-valuenow', String(Math.round(pct * 100)));
+  $('#progress-track').setAttribute('aria-valuetext', `${fmtTime(current)} / ${fmtTime(duration)}`);
 }
 
 function seekToFraction(frac) {
@@ -796,15 +931,20 @@ $('#audio-player').addEventListener('timeupdate', () => {
   if (!$('#lyrics-panel').hidden) renderLyrics($('#audio-player').currentTime);
 });
 $('#audio-player').addEventListener('loadedmetadata', updateProgressUI);
-$('#audio-player').addEventListener('play', () => { setPlayIcon(true); render(); });
-$('#audio-player').addEventListener('pause', () => { setPlayIcon(false); render(); });
+$('#audio-player').addEventListener('play', () => { setPlayIcon(true); setPlaybackStatus('正在播放'); render(); });
+$('#audio-player').addEventListener('pause', () => { setPlayIcon(false); setPlaybackStatus('已暂停'); render(); });
+$('#audio-player').addEventListener('waiting', () => setPlaybackStatus('正在缓冲…'));
+$('#audio-player').addEventListener('playing', () => setPlaybackStatus('正在播放'));
+$('#audio-player').addEventListener('error', () => { if (state.currentKey) setPlaybackStatus('播放失败 · 点击播放重试'); });
 
 renderMode(); loadLibrary(); loadRecommendations(); loadListening(); loadProviderStatus();
-setInterval(() => { loadLibrary(true); loadRecommendations(true); loadProviderStatus(); }, 15000);
+setInterval(() => { if (document.hidden) return; loadLibrary(true); loadRecommendations(true); loadProviderStatus(); }, 15000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { loadLibrary(true); loadRecommendations(true); loadProviderStatus(); } });
+$('#library-sort').value = state.librarySort;
 
 // Restore listening sidebar collapse preference.
 try {
-  if (localStorage.getItem('musicserver-listening-collapsed') === '1') { setListeningCollapsed(true); }
+  setListeningCollapsed(localStorage.getItem('musicserver-listening-collapsed') !== '0');
 } catch {}
 
 // Scroll forwarding: when the mouse wheel is on a non-scrollable area inside
