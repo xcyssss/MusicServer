@@ -20,8 +20,7 @@ MusicServer is a Windows-first local music application. The **Tauri v2 desktop A
 - `MusicServer.Http.psm1` — bounded UTF-8 JSON control-request reader shared by API and UI proxy
 - `MusicServer.State.psm1` — canonical transactional state/schema
 - `MusicServer.Providers.psm1` — local/Bilibili provider resolution and health
-- `MusicServer.Migration.psm1` — explicit legacy migration only
-- `MusicServer.DesiredStateWorker.psm1` — desired-state worker helpers
+- `MusicServer.Migration.psm1` — explicit legacy migration only (deprecated, kept for test compatibility)
 - `music_api.ps1` — JSON HTTP API, normally `127.0.0.1:8787`
 - `start_musicserver_ui.ps1` — static WebView UI + `/api/*` proxy, normally `127.0.0.1:8790`
 - `watchdog_ui.ps1` — external UI heartbeat watchdog/restart helper
@@ -177,7 +176,14 @@ For non-trivial work:
 
 After completing a meaningful task, update this `AGENTS.md` checkpoint when the task changes architecture, release behavior, test gates, or important operating rules. Keep only current durable facts; do not accumulate transient debugging notes.
 
-## Current checkpoint — 2026-09-05
+## Current checkpoint — 2026-09-06
+
+- Phase 1 safe cleanup completed on `review/phase1-safe-cleanup` branch:
+  - Deleted `MusicServer.DesiredStateWorker.psm1` (dead code: zero importers, zero callers, zero tests).
+  - Deleted legacy launchers `start_musicserver.cmd`, `start_musicserver.vbs`, `start_navidrome.ps1` (superseded by Tauri APP, zero scheduled task dependencies).
+  - Cleaned local untracked artifacts (`start_musicserver.ps1`, `stop_musicserver.ps1`, `*.lnk.before-*`).
+- Full dependency audit at `docs/DEPENDENCY_AUDIT.md` documents runtime core (9 PS files staged by `prepare_tauri_runtime.ps1`), module dependency graph, file classification, and phased refactoring plan.
+- `MusicServer.Migration.psm1` is deprecated but retained for test compatibility (imported by 4 test files).
 
 - P0 closed: `music_api.ps1` is PS5.1/BOM-safe and provider direct-candidate fallback no longer leaks into unwanted Bilibili search.
 - P1-A closed: CI has a real `desktop-build` gate on a clean Windows runner.
