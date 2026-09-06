@@ -1,12 +1,12 @@
-﻿<#
+<#
 .SYNOPSIS
     手动修正个别歌曲的歌词（当自动匹配错误时用）
 .DESCRIPTION
     直接指定 网易云歌曲ID -> 覆盖写入对应的 .lrc
 .EXAMPLE
-    .\fix_one_lyric.ps1 -FilePattern "*若月亮还没来*" -SongId 1974443814
+    .\scripts\maintenance\fix_one_lyric.ps1 -FilePattern "*若月亮还没来*" -SongId 1974443814
     # 只搜索不写入:
-    .\fix_one_lyric.ps1 -FilePattern "*若月亮还没来*" -Search "若月亮还没来"
+    .\scripts\maintenance\fix_one_lyric.ps1 -FilePattern "*若月亮还没来*" -Search "若月亮还没来"
 #>
 param(
     [Parameter(Mandatory=$true)][string]$FilePattern,

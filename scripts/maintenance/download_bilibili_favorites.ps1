@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     B站收藏夹批量音频下载脚本
 .DESCRIPTION
@@ -12,7 +12,7 @@
 .PARAMETER OutputDir
     音频输出目录，默认 E:\Project\MusicServer\Music
 .EXAMPLE
-    .\download_bilibili_favorites.ps1 -FavoritesUrl "https://www.bilibili.com/medialist/detail/ml1234567890" -CookieFile "cookies.txt"
+    .\scripts\maintenance\download_bilibili_favorites.ps1 -FavoritesUrl "https://www.bilibili.com/medialist/detail/ml1234567890" -CookieFile "cookies.txt"
 #>
 
 param(

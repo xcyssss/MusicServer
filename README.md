@@ -1,4 +1,4 @@
-﻿# MusicServer
+# MusicServer
 
 个人音乐服务器：本地音乐库 + 每日推荐 + Wanted 下载队列 + 歌词 + 播放统计，主客户端为 **Tauri v2 Windows 桌面 APP**。
 
@@ -115,11 +115,11 @@ MusicServer/
 .\daily_cleanup.ps1 -DryRun
 
 # 歌词
-.\fetch_lyrics.ps1 -DryRun
-.\fetch_lyrics.ps1 -Force
+.\scripts\maintenance\fetch_lyrics.ps1 -DryRun
+.\scripts\maintenance\fetch_lyrics.ps1 -Force
 
 # 单曲歌词修复
-.\fix_one_lyric.ps1 -FilePattern "*歌曲名*" -Search "歌曲名"
+.\scripts\maintenance\fix_one_lyric.ps1 -FilePattern "*歌曲名*" -Search "歌曲名"
 ```
 
 ## CI 与发布门禁

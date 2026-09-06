@@ -20,8 +20,7 @@ MusicServer is a Windows-first local music application. The **Tauri v2 desktop A
 - `MusicServer.Http.psm1` — bounded UTF-8 JSON control-request reader shared by API and UI proxy
 - `MusicServer.State.psm1` — canonical transactional state/schema
 - `MusicServer.Providers.psm1` — local/Bilibili provider resolution and health
-- `MusicServer.Migration.psm1` — explicit legacy migration only
-- `MusicServer.DesiredStateWorker.psm1` — desired-state worker helpers
+- `MusicServer.Migration.psm1` — explicit legacy migration only (deprecated, kept for test compatibility)
 - `music_api.ps1` — JSON HTTP API, normally `127.0.0.1:8787`
 - `start_musicserver_ui.ps1` — static WebView UI + `/api/*` proxy, normally `127.0.0.1:8790`
 - `watchdog_ui.ps1` — external UI heartbeat watchdog/restart helper
@@ -85,7 +84,15 @@ A release EXE built and launched from inside a source checkout may detect that c
 MusicServer/
 ├─ .github/workflows/             # CI
 ├─ docs/                          # current docs + archived historical reports
-├─ scripts/                       # build/maintenance helpers
+├─ scripts/
+│  ├─ prepare_tauri_runtime.ps1   # build staging
+│  ├─ measure_musicserver_backend.ps1
+│  └─ maintenance/                # standalone maintenance utilities
+│     ├─ fetch_lyrics.ps1
+│     ├─ fix_one_lyric.ps1
+│     ├─ fix_tags.ps1
+│     ├─ add_song.ps1
+│     └─ download_bilibili_favorites.ps1
 ├─ src-tauri/
 │  ├─ src/main.rs
 │  ├─ resources/runtime/          # generated, ignored except placeholder
@@ -94,11 +101,16 @@ MusicServer/
 │  └─ tauri.conf.json
 ├─ web/
 ├─ tests/
-├─ MusicServer.*.psm1
-├─ music_api.ps1
-├─ start_musicserver_ui.ps1
-├─ watchdog_ui.ps1
-└─ wanted_worker.ps1
+├─ MusicServer.*.psm1             # core modules (do not move — $PSScriptRoot coupling)
+├─ music_api.ps1                  # core runtime
+├─ start_musicserver_ui.ps1       # core runtime
+├─ watchdog_ui.ps1                # core runtime
+├─ wanted_worker.ps1              # core runtime
+├─ daily_recommend.ps1            # operational maintenance tool
+├─ daily_cleanup.ps1              # operational maintenance tool
+├─ lib_playlist.ps1               # shared utility (dot-sourced by daily_cleanup)
+├─ register_wanted_worker.ps1     # operational setup
+└─ start_musicserver_ui.bat       # convenience launcher wrapper
 ```
 
 Historical architecture/hardening reports belong in `docs/archive/`, not in the repository root. Personal Windows file-association helpers do not belong in this product repository.
@@ -177,7 +189,12 @@ For non-trivial work:
 
 After completing a meaningful task, update this `AGENTS.md` checkpoint when the task changes architecture, release behavior, test gates, or important operating rules. Keep only current durable facts; do not accumulate transient debugging notes.
 
-## Current checkpoint — 2026-09-05
+## Current checkpoint — 2026-09-06
+
+- Phase 1 completed and merged (PR #13): deleted `MusicServer.DesiredStateWorker.psm1` and legacy launchers.
+- Phase 2 completed on `review/maintenance-layout-cleanup`: moved 5 standalone maintenance utilities (`fetch_lyrics.ps1`, `fix_one_lyric.ps1`, `fix_tags.ps1`, `add_song.ps1`, `download_bilibili_favorites.ps1`) to `scripts/maintenance/`. All use hardcoded absolute paths (no `$PSScriptRoot` coupling). All doc references updated.
+- `MusicServer.Migration.psm1` is RETAINED (deprecated compatibility layer). Gated behind `daily_recommend.ps1 -MigrateLegacy` (defaults off). Imported by 4 test files (V2, Recommendation, LegacyRetirement, ApiTransaction). Runtime is completely independent. Retirement condition: all users confirmed migrated + tests refactored to direct SQLite fixtures.
+- Full dependency audit at `docs/DEPENDENCY_AUDIT.md`.
 
 - P0 closed: `music_api.ps1` is PS5.1/BOM-safe and provider direct-candidate fallback no longer leaks into unwanted Bilibili search.
 - P1-A closed: CI has a real `desktop-build` gate on a clean Windows runner.
