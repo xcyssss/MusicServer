@@ -135,7 +135,7 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $BuildMarker = 'musicserver-listening-stats-v2'
+          $BuildMarker = 'musicserver-single-page-v3'
           $installer = Get-ChildItem -LiteralPath '.\src-tauri\target\release\bundle\nsis' -Filter '*.exe' -File | Select-Object -First 1
           if (-not $installer) { throw 'Installer not found for smoke test.' }
 
