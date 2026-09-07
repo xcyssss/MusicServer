@@ -429,4 +429,15 @@ function Get-NavidromeSongIdForPath {
     finally { Remove-Item -LiteralPath "$tmp*" -Force -ErrorAction SilentlyContinue }
 }
 
+function Get-MusicServerLocalIdentity {
+    param([Parameter(Mandatory)][string]$File)
+    # Preserve the existing path spelling and hash contract in both API and UI.
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [Text.Encoding]::UTF8.GetBytes([IO.Path]::GetFullPath($File))
+        $hex = [BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant()
+        return 'na-' + $hex.Substring(0, 16)
+    } finally { $sha.Dispose() }
+}
+
 Export-ModuleMember -Function *

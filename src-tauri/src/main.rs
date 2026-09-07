@@ -19,7 +19,7 @@ use tauri::Manager;
 const DEFAULT_UI_PORT: u16 = 8790;
 const DEFAULT_API_PORT: u16 = 8787;
 const FALLBACK_PAIRS: &[(u16, u16)] = &[(8791, 8788), (8792, 8789)];
-const BUILD_MARKER: &str = "musicserver-single-page-v3";
+const BUILD_MARKER: &str = "musicserver-backend-b-v4";
 const LAUNCHER: &str = "start_musicserver_ui.ps1";
 const APP_HOME_ENV: &str = "MUSICSERVER_APP_HOME";
 const PACKAGED_APP_HOME_DIR: &str = "com.musicserver.desktop";
@@ -165,7 +165,15 @@ fn copy_runtime_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
             if let Some(parent) = destination_path.parent() {
                 fs::create_dir_all(parent)?;
             }
-            fs::copy(&source_path, &destination_path)?;
+            // Same-version launches must not rewrite every packaged file (and
+            // retrigger antivirus scans). Compare content, not timestamps: a
+            // damaged or same-size upgraded file must still be replaced.
+            if !destination_path.is_file()
+                || fs::metadata(&source_path)?.len() != fs::metadata(&destination_path)?.len()
+                || fs::read(&source_path)? != fs::read(&destination_path)?
+            {
+                fs::copy(&source_path, &destination_path)?;
+            }
         }
     }
     Ok(())
@@ -182,6 +190,44 @@ fn stage_runtime(bundle_runtime: &Path, app_home: &Path) -> std::io::Result<()> 
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn staging_skips_equal_files_and_repairs_same_size_changes() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            env::temp_dir().join(format!("musicserver-stage-{}-{unique}", std::process::id()));
+        let source = root.join("source");
+        let target = root.join("target");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join(LAUNCHER), b"first").unwrap();
+        stage_runtime(&source, &target).unwrap();
+        let launcher = target.join(LAUNCHER);
+        let before = fs::metadata(&launcher).unwrap().modified().unwrap();
+        let original_permissions = fs::metadata(&launcher).unwrap().permissions();
+        let mut read_only = original_permissions.clone();
+        read_only.set_readonly(true);
+        fs::set_permissions(&launcher, read_only).unwrap();
+        fs::write(target.join("user-data"), b"preserve").unwrap();
+        stage_runtime(&source, &target).unwrap();
+        fs::set_permissions(&launcher, original_permissions).unwrap();
+        assert_eq!(before, fs::metadata(&launcher).unwrap().modified().unwrap());
+        fs::write(&launcher, b"wrong").unwrap();
+        stage_runtime(&source, &target).unwrap();
+        assert_eq!(fs::read(&launcher).unwrap(), b"first");
+        fs::write(source.join(LAUNCHER), b"newer").unwrap();
+        stage_runtime(&source, &target).unwrap();
+        assert_eq!(fs::read(&launcher).unwrap(), b"newer");
+        assert_eq!(fs::read(target.join("user-data")).unwrap(), b"preserve");
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 
 /// 拉起指定端口的 launcher 并返回子进程。失败返回 None（调用方会继续尝试）。
@@ -239,13 +285,23 @@ fn ensure_ui_ready(bundle_runtime: &Path, app_home: &Path, state: &AppState) -> 
     let mut runtime_staged = false;
 
     for (ui_port, api_port) in pairs {
-        if service_is_current(ui_port, api_port) {
-            return Some(endpoint_url(ui_port));
+        // Probe ownership once. A closed UI needs no HTTP identity request;
+        // repeated closed-port connects on Windows each consume their timeout.
+        let (ui_open, api_open) = std::thread::scope(|scope| {
+            let ui = scope.spawn(|| port_open(ui_port));
+            let api = port_open(api_port);
+            (ui.join().unwrap_or(false), api)
+        });
+        if ui_open {
+            if api_open && service_is_current(ui_port, api_port) {
+                return Some(endpoint_url(ui_port));
+            }
+            continue;
         }
 
         // Never compete with a listener we cannot identify. A current API is
         // safe to reuse when only its UI port is free.
-        if port_open(ui_port) || (port_open(api_port) && !api_is_current(api_port)) {
+        if api_open && !api_is_current(api_port) {
             continue;
         }
 

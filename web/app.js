@@ -1,7 +1,7 @@
 // Tauri startup uses this marker to reject a stale 8790 UI process after an
 // upgrade. Keep it in the served bundle so the desktop shell can verify that
 // the WebView is loading the same source revision as the backend.
-const MUSICSERVER_BUILD_MARKER = 'musicserver-single-page-v3';
+const MUSICSERVER_BUILD_MARKER = 'musicserver-backend-b-v4';
 
 const storedLibraryOrder = (() => {
   try {
@@ -628,7 +628,7 @@ async function loadLibrary(silent = false) {
   return refreshOnce('library', async () => {
   const revision = state.libraryRevision;
   try {
-    const payload = await fetchJson('/api/library');
+    const payload = await fetchJson(silent ? '/api/library' : '/api/library?refresh=1');
     if (revision !== state.libraryRevision) return;
     if (!Array.isArray(payload.items)) throw new Error('Invalid library response');
     syncLibrary(payload.items); renderLibrary(); updateNavigationButtons();

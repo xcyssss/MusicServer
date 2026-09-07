@@ -11,12 +11,8 @@ $ProgressPreference = 'SilentlyContinue'
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 try { Add-Type -AssemblyName System.Web -ErrorAction SilentlyContinue } catch {}
 try {
-    # The UI proxies every /api/* request to the backend over HttpWebRequest while
-    # serving all clients from a single-threaded HttpListener loop. With the .NET
-    # default connection limit (2) the proxy can deadlock: a second concurrent
-    # browser request blocks waiting for a pooled connection that only the blocked
-    # handler thread could release. Raise the limit so concurrent proxy requests
-    # never queue behind each other.
+    # Media runspaces and the control proxy share .NET's connection pool. Keep
+    # local API connections available while concurrent lyrics requests run.
     [System.Net.ServicePointManager]::DefaultConnectionLimit = 50
     [System.Net.ServicePointManager]::MaxServicePointIdleTime = 10000
 } catch {}
@@ -52,6 +48,7 @@ $script:LastActivityAt = [DateTime]::UtcNow
 $script:CurrentRequest = ''
 $script:UiLibraryCache = $null
 $script:UiLibraryCacheAt = [DateTime]::MinValue
+$script:NextHeartbeatAt = [DateTime]::MinValue
 
 if (-not (Test-Path -LiteralPath $LogRoot)) {
     New-Item -ItemType Directory -Force -Path $LogRoot | Out-Null
@@ -69,7 +66,7 @@ function Test-ApiReady {
     try {
         $client = New-Object System.Net.Sockets.TcpClient
         try {
-            $ok = $client.ConnectAsync('127.0.0.1', ([Uri]$ApiPrefix).Port).Wait(1500)
+            $ok = $client.ConnectAsync('127.0.0.1', ([Uri]$ApiPrefix).Port).Wait(400)
             return $ok
         } finally {
             $client.Dispose()
@@ -88,7 +85,7 @@ function Test-UiReady {
     try {
         $client = New-Object System.Net.Sockets.TcpClient
         try {
-            $ok = $client.ConnectAsync('127.0.0.1', ([Uri]$UiPrefix).Port).Wait(1500)
+            $ok = $client.ConnectAsync('127.0.0.1', ([Uri]$UiPrefix).Port).Wait(400)
             return $ok
         } finally {
             $client.Dispose()
@@ -206,21 +203,14 @@ function Invoke-NavidromeSqliteJson {
 
 function Get-LocalLibraryId {
     param([Parameter(Mandatory)][string]$File)
-    $sha = [System.Security.Cryptography.SHA256]::Create()
-    try {
-        $bytes = [System.Text.Encoding]::UTF8.GetBytes([System.IO.Path]::GetFullPath($File))
-        $hex = [System.BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant()
-        return 'na-' + $hex.Substring(0, 16)
-    } finally {
-        $sha.Dispose()
-    }
+    return Get-MusicServerLocalIdentity -File $File
 }
 
 function Get-LrcPath {
     param([string]$File)
     if (-not $File) { return $null }
     $candidate = [System.IO.Path]::ChangeExtension($File, '.lrc')
-    if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+    if ([IO.File]::Exists($candidate)) { return $candidate }
     return $null
 }
 
@@ -309,7 +299,7 @@ function Get-UiLibrary {
             }
             $file = [System.IO.Path]::GetFullPath($file)
         } catch { continue }
-        if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { continue }
+        if (-not [IO.File]::Exists($file)) { continue }
 
         $seenFiles[$file.ToLowerInvariant()] = $true
         $id = 'library-' + [string]$row.id
@@ -353,6 +343,7 @@ function Get-UiLibrary {
     }
 
     $script:UiLibraryCache = @($items)
+    $script:UiLibraryJsonCache = $null
     $script:UiLibraryCacheAt = [DateTime]::UtcNow
     return @($items)
 }
@@ -362,12 +353,24 @@ function Resolve-UiLibraryFile {
     Write-UiLog "RESOLVE $Id cacheHit=$($script:LibraryFiles.ContainsKey($Id)) cacheItems=$($script:LibraryFiles.Count)"
     if ($script:LibraryFiles.ContainsKey($Id)) {
         $candidate = [string]$script:LibraryFiles[$Id]
-        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+        if ([IO.File]::Exists($candidate)) { return $candidate }
+    }
+    if ($Id.StartsWith('library-')) {
+        $navId = $Id.Substring(8).Replace("'", "''")
+        $rows = @(Invoke-NavidromeSqliteJson -Sql "SELECT path FROM media_file WHERE missing = 0 AND id = '$navId' LIMIT 1;")
+        if ($rows.Count -gt 0) {
+            $file = [string]$rows[0].path
+            if ($file) {
+                if (-not [IO.Path]::IsPathRooted($file)) { $file = Join-Path $Config.MusicDir $file }
+                if ([IO.File]::Exists($file)) { return [IO.Path]::GetFullPath($file) }
+            }
+        }
+        return $null
     }
     [void](Get-UiLibrary)
     if ($script:LibraryFiles.ContainsKey($Id)) {
         $candidate = [string]$script:LibraryFiles[$Id]
-        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
+        if ([IO.File]::Exists($candidate)) { return $candidate }
     }
     return $null
 }
@@ -543,7 +546,7 @@ function Send-LibraryStream {
             $n = [Math]::Min([long]$rEnd, $length)
             $start = $length - $n; $end = $length - 1
         }
-        if ($start -ge $length) {
+        if ($start -ge $length -or $start -gt $end) {
             # Requested range beyond EOF: 416.
             try {
                 $Context.Response.StatusCode = 416
@@ -831,8 +834,12 @@ function Handle-Request {
         '/favicon.ico' { $Context.Response.StatusCode = 204; $Context.Response.Close(); return }
         '/api/library' {
             if ($Context.Request.HttpMethod -eq 'GET') {
+                if ($Context.Request.QueryString['refresh'] -eq '1') { $script:UiLibraryCache = $null }
                 $items = @(Get-UiLibrary)
-                Send-Json -Context $Context -Body @{ items = $items; total = $items.Count }
+                if ($null -eq $script:UiLibraryJsonCache) {
+                    $script:UiLibraryJsonCache = ConvertTo-Json -InputObject @{ items = $items; total = $items.Count } -Depth 20 -Compress
+                }
+                Send-JsonRaw -Context $Context -Json $script:UiLibraryJsonCache
                 return
             }
         }
@@ -871,6 +878,83 @@ function Handle-Request {
     $Context.Response.Close()
 }
 
+# Slow read-only media requests get four isolated runspaces, with no waiting
+# queue. Lifecycle/control requests remain on the owner loop. Each runspace has
+# its own derived library cache; only the individual HttpListenerContext crosses
+# the boundary, never the main loop's mutable script context or client registry.
+function Initialize-MediaPool {
+    $initial = [Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+    $initial.ImportPSModule(@((Join-Path $Root 'MusicServer.Core.psm1')))
+    foreach ($name in @('Write-UiLog','Invoke-NavidromeSqliteJson','Get-LocalLibraryId','Get-LrcPath','Get-LyricQuality','Get-NeteaseIdForTrack','Get-NetEaseLyricsById','Get-UiLibrary','Resolve-UiLibraryFile','Send-ResponseBytes','Send-Json','ConvertTo-JsonStringValue','Send-LyricsJson','Send-JsonRaw','Send-LibraryStream','Send-LibraryLyrics','Send-TrackLyrics')) {
+        $definition = (Get-Command $name -CommandType Function).Definition
+        $initial.Commands.Add([Management.Automation.Runspaces.SessionStateFunctionEntry]::new($name, $definition))
+    }
+    foreach ($name in @('Root','Config','ApiPrefix','UiLog','LyricsReportPath')) {
+        $initial.Variables.Add([Management.Automation.Runspaces.SessionStateVariableEntry]::new($name, (Get-Variable $name -ValueOnly), 'Read-only request configuration'))
+    }
+    $script:MediaJobs = [Collections.ArrayList]::new()
+    $script:MediaPool = [RunspaceFactory]::CreateRunspacePool(1, 4, $initial, $Host)
+    $script:MediaPool.Open()
+}
+
+function Complete-MediaJobs {
+    foreach ($job in @($script:MediaJobs.ToArray())) {
+        if ($job.Async.IsCompleted) {
+            try { $job.PowerShell.EndInvoke($job.Async) | Out-Null } catch {}
+            foreach ($errorRecord in $job.PowerShell.Streams.Error) { Write-UiLog "Media request failed: $errorRecord" }
+            try { $job.Context.Response.Close() } catch {}
+            $job.PowerShell.Dispose()
+            [void]$script:MediaJobs.Remove($job)
+        } elseif ($job.TimeoutSeconds -gt 0 -and -not $job.Stopping -and ([DateTime]::UtcNow - $job.Started).TotalSeconds -gt $job.TimeoutSeconds) {
+            try { $job.Context.Response.Abort() } catch {}
+            $job.Stopping = $true
+            [void]$job.PowerShell.BeginStop($null, $null)
+        }
+    }
+}
+
+function Start-MediaRequest {
+    param($Context)
+    if ($Context.Request.HttpMethod -ne 'GET' -or $Context.Request.Url.AbsolutePath -notmatch '^/api/(library|tracks)/([^/]+)/(stream|lyrics)$') { return $false }
+    $kind = $Matches[1]; $id = [Uri]::UnescapeDataString($Matches[2]); $action = $Matches[3]
+    if ($kind -eq 'tracks' -and $action -eq 'stream') { return $false }
+    # Reserve one slot for playback so rapid lyric changes cannot occupy every
+    # media channel while their upstream responses finish or time out.
+    $lyricsJobs = @($script:MediaJobs | Where-Object { $_.Action -eq 'lyrics' }).Count
+    if ($script:MediaJobs.Count -ge 4 -or ($action -eq 'lyrics' -and $lyricsJobs -ge 3)) {
+        $Context.Response.StatusCode = 503
+        $Context.Response.Headers['Retry-After'] = '1'
+        $Context.Response.Close()
+        return $true
+    }
+    $ps = [PowerShell]::Create()
+    $ps.RunspacePool = $script:MediaPool
+    [void]$ps.AddScript({
+        param($requestContext, $kind, $id, $action, $libraryFiles)
+        $ErrorActionPreference = 'Stop'
+        $ProgressPreference = 'SilentlyContinue'
+        # The owner supplies a copy; lookups still check file existence. No
+        # pooled runspace retains or mutates the owner's map between requests.
+        $script:LibraryFiles = $libraryFiles
+        $script:UiLibraryCache = $null
+        $script:UiLibraryCacheAt = [DateTime]::MinValue
+        try {
+            if ($kind -eq 'tracks') { Send-TrackLyrics -Context $requestContext -TrackId $id }
+            elseif ($action -eq 'stream') { Send-LibraryStream -Context $requestContext -Id $id }
+            else { Send-LibraryLyrics -Context $requestContext -Id $id }
+        } catch {
+            Write-UiLog "Media handler failed: $($_.Exception.Message)"
+            try { $requestContext.Response.StatusCode = 502; $requestContext.Response.Close() } catch {}
+        }
+    }).AddArgument($Context).AddArgument($kind).AddArgument($id).AddArgument($action).AddArgument($script:LibraryFiles.Clone())
+    $async = $ps.BeginInvoke()
+    # Audio transfers may legitimately exceed 35 seconds; their individual
+    # writes retain the existing five-second stall deadline.
+    $deadlineSeconds = if ($action -eq 'lyrics') { 35 } else { 0 }
+    [void]$script:MediaJobs.Add([pscustomobject]@{ PowerShell = $ps; Async = $async; Context = $Context; Started = [DateTime]::UtcNow; Stopping = $false; TimeoutSeconds = $deadlineSeconds; Action = $action })
+    return $true
+}
+
 if (-not (Test-Path -LiteralPath (Join-Path $WebRoot 'index.html') -PathType Leaf)) {
     throw "Web UI not found under $WebRoot"
 }
@@ -900,6 +984,7 @@ try {
         return
     }
     Write-UiLog "UI started at $UiPrefix pid=$PID"
+    Initialize-MediaPool
 
     # External watchdog: watches the heartbeat file this loop writes and
     # restarts the UI if a wedged handler freezes the single-threaded listener.
@@ -920,12 +1005,13 @@ try {
 
     $pending = $script:Listener.BeginGetContext($null, $null)
     while ($script:Listener.IsListening) {
-        if ($pending.AsyncWaitHandle.WaitOne(1000)) {
+        Complete-MediaJobs
+        if ($pending.AsyncWaitHandle.WaitOne(100)) {
             $context = $script:Listener.EndGetContext($pending)
             if ($script:Listener.IsListening) { $pending = $script:Listener.BeginGetContext($null, $null) }
             try {
                 $reqStart = [DateTime]::UtcNow
-                Handle-Request -Context $context
+                if (-not (Start-MediaRequest -Context $context)) { Handle-Request -Context $context }
                 $reqMs = [int]([DateTime]::UtcNow - $reqStart).TotalMilliseconds
                 if ($reqMs -gt 2000) { Write-UiLog "SLOW $($context.Request.Url.AbsolutePath) took ${reqMs}ms" }
             } catch {
@@ -942,8 +1028,11 @@ try {
         }
 
         Remove-StaleClients
-        # Heartbeat for the external watchdog: updated every main-loop iteration.
-        try { [System.IO.File]::WriteAllText($UiHeartbeatFile, [DateTime]::UtcNow.ToString('o')) } catch {}
+        # Reap I/O promptly without rewriting the watchdog file ten times/sec.
+        if ([DateTime]::UtcNow -ge $script:NextHeartbeatAt) {
+            try { [System.IO.File]::WriteAllText($UiHeartbeatFile, [DateTime]::UtcNow.ToString('o')) } catch {}
+            $script:NextHeartbeatAt = [DateTime]::UtcNow.AddSeconds(1)
+        }
         if (Should-AutoStop) {
             Write-UiLog 'No active browser clients remain; stopping UI and owned API process.'
             break
@@ -953,6 +1042,12 @@ try {
     Write-UiLog "Launcher failed: $($_.Exception.Message)"
     throw
 } finally {
+    foreach ($job in @($script:MediaJobs)) {
+        if (-not $job) { continue }
+        try { $job.Context.Response.Abort() } catch {}
+        try { $job.PowerShell.Stop(); $job.PowerShell.Dispose() } catch {}
+    }
+    if ($script:MediaPool) { $script:MediaPool.Close(); $script:MediaPool.Dispose() }
     if ($script:Listener) {
         try { if ($script:Listener.IsListening) { $script:Listener.Stop() } } catch {}
         try { $script:Listener.Close() } catch {}

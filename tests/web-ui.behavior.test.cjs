@@ -54,6 +54,14 @@ async function app() {
 const json = payload => ({ ok: true, json: async () => payload });
 const library = [{ id: 'library-a', title: '春天', artist: '测试歌手', album: '专辑', duration: 120, stream_url: '/api/library/library-a/stream', local_status: 'LOCAL' }];
 
+test('explicit library refresh bypasses the derived cache while background polling reuses it', async () => {
+  const a = await app();
+  await a.run('loadLibrary()');
+  await a.run('loadLibrary(true)');
+  assert.equal(a.requests[0].url, '/api/library?refresh=1');
+  assert.equal(a.requests[1].url, '/api/library');
+});
+
 test('metadata and pause changes render; unchanged data keeps the list; clearing search restores rows', async () => {
   const a = await app(); a.context.tracks = library;
   a.run('syncLibrary(tracks); renderLibrary();');

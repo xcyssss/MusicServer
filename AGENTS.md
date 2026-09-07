@@ -124,7 +124,7 @@ CI: `.github/workflows/core-tests.yml` on `windows-latest`.
 | Job | Responsibility |
 |---|---|
 | `state` | Core, Database, V2, WorkerConcurrency, Recommendation, LegacyRetirement, Listening, Web, Tauri |
-| `api` | Http, UiProxyRuntime, ApiTransaction, ApiRuntime |
+| `api` | Http, UiProxyRuntime, MediaRuntime, ApiTransaction, ApiRuntime |
 | `desktop-build` | real Rust/Tauri compile, NSIS installer, installed-app portability smoke, installer artifact |
 
 The desktop gate must include at least:
@@ -189,7 +189,14 @@ For non-trivial work:
 
 After completing a meaningful task, update this `AGENTS.md` checkpoint when the task changes architecture, release behavior, test gates, or important operating rules. Keep only current durable facts; do not accumulate transient debugging notes.
 
-## Current checkpoint — 2026-09-06
+## Current checkpoint — 2026-09-07
+
+- B backend reads: recommendation assembly uses four bounded State queries (one for an empty day); health statistics use one query. Schema bootstrap groups compatible DDL while retaining the lease-column upgrade and existing durability settings.
+- API Navidrome snapshots/maps live for one request only; API and UI share the stable local identity helper. UI caches serialized library responses with the existing list lifetime; explicit refresh sends `refresh=1`, and deletion invalidates the list. External downloads become visible on the existing 30-second refresh lifetime or explicit refresh.
+- UI media GETs use at most four isolated runspaces, with copied file maps and explicit request contexts. Lyrics may occupy at most three slots, reserving playback capacity. Excess requests return 503/Retry-After. Lyrics have a 35-second job deadline; audio retains five-second stalled-write deadlines. Lifecycle/control handling stays on the owner loop; teardown aborts media requests and disposes the pool.
+- Desktop startup probes each port pair once before identity checks and skips copying byte-identical runtime files. Same-size changes/corruption are still repaired; runtime staging behavior is covered by `cargo test --locked` in the desktop gate.
+- `tests/MusicServer.MediaRuntime.Tests.ps1` covers slow lyrics/audio, bounded admission, health/heartbeat responsiveness, Range/416, disconnect recovery and explicit library-cache refresh with isolated real PS5.1 services.
+- `scripts/measure_musicserver_startup.ps1` measures an actual EXE against isolated empty state and current UI/API markers, omitting the downloader. It records service readiness, not rendered UI readiness, and does not replace installed-app shutdown validation.
 
 - Phase 1 completed and merged (PR #13): deleted `MusicServer.DesiredStateWorker.psm1` and legacy launchers.
 - Phase 2 completed on `review/maintenance-layout-cleanup`: moved 5 standalone maintenance utilities (`fetch_lyrics.ps1`, `fix_one_lyric.ps1`, `fix_tags.ps1`, `add_song.ps1`, `download_bilibili_favorites.ps1`) to `scripts/maintenance/`. All use hardcoded absolute paths (no `$PSScriptRoot` coupling). All doc references updated.

@@ -144,6 +144,32 @@ Describe 'MusicServer Hardening v2 - Recommendation State' {
         $script:RecommendationTestConfig = $null
     }
 
+    It 'assembles recommendations with four reads and preserves latest feedback and missing wanted rows' {
+        $date = Get-TodayDate
+        $tracks = @(); $rows = @()
+        foreach ($rank in 1..25) {
+            $track = New-RecommendationTestTrack -Title "Batch $rank"
+            $row = New-RecommendationTestRow -Track $track -Date $date -Rank $rank
+            $tracks += $track; $rows += $row
+        }
+        Save-DailyRecommendationsDb -Recommendations $rows -Tracks $tracks -Date $date | Out-Null
+        $lastId = [string]$track.id
+        Write-FeedbackDb -TrackId $lastId -FeedbackType 'LIKE'
+        Write-FeedbackDb -TrackId $lastId -FeedbackType 'UNLIKE'
+        Write-FeedbackDb -TrackId $lastId -FeedbackType 'SKIP'
+        $before = Get-MusicServerSqliteInvocationCount
+        $batch = @(Get-TodayRecommendationBatchDb -Date $date)
+        ((Get-MusicServerSqliteInvocationCount) - $before) | Should Be 4
+        $batch.Count | Should Be 25
+        $batch[-1].Feedback | Should Be 'UNLIKE'
+        $batch[-1].Wanted | Should BeNullOrEmpty
+        $batch[-1].Track.title | Should Be 'Batch 25'
+        $batch[-1].Recommendation.rank | Should Be 25
+        $before = Get-MusicServerSqliteInvocationCount
+        @(Get-TodayRecommendationBatchDb -Date '1900-01-01').Count | Should Be 0
+        ((Get-MusicServerSqliteInvocationCount) - $before) | Should Be 1
+    }
+
     It 'turns explicit LIKE into a weight 5 positive seed' {
         $track = New-RecommendationTestTrack -Title 'Like Seed'
         Save-CanonicalTrackDb -Track $track | Out-Null
