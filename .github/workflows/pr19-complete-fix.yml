@@ -41,16 +41,18 @@ jobs:
           if ($insert -lt 0) { throw 'Temporary helper AGENTS write line not found.' }
           $newLine = '    $agents = [regex]::Replace($agents, ''(?m)^MUSICSERVER_APP_HOME$'', "MUSICSERVER_APP_HOME`r`nMUSICSERVER_MUSIC_DIR", 1)'
           $lines.Insert($insert, $newLine)
-
-          $favRead = -1
-          for ($i = 0; $i -lt $lines.Count; $i++) {
-            if ($lines[$i] -eq '$fav = Read-RepoText ''scripts/maintenance/download_bilibili_favorites.ps1''') { $favRead = $i; break }
-          }
-          if ($favRead -lt 0) { throw 'Temporary helper favorites read line not found.' }
-          $favDocLine = '$fav = $fav.Replace(''音频输出目录，默认 E:\Project\MusicServer\Music'', ''音频输出目录，默认使用 MusicServer 当前配置的音乐库'')'
-          $lines.Insert($favRead + 1, $favDocLine)
-
           [IO.File]::WriteAllLines($path, $lines, (New-Object Text.UTF8Encoding($true)))
+
+          # Remove the first legacy-path occurrence (the parameter help text).
+          # The helper itself will replace the remaining occurrence, which is
+          # the actual OutputDir default in the parameter block.
+          $favPath = '.\scripts\maintenance\download_bilibili_favorites.ps1'
+          $favText = [IO.File]::ReadAllText($favPath, [Text.Encoding]::UTF8)
+          $legacy = 'E:\Project\MusicServer\Music'
+          $idx = $favText.IndexOf($legacy, [StringComparison]::Ordinal)
+          if ($idx -lt 0) { throw 'Favorites legacy documentation path not found.' }
+          $favText = $favText.Substring(0, $idx) + '<configured MusicServer library>' + $favText.Substring($idx + $legacy.Length)
+          [IO.File]::WriteAllText($favPath, $favText, (New-Object Text.UTF8Encoding($true)))
 
       - name: Apply completion patch
         shell: powershell
