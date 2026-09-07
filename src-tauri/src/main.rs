@@ -13,6 +13,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+mod runtime_manifest;
 mod startup_probe;
 
 use tauri::Manager;
@@ -171,6 +172,7 @@ fn copy_runtime_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
 /// Synchronize only packaged runtime files into the writable APP home. Existing
 /// Music/, DailyMix_data/, Navidrome/, logs/ and user files are not deleted.
 fn stage_runtime(bundle_runtime: &Path, app_home: &Path) -> std::io::Result<()> {
+    runtime_manifest::verify(bundle_runtime, BUILD_MARKER)?;
     copy_runtime_tree(bundle_runtime, app_home)?;
     if !has_launcher(app_home) {
         return Err(std::io::Error::new(
@@ -197,6 +199,7 @@ mod tests {
         let target = root.join("target");
         fs::create_dir_all(&source).unwrap();
         fs::write(source.join(LAUNCHER), b"first").unwrap();
+        runtime_manifest::fixture(&source, BUILD_MARKER);
         stage_runtime(&source, &target).unwrap();
         let launcher = target.join(LAUNCHER);
         let before = fs::metadata(&launcher).unwrap().modified().unwrap();
@@ -205,13 +208,16 @@ mod tests {
         read_only.set_readonly(true);
         fs::set_permissions(&launcher, read_only).unwrap();
         fs::write(target.join("user-data"), b"preserve").unwrap();
+        runtime_manifest::fixture(&source, BUILD_MARKER);
         stage_runtime(&source, &target).unwrap();
         fs::set_permissions(&launcher, original_permissions).unwrap();
         assert_eq!(before, fs::metadata(&launcher).unwrap().modified().unwrap());
         fs::write(&launcher, b"wrong").unwrap();
+        runtime_manifest::fixture(&source, BUILD_MARKER);
         stage_runtime(&source, &target).unwrap();
         assert_eq!(fs::read(&launcher).unwrap(), b"first");
         fs::write(source.join(LAUNCHER), b"newer").unwrap();
+        runtime_manifest::fixture(&source, BUILD_MARKER);
         stage_runtime(&source, &target).unwrap();
         assert_eq!(fs::read(&launcher).unwrap(), b"newer");
         assert_eq!(fs::read(target.join("user-data")).unwrap(), b"preserve");

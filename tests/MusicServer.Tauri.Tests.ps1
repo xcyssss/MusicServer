@@ -75,6 +75,14 @@ Describe 'MusicServer Tauri desktop shell' {
         try {
             & (Join-Path $ProjectRoot 'scripts\prepare_tauri_runtime.ps1') -ProjectRoot $ProjectRoot -Destination $packageRoot | Out-Null
             $manifest = Get-Content -LiteralPath (Join-Path $packageRoot 'runtime-manifest.json') -Raw | ConvertFrom-Json
+            $manifest.schema | Should Be 2
+            Import-Module (Join-Path $ProjectRoot 'MusicServer.Identity.psm1') -Force
+            $manifest.build_id | Should Be (Get-MusicServerBuildIdentity -Root $ProjectRoot)
+            foreach ($entry in $manifest.files) {
+                $file = Join-Path $packageRoot $entry.path
+                (Get-Item -LiteralPath $file).Length | Should Be $entry.size
+                (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() | Should Be $entry.sha256
+            }
             ($manifest.runtime_files -contains 'MusicServer.Http.psm1') | Should Be $true
             foreach ($relative in $manifest.runtime_files) { (Test-Path -LiteralPath (Join-Path $packageRoot $relative) -PathType Leaf) | Should Be $true }
             Import-Module (Join-Path $packageRoot 'MusicServer.Http.psm1') -Force

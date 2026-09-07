@@ -22,11 +22,7 @@ try {
     $bin = Join-Path $fixture.Root 'desktop-bin'
     $bundle = Join-Path $bin 'resources/runtime'
     New-Item -ItemType Directory -Path $bundle -Force | Out-Null
-    foreach ($name in @('start_musicserver_ui.ps1','music_api.ps1','watchdog_ui.ps1','MusicServer.Core.psm1','MusicServer.Database.psm1','MusicServer.State.psm1','MusicServer.Http.psm1','MusicServer.Identity.psm1','wanted_worker.ps1','MusicServer.Providers.psm1','web')) {
-        Copy-Item -LiteralPath (Join-Path $RuntimeSource $name) -Destination $bundle -Recurse
-    }
-    New-Item -ItemType Directory -Path (Join-Path $bundle 'tools') -Force | Out-Null
-    Copy-Item -LiteralPath $fixture.Config.Sqlite -Destination (Join-Path $bundle 'tools/sqlite3.exe')
+    & (Join-Path $RuntimeSource 'scripts/prepare_tauri_runtime.ps1') -ProjectRoot $RuntimeSource -Destination $bundle | Out-Null
     $testExe = Join-Path $bin 'musicserver-desktop.exe'
     Copy-Item -LiteralPath $exePath -Destination $testExe
     Import-Module (Join-Path $RuntimeSource 'MusicServer.Identity.psm1') -Force
