@@ -66,7 +66,7 @@ jobs:
           Import-Module Pester -RequiredVersion 3.4.0 -Force
           $groups = @{
             state = @('Core', 'Database', 'V2', 'WorkerConcurrency', 'Recommendation', 'LegacyRetirement', 'Listening', 'Web', 'Tauri')
-            api   = @('Http', 'UiProxyRuntime', 'ApiTransaction', 'ApiRuntime')
+            api   = @('Http', 'UiProxyRuntime', 'MediaRuntime', 'ApiTransaction', 'ApiRuntime')
           }
           $paths = @($groups['${{ matrix.group }}'] | ForEach-Object { ".\tests\MusicServer.$_.Tests.ps1" })
           Write-Host "Suites: $($paths -join ', ')"
@@ -106,6 +106,11 @@ jobs:
         shell: powershell
         run: cargo check --locked
 
+      - name: Runtime staging regression
+        working-directory: src-tauri
+        shell: powershell
+        run: cargo test --locked
+
       - name: Ensure sqlite3 for portable runtime
         shell: powershell
         run: |
@@ -135,7 +140,7 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $BuildMarker = 'musicserver-single-page-v3'
+          $BuildMarker = 'musicserver-backend-b-v4'
           $installer = Get-ChildItem -LiteralPath '.\src-tauri\target\release\bundle\nsis' -Filter '*.exe' -File | Select-Object -First 1
           if (-not $installer) { throw 'Installer not found for smoke test.' }
 
