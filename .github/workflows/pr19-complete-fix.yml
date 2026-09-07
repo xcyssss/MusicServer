@@ -28,13 +28,13 @@ jobs:
           $lines = [System.Collections.Generic.List[string]]@(Get-Content -LiteralPath $path)
           $bad = -1
           for ($i = 0; $i -lt $lines.Count; $i++) {
-            if ($lines[$i].Contains("$agents = $agents.Replace('MUSICSERVER_APP_HOME'")) { $bad = $i; break }
+            if ($lines[$i] -match '\$agents\s*=\s*\$agents\.Replace\(''MUSICSERVER_APP_HOME''') { $bad = $i; break }
           }
           if ($bad -lt 0) { throw 'Temporary helper AGENTS replacement line not found.' }
           $lines.RemoveAt($bad)
           $insert = -1
           for ($i = 0; $i -lt $lines.Count; $i++) {
-            if ($lines[$i] -eq "    Write-RepoText 'AGENTS.md' $agents") { $insert = $i; break }
+            if ($lines[$i] -eq '    Write-RepoText ''AGENTS.md'' $agents') { $insert = $i; break }
           }
           if ($insert -lt 0) { throw 'Temporary helper AGENTS write line not found.' }
           $newLine = '    $agents = [regex]::Replace($agents, ''(?m)^MUSICSERVER_APP_HOME$'', "MUSICSERVER_APP_HOME`r`nMUSICSERVER_MUSIC_DIR", 1)'
