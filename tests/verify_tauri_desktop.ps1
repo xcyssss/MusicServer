@@ -8,11 +8,13 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$BuildMarker = 'musicserver-backend-b-v5'
+
 $launchedDesktopPid = $null
 if (-not $Root) {
     $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 }
+Import-Module (Join-Path $Root 'MusicServer.Identity.psm1') -Force
+$BuildMarker = Get-MusicServerBuildIdentity -Root $Root
 if (-not $Executable) {
     $Executable = Join-Path $Root 'src-tauri\target\release\musicserver-desktop.exe'
 }

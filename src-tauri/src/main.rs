@@ -13,6 +13,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+mod runtime_manifest;
 mod startup_probe;
 
 use tauri::Manager;
@@ -20,7 +21,7 @@ use tauri::Manager;
 const DEFAULT_UI_PORT: u16 = 8790;
 const DEFAULT_API_PORT: u16 = 8787;
 const FALLBACK_PAIRS: &[(u16, u16)] = &[(8791, 8788), (8792, 8789)];
-const BUILD_MARKER: &str = "musicserver-backend-b-v5";
+const BUILD_MARKER: &str = env!("MUSICSERVER_BUILD_ID");
 const LAUNCHER: &str = "start_musicserver_ui.ps1";
 const APP_HOME_ENV: &str = "MUSICSERVER_APP_HOME";
 const PACKAGED_APP_HOME_DIR: &str = "com.musicserver.desktop";
@@ -140,6 +141,14 @@ fn resolve_app_home() -> PathBuf {
 }
 
 fn copy_runtime_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
+    copy_runtime_tree_into(source, destination, destination)
+}
+
+fn copy_runtime_tree_into(
+    source: &Path,
+    destination: &Path,
+    staging_root: &Path,
+) -> std::io::Result<()> {
     fs::create_dir_all(destination)?;
     for entry in fs::read_dir(source)? {
         let entry = entry?;
@@ -149,7 +158,7 @@ fn copy_runtime_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
         let source_path = entry.path();
         let destination_path = destination.join(entry.file_name());
         if entry.file_type()?.is_dir() {
-            copy_runtime_tree(&source_path, &destination_path)?;
+            copy_runtime_tree_into(&source_path, &destination_path, staging_root)?;
         } else {
             if let Some(parent) = destination_path.parent() {
                 fs::create_dir_all(parent)?;
@@ -161,16 +170,44 @@ fn copy_runtime_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
                 || fs::metadata(&source_path)?.len() != fs::metadata(&destination_path)?.len()
                 || fs::read(&source_path)? != fs::read(&destination_path)?
             {
-                fs::copy(&source_path, &destination_path)?;
+                replace_runtime_file(&source_path, &destination_path, staging_root)?;
             }
         }
     }
     Ok(())
 }
 
+fn replace_runtime_file(
+    source: &Path,
+    destination: &Path,
+    staging_root: &Path,
+) -> std::io::Result<()> {
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temporary = staging_root.join(format!(
+        ".musicserver-update-{}-{sequence}",
+        std::process::id()
+    ));
+    let mut input = fs::File::open(source)?;
+    // create_new ensures an existing user file can never be overwritten here.
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    let prepared = std::io::copy(&mut input, &mut output).and_then(|_| output.sync_all());
+    drop(output);
+    let result = prepared.and_then(|_| fs::rename(&temporary, destination));
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
 /// Synchronize only packaged runtime files into the writable APP home. Existing
 /// Music/, DailyMix_data/, Navidrome/, logs/ and user files are not deleted.
 fn stage_runtime(bundle_runtime: &Path, app_home: &Path) -> std::io::Result<()> {
+    let files = runtime_manifest::verify(bundle_runtime, BUILD_MARKER)?;
+    runtime_manifest::verify_destination(app_home, &files)?;
     copy_runtime_tree(bundle_runtime, app_home)?;
     if !has_launcher(app_home) {
         return Err(std::io::Error::new(
@@ -186,6 +223,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn corrupt_package_never_changes_existing_runtime() {
+        let root = env::temp_dir().join(format!("musicserver-corrupt-{}", std::process::id()));
+        let source = root.join("source");
+        let target = root.join("target");
+        runtime_manifest::fixture(&source, BUILD_MARKER);
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join(LAUNCHER), b"old runtime").unwrap();
+        fs::write(source.join("web/app.js"), b"corruption").unwrap();
+        assert!(stage_runtime(&source, &target).is_err());
+        assert_eq!(fs::read(target.join(LAUNCHER)).unwrap(), b"old runtime");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn locked_destination_preserves_old_bytes_and_removes_temporary_file() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = env::temp_dir().join(format!("musicserver-locked-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("source");
+        let target = root.join("target");
+        fs::write(&source, b"new runtime").unwrap();
+        fs::write(&target, b"old runtime").unwrap();
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&target)
+            .unwrap();
+        assert!(replace_runtime_file(&source, &target, &root).is_err());
+        drop(lock);
+        assert_eq!(fs::read(&target).unwrap(), b"old runtime");
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 2);
+        replace_runtime_file(&source, &target, &root).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"new runtime");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn staging_skips_equal_files_and_repairs_same_size_changes() {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -197,6 +272,7 @@ mod tests {
         let target = root.join("target");
         fs::create_dir_all(&source).unwrap();
         fs::write(source.join(LAUNCHER), b"first").unwrap();
+        runtime_manifest::fixture(&source, BUILD_MARKER);
         stage_runtime(&source, &target).unwrap();
         let launcher = target.join(LAUNCHER);
         let before = fs::metadata(&launcher).unwrap().modified().unwrap();
@@ -205,13 +281,16 @@ mod tests {
         read_only.set_readonly(true);
         fs::set_permissions(&launcher, read_only).unwrap();
         fs::write(target.join("user-data"), b"preserve").unwrap();
+        runtime_manifest::fixture(&source, BUILD_MARKER);
         stage_runtime(&source, &target).unwrap();
         fs::set_permissions(&launcher, original_permissions).unwrap();
         assert_eq!(before, fs::metadata(&launcher).unwrap().modified().unwrap());
         fs::write(&launcher, b"wrong").unwrap();
+        runtime_manifest::fixture(&source, BUILD_MARKER);
         stage_runtime(&source, &target).unwrap();
         assert_eq!(fs::read(&launcher).unwrap(), b"first");
         fs::write(source.join(LAUNCHER), b"newer").unwrap();
+        runtime_manifest::fixture(&source, BUILD_MARKER);
         stage_runtime(&source, &target).unwrap();
         assert_eq!(fs::read(&launcher).unwrap(), b"newer");
         assert_eq!(fs::read(target.join("user-data")).unwrap(), b"preserve");

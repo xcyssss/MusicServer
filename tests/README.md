@@ -18,7 +18,7 @@ Invoke-Pester -Path tests -Tag RequiresLocalRuntime -PassThru
 
 | CI 分组 | 正式套件 `MusicServer.*.Tests.ps1` |
 | --- | --- |
-| state | Core、Database、V2、WorkerConcurrency、Recommendation、LegacyRetirement、Listening、Web、Tauri、ConfigurableLibrary、TestRunner |
+| state | Core、Database、V2、WorkerConcurrency、Recommendation、LegacyRetirement、Listening、Web、Tauri、ConfigurableLibrary、TestRunner、Identity |
 | api | Http、UiProxyRuntime、MediaRuntime、ApiTransaction、ApiRuntime |
 
 - `TestRunner` 在临时目录生成成功、故意失败、空套件及不存在路径，通过独立 `powershell.exe` 验证日志和退出码；故意失败的夹具不会被全量测试直接发现。
@@ -29,3 +29,5 @@ Invoke-Pester -Path tests -Tag RequiresLocalRuntime -PassThru
 - Rust 的 `startup_probe` TCP 回归覆盖分段响应、旧标识、错误状态、仅头部含标识、长度不符、慢速持续发送、未关闭连接、响应大小上限和过期预算；由 `cargo test --locked` 执行。
 
 测试与测量日志存入忽略目录 `artifacts/`，不提交运行数据。
+
+`Identity` 验证跨目录标识一致、用户数据不影响标识、内容变化产生新标识及旧进程不会更新自身标识。Rust 还验证清单损坏、缺失/多余文件、路径约束和锁定目标的单文件替换。

@@ -62,7 +62,7 @@ The packaged runtime contains only what the desktop APP needs to boot its own UI
 - `watchdog_ui.ps1`
 - `music_api.ps1`
 - `wanted_worker.ps1`
-- Core/Database/Http/State/Providers modules
+- Core/Database/Http/State/Providers/Identity modules
 - `web/`
 - a real `sqlite3.exe`
 
@@ -125,7 +125,7 @@ CI: `.github/workflows/core-tests.yml` on `windows-latest`.
 
 | Job | Responsibility |
 |---|---|
-| `state` | Core, Database, V2, WorkerConcurrency, Recommendation, LegacyRetirement, Listening, Web, Tauri, ConfigurableLibrary, TestRunner |
+| `state` | Core, Database, V2, WorkerConcurrency, Recommendation, LegacyRetirement, Listening, Web, Tauri, ConfigurableLibrary, TestRunner, Identity |
 | `api` | Http, UiProxyRuntime, MediaRuntime, ApiTransaction, ApiRuntime |
 | `desktop-build` | real Rust/Tauri compile, NSIS installer, installed-app portability smoke, installer artifact |
 
@@ -178,6 +178,8 @@ For live desktop smoke, use `tests/verify_tauri_desktop.ps1` and exercise the ac
 
 For non-trivial work:
 
+Batch related steps as local commits; after a meaningful stage and local validation, push the group once and verify CI. Avoid pushing each small step separately.
+
 1. inspect current branch/files before modifying;
 2. preserve unrelated local/user work;
 3. make the smallest coherent change;
@@ -192,6 +194,9 @@ For non-trivial work:
 After completing a meaningful task, update this `AGENTS.md` checkpoint when the task changes architecture, release behavior, test gates, or important operating rules. Keep only current durable facts; do not accumulate transient debugging notes.
 
 ## Current checkpoint — 2026-09-08
+
+- Runtime manifests use schema 2 with per-file size/SHA-256 and content build identity. Desktop validates required files, managed paths, duplicate names, hashes and reparse points before modifying APP home. Changed files are fully written and synced in APP home before individual rename replacement; this is not a whole-runtime transaction or schema rollback.
+- Runtime source identity is computed by MusicServer.Identity.psm1 from sorted relative names and SHA-256 content hashes. Rust embeds the same digest at build time; UI/API cache it at process startup. Machine paths and user state are excluded. Source changes therefore cannot relabel an already running service. MUSICSERVER_DISABLE_WORKER=1 explicitly disables the downloader for isolated EXE measurements; normal startup is unchanged.
 
 - Desktop identity probes have a 1.2-second total network deadline and a 1 MiB response cap. Only a completed HTTP 200 response with the marker in its body is accepted; declared Content-Length must match. Each launched port pair has a 30-second readiness budget including network probes and sleeps. Rust TCP regressions run in the existing desktop gate. These bounds do not cover runtime staging/process teardown or establish faster normal startup.
 

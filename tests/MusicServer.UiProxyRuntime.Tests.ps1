@@ -99,7 +99,7 @@ Describe 'MusicServer live UI API proxy' {
 
         # Run the gateway from the same isolated home as the API. Launching the
         # checkout gateway would read the user's library and start its worker.
-        foreach ($file in @('start_musicserver_ui.ps1','watchdog_ui.ps1','music_api.ps1','MusicServer.Core.psm1','MusicServer.Database.psm1','MusicServer.State.psm1','MusicServer.Providers.psm1','MusicServer.Http.psm1')) {
+        foreach ($file in @('start_musicserver_ui.ps1','watchdog_ui.ps1','music_api.ps1','MusicServer.Core.psm1','MusicServer.Database.psm1','MusicServer.State.psm1','MusicServer.Providers.psm1','MusicServer.Http.psm1','MusicServer.Identity.psm1')) {
             Copy-Item -LiteralPath (Join-Path $ProjectRoot $file) -Destination (Join-Path $root $file)
         }
         Copy-Item -LiteralPath (Join-Path $ProjectRoot 'web') -Destination (Join-Path $root 'web') -Recurse

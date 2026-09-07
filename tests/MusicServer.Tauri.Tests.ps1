@@ -1,4 +1,4 @@
-$ProjectRoot = Split-Path -Parent $PSScriptRoot
+﻿$ProjectRoot = Split-Path -Parent $PSScriptRoot
 
 Describe 'MusicServer Tauri desktop shell' {
     It 'uses Tauri v2 and the shared web directory' {
@@ -20,8 +20,8 @@ Describe 'MusicServer Tauri desktop shell' {
         $main | Should Match 'FALLBACK_PAIRS'
         $main | Should Match '-UiPrefix'
         $main | Should Match '-ApiPrefix'
-        $web | Should Match 'musicserver-backend-b-v5'
-        $api | Should Match "BuildMarker = 'musicserver-backend-b-v5'"
+        $web | Should Match 'musicserver-development'
+        $api | Should Match 'Get-MusicServerBuildIdentity'
         $smoke | Should Match 'CloseLaunchedApp'
         $smoke | Should Match 'ServicesStopped'
         $tauriConf = Get-Content -LiteralPath (Join-Path $ProjectRoot 'src-tauri\tauri.conf.json') -Raw
@@ -60,15 +60,12 @@ Describe 'MusicServer Tauri desktop shell' {
         $prepare | Should Not Match 'cookies\.txt'
     }
 
-    It 'keeps installed CI smoke and desktop service markers in sync with the served UI' {
-        $web = Get-Content -LiteralPath (Join-Path $ProjectRoot 'web\app.js') -Raw -Encoding UTF8
-        $marker = [regex]::Match($web, "MUSICSERVER_BUILD_MARKER\s*=\s*'([^']+)'").Groups[1].Value
-        [string]::IsNullOrWhiteSpace($marker) | Should Be $false
-        foreach ($relative in @('music_api.ps1', 'src-tauri\src\main.rs', 'tests\verify_tauri_desktop.ps1', '.github\workflows\core-tests.yml')) {
+    It 'uses the shared content identity in services, build and smoke checks' {
+        foreach ($relative in @('music_api.ps1', 'start_musicserver_ui.ps1', 'src-tauri/build.rs', 'tests/verify_tauri_desktop.ps1', '.github/workflows/core-tests.yml')) {
             $text = Get-Content -LiteralPath (Join-Path $ProjectRoot $relative) -Raw -Encoding UTF8
-            $actual = [regex]::Match($text, '(?i)(?:BuildMarker|BUILD_MARKER)(?:\s*:\s*&str)?\s*=\s*[''"]([^''"]+)[''"]').Groups[1].Value
-            $actual | Should Be $marker
+            $text | Should Match 'Get-MusicServerBuildIdentity'
         }
+        (Get-Content (Join-Path $ProjectRoot 'src-tauri/src/main.rs') -Raw) | Should Match 'env!\("MUSICSERVER_BUILD_ID"\)'
     }
 
     It 'stages an executable runtime containing the shared HTTP input module' {
@@ -78,6 +75,14 @@ Describe 'MusicServer Tauri desktop shell' {
         try {
             & (Join-Path $ProjectRoot 'scripts\prepare_tauri_runtime.ps1') -ProjectRoot $ProjectRoot -Destination $packageRoot | Out-Null
             $manifest = Get-Content -LiteralPath (Join-Path $packageRoot 'runtime-manifest.json') -Raw | ConvertFrom-Json
+            $manifest.schema | Should Be 2
+            Import-Module (Join-Path $ProjectRoot 'MusicServer.Identity.psm1') -Force
+            $manifest.build_id | Should Be (Get-MusicServerBuildIdentity -Root $ProjectRoot)
+            foreach ($entry in $manifest.files) {
+                $file = Join-Path $packageRoot $entry.path
+                (Get-Item -LiteralPath $file).Length | Should Be $entry.size
+                (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() | Should Be $entry.sha256
+            }
             ($manifest.runtime_files -contains 'MusicServer.Http.psm1') | Should Be $true
             foreach ($relative in $manifest.runtime_files) { (Test-Path -LiteralPath (Join-Path $packageRoot $relative) -PathType Leaf) | Should Be $true }
             Import-Module (Join-Path $packageRoot 'MusicServer.Http.psm1') -Force

@@ -6,7 +6,7 @@ function New-MusicServerRuntimeFixture {
     New-Item -ItemType Directory -Path $fixtureRoot -Force | Out-Null
     # Deliberately omit the downloader from test fixtures: HTTP queue tests must
     # never download media or contend for the user's global worker mutex.
-    foreach ($file in @('music_api.ps1','start_musicserver_ui.ps1','watchdog_ui.ps1','MusicServer.Core.psm1','MusicServer.Database.psm1','MusicServer.State.psm1','MusicServer.Providers.psm1','MusicServer.Http.psm1')) {
+    foreach ($file in @('music_api.ps1','start_musicserver_ui.ps1','watchdog_ui.ps1','MusicServer.Core.psm1','MusicServer.Database.psm1','MusicServer.State.psm1','MusicServer.Providers.psm1','MusicServer.Http.psm1','MusicServer.Identity.psm1')) {
         Copy-Item -LiteralPath (Join-Path $ProjectRoot $file) -Destination (Join-Path $fixtureRoot $file)
     }
     Copy-Item -LiteralPath (Join-Path $ProjectRoot 'web') -Destination (Join-Path $fixtureRoot 'web') -Recurse
