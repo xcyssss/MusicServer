@@ -1788,8 +1788,8 @@ function Resolve-ConfiguredMusicDir {
         }
     } catch {}
 
-    # Priority 3: Default
-    return $Config.MusicDir
+    # Priority 3: Default. Config.MusicDir is mutable after Apply-ConfiguredMusicDir.
+    return (Get-DefaultMusicDir -Root $Config.Root)
 }
 
 function Apply-ConfiguredMusicDir {
