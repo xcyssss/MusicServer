@@ -43,9 +43,8 @@ jobs:
           $lines.Insert($insert, $newLine)
           [IO.File]::WriteAllLines($path, $lines, (New-Object Text.UTF8Encoding($true)))
 
-          # Remove the first legacy-path occurrence (the parameter help text).
-          # The helper itself will replace the remaining occurrence, which is
-          # the actual OutputDir default in the parameter block.
+          # Remove the first legacy-path occurrence (parameter help text). The
+          # helper will replace the remaining actual OutputDir default.
           $favPath = '.\scripts\maintenance\download_bilibili_favorites.ps1'
           $favText = [IO.File]::ReadAllText($favPath, [Text.Encoding]::UTF8)
           $legacy = 'E:\Project\MusicServer\Music'
@@ -60,6 +59,15 @@ jobs:
           $ErrorActionPreference = 'Stop'
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\pr19_apply_fixes.ps1
 
+      - name: Exclude workflow edits from bot commit
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # GitHub's workflow token cannot update workflow files. Keep the
+          # generated code/docs/tests changes, but restore core-tests.yml here;
+          # it will be updated directly after this bot commit lands.
+          git restore --source=HEAD -- .github/workflows/core-tests.yml
+
       - name: Parser and diff preflight
         shell: powershell
         run: |
@@ -68,11 +76,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'git diff --check failed' }
           git status --short
 
-      - name: Remove temporary patch machinery
+      - name: Remove temporary patch script
         shell: powershell
         run: |
           Remove-Item -LiteralPath '.\scripts\pr19_apply_fixes.ps1' -Force
-          Remove-Item -LiteralPath '.\.github\workflows\pr19-complete-fix.yml' -Force
 
       - name: Commit fixes to PR branch
         shell: powershell
