@@ -28,6 +28,17 @@ Describe 'MusicServer Tauri desktop shell' {
         $tauriConf | Should Match '"withGlobalTauri"\s*:\s*true'
         $web | Should Match 'window\.__TAURI__\?\.dialog'
         $web | Should Match 'window\.__TAURI__\?\.core'
+
+        # Production navigates the Tauri WebView to the local PowerShell HTTP UI,
+        # which is a remote origin to Tauri's ACL. Keep IPC permission scoped to
+        # only the three owned UI ports instead of granting arbitrary web origins.
+        $capability = ConvertFrom-Json -InputObject (Get-Content -LiteralPath (Join-Path $ProjectRoot 'src-tauri\capabilities\default.json') -Raw)
+        $remoteUrls = @($capability.remote.urls)
+        $remoteUrls.Count | Should Be 3
+        $remoteUrls | Should Contain 'http://127.0.0.1:8790'
+        $remoteUrls | Should Contain 'http://127.0.0.1:8791'
+        $remoteUrls | Should Contain 'http://127.0.0.1:8792'
+        @($capability.permissions) | Should Contain 'dialog:allow-open'
     }
 
     It 'packages a writable portable runtime instead of embedding the source-tree path' {
