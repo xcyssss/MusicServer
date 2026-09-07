@@ -46,12 +46,12 @@ if ($DryRun) {
     }
     Connect-MusicServerDatabase -DbPath $dbPath -SqliteExe $Config.Sqlite
 } else {
-    Initialize-MusicServerState -Config $Config
+    Initialize-MusicServerState -Config $Config -SkipLibrary
     Initialize-MusicServerDatabase -DbPath $dbPath -SqliteExe $Config.Sqlite
     Initialize-MusicServerSchema
-    Apply-ConfiguredMusicDir -Config $Config
 }
-
+Apply-ConfiguredMusicDir -Config $Config
+if (-not $DryRun) { Initialize-MusicServerLibrary -Config $Config | Out-Null }
 # Legacy import is an explicit activation step. DryRun never opens the
 # JSON/CSV migration input path, and a normal scheduled run cannot silently
 # activate production migration by itself.

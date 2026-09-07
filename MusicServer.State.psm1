@@ -1858,26 +1858,34 @@ function Remove-AppSettingDb {
 function Sync-NavidromeMusicFolder {
     <#
     .SYNOPSIS
-      Updates navidrome.toml MusicFolder to match the configured MusicDir.
-      Only writes if the file exists and the value actually differs.
-      Returns $true if a change was made, $false otherwise.
+      Updates navidrome.toml MusicFolder to match the effective MusicDir.
+      Writes a TOML basic string with escaped Windows backslashes and quotes.
     #>
     param(
         [Parameter(Mandatory)][string]$NdConfigPath,
         [Parameter(Mandatory)][string]$NewMusicFolder
     )
     if (-not (Test-Path -LiteralPath $NdConfigPath -PathType Leaf)) { return $false }
+
     $content = Get-Content -LiteralPath $NdConfigPath -Raw -Encoding UTF8
-    $normalizedNew = $NewMusicFolder.Replace('\', '\\')
-    # Check if already set to the correct value
-    if ($content -match "MusicFolder\s*=\s*['`"](.+?)['`"]") {
-        $current = $Matches[1].Replace('\\\\', '\')
-        if ($current -eq $NewMusicFolder -or $current -eq $normalizedNew) { return $false }
+    $encoded = $NewMusicFolder.Replace('\', '\\').Replace('"', '\"')
+    $desiredLine = 'MusicFolder = "' + $encoded + '"'
+    $pattern = '(?m)^\s*MusicFolder\s*=.*$'
+
+    if ([regex]::IsMatch($content, $pattern)) {
+        $currentLine = [regex]::Match($content, $pattern).Value.Trim()
+        if ($currentLine -eq $desiredLine) { return $false }
+        $updated = [regex]::Replace(
+            $content,
+            $pattern,
+            [Text.RegularExpressions.MatchEvaluator]{ param($m) $desiredLine },
+            1
+        )
+    } else {
+        $updated = $desiredLine + [Environment]::NewLine + $content
     }
-    # Update the MusicFolder line
-    $updated = $content -replace "(MusicFolder\s*=\s*)['`"].+?['`"]", "`$1'$normalizedNew'"
+
     [IO.File]::WriteAllText($NdConfigPath, $updated, (New-Object Text.UTF8Encoding($false)))
     return $true
 }
-
 Export-ModuleMember -Function *

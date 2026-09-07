@@ -39,10 +39,11 @@ Import-Module (Join-Path $Root 'MusicServer.Core.psm1') -Force
 Import-Module (Join-Path $Root 'MusicServer.Database.psm1') -Force
 Import-Module (Join-Path $Root 'MusicServer.State.psm1') -Force
 $Config = New-MusicServerConfig -Root $Root
-Initialize-MusicServerState -Config $Config
+Initialize-MusicServerState -Config $Config -SkipLibrary
 Initialize-MusicServerDatabase -DbPath (Join-Path $Config.StateDir 'musicserver.db') -SqliteExe $Config.Sqlite
 Initialize-MusicServerSchema
 Apply-ConfiguredMusicDir -Config $Config
+Initialize-MusicServerLibrary -Config $Config | Out-Null
 $Sqlite = $Config.Sqlite
 # Sync local path variables with configured MusicDir
 $MusicDir = $Config.MusicDir

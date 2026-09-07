@@ -53,6 +53,19 @@ src-tauri/target/release/bundle/nsis/*.exe
 可通过环境变量 `MUSICSERVER_APP_HOME` 覆盖该位置。为了不破坏现有开发机数据，从源码目录本地构建并直接运行的 EXE 会在运行时识别 checkout，并继续使用该 checkout 下已有的 `Music/`、`DailyMix_data/`、`Navidrome/` 等数据；这里不包含任何编译时绝对路径。
 
 安装包内包含 SQLite，因此 UI/API 和状态库启动不要求用户另装 sqlite3。Bilibili 下载、转码和 Navidrome 集成仍分别需要 yt-dlp、ffmpeg/ffprobe、Navidrome；这些大型/外部组件不塞进桌面 runtime。
+## 音乐库位置
+
+安装版默认音乐库为：
+
+```text
+%LOCALAPPDATA%\com.musicserver.desktop\Music
+```
+
+用户可以在 APP 的“音乐库设置”中选择任意本地目录，例如 `D:\Music` 或 `E:\MyMusic`。配置持久化在 SQLite `app_settings` 中；`MUSICSERVER_MUSIC_DIR` 仅作为开发/高级用户 override，优先级高于 SQLite 设置。
+
+更改音乐库位置**只改变 MusicServer 使用的目录，不会移动、复制或删除原有歌曲**。如果配置的是暂时离线的移动硬盘，MusicServer 会保留该设置并显示“不可用”，不会静默切回空的默认目录。恢复默认会重新使用 `<APP_HOME>\Music`。
+
+歌词继续采用邻接文件约定：`Song.mp3` 与 `Song.lrc` 放在同一目录且 basename 相同。修改音乐库后需要重启 APP，让 UI/API/worker/Navidrome 全部使用新的目录。
 
 ## 开发环境
 

@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     B站收藏夹批量音频下载脚本
 .DESCRIPTION
@@ -10,7 +10,7 @@
 .PARAMETER CookieFile
     B站 Cookie 文件路径（用于访问需要登录的收藏夹）
 .PARAMETER OutputDir
-    音频输出目录，默认 E:\Project\MusicServer\Music
+    音频输出目录，默认 <configured MusicServer library>
 .EXAMPLE
     .\scripts\maintenance\download_bilibili_favorites.ps1 -FavoritesUrl "https://www.bilibili.com/medialist/detail/ml1234567890" -CookieFile "cookies.txt"
 #>
@@ -23,11 +23,14 @@ param(
     [string]$CookieFile = "",
 
     [Parameter(Mandatory=$false)]
-    [string]$OutputDir = "E:\Project\MusicServer\Music"
+    [Alias('MusicDir')]
+    [string]$OutputDir = ''
 )
 
-# yt-dlp 可执行文件路径
-$ytDlp = "C:\Users\dell\anaconda3\Scripts\yt-dlp.exe"
+. (Join-Path $PSScriptRoot 'MusicServer.Maintenance.ps1')
+$Maintenance = Resolve-MusicServerMaintenanceContext -MusicDir $OutputDir
+$OutputDir = $Maintenance.MusicDir
+$ytDlp = $Maintenance.Config.YtDlp
 
 # 确保输出目录存在
 if (-not (Test-Path $OutputDir)) {

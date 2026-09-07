@@ -44,13 +44,37 @@ function New-MusicServerConfig {
 }
 
 function Initialize-MusicServerState {
-    param([Parameter(Mandatory)][psobject]$Config)
+    param(
+        [Parameter(Mandatory)][psobject]$Config,
+        [switch]$SkipLibrary
+    )
 
-    foreach ($path in @($Config.DataDir, $Config.StateDir, $Config.MusicDir, $Config.DailyDir)) {
+    $paths = @($Config.DataDir, $Config.StateDir)
+    if (-not $SkipLibrary) { $paths += @($Config.MusicDir, $Config.DailyDir) }
+    foreach ($path in $paths) {
         if (-not (Test-Path -LiteralPath $path)) {
             New-Item -ItemType Directory -Force -Path $path | Out-Null
         }
     }
+}
+
+function Initialize-MusicServerLibrary {
+    param([Parameter(Mandatory)][psobject]$Config)
+
+    $defaultDir = Get-DefaultMusicDir -Root $Config.Root
+    $effective = [IO.Path]::GetFullPath([string]$Config.MusicDir)
+    $isDefault = ($effective -eq [IO.Path]::GetFullPath($defaultDir))
+
+    # A configured removable/offline library must stay unavailable. Do not
+    # silently recreate or fall back to the default library on startup.
+    if (-not (Test-Path -LiteralPath $effective -PathType Container)) {
+        if (-not $isDefault) { return $false }
+        New-Item -ItemType Directory -Force -Path $effective | Out-Null
+    }
+    if (-not (Test-Path -LiteralPath $Config.DailyDir -PathType Container)) {
+        New-Item -ItemType Directory -Force -Path $Config.DailyDir | Out-Null
+    }
+    return $true
 }
 
 function Get-NowIso { return [DateTime]::UtcNow.ToString('o') }

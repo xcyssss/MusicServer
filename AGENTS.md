@@ -75,6 +75,7 @@ Installed builds default to:
 ```
 
 for the writable runtime/data home. `MUSICSERVER_APP_HOME` can override it.
+The music library is independently configurable. Runtime resolution order is `MUSICSERVER_MUSIC_DIR` -> SQLite `app_settings.music_library_path` -> `<APP_HOME>\Music`. All runtime entry points must use the same resolved `Config.MusicDir`, and `Config.DailyDir` must always be `<MusicDir>\DailyMix`. A missing configured custom path is an unavailable library, not a signal to fall back to or create the default library. Never move/copy/delete user music when changing this setting. Adjacent `Song.lrc` remains the lyric contract for `Song.mp3`.
 
 A release EXE built and launched from inside a source checkout may detect that checkout from its own executable ancestry and continue using the existing checkout data. This runtime discovery is allowed because it embeds no compile-time absolute path. **Do not reintroduce `CARGO_MANIFEST_DIR` as runtime state/location.**
 
@@ -88,6 +89,7 @@ MusicServer/
 │  ├─ prepare_tauri_runtime.ps1   # build staging
 │  ├─ measure_musicserver_backend.ps1
 │  └─ maintenance/                # standalone maintenance utilities
+│     ├─ MusicServer.Maintenance.ps1 # shared configured-library resolver
 │     ├─ fetch_lyrics.ps1
 │     ├─ fix_one_lyric.ps1
 │     ├─ fix_tags.ps1

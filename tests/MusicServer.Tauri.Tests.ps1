@@ -24,6 +24,10 @@ Describe 'MusicServer Tauri desktop shell' {
         $api | Should Match "BuildMarker = 'musicserver-backend-b-v5'"
         $smoke | Should Match 'CloseLaunchedApp'
         $smoke | Should Match 'ServicesStopped'
+        $tauriConf = Get-Content -LiteralPath (Join-Path $ProjectRoot 'src-tauri\tauri.conf.json') -Raw
+        $tauriConf | Should Match '"withGlobalTauri"\s*:\s*true'
+        $web | Should Match 'window\.__TAURI__\?\.dialog'
+        $web | Should Match 'window\.__TAURI__\?\.core'
     }
 
     It 'packages a writable portable runtime instead of embedding the source-tree path' {

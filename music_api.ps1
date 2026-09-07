@@ -45,7 +45,7 @@ Import-Module (Join-Path $PSScriptRoot 'MusicServer.State.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Http.psm1') -Force
 
 $Config = New-MusicServerConfig -Root $Root
-Initialize-MusicServerState -Config $Config
+Initialize-MusicServerState -Config $Config -SkipLibrary
 $DbPath = Join-Path $Config.StateDir 'musicserver.db'
 $SqliteExe = [string]$Config.Sqlite
 if (-not $SqliteExe -or -not (Test-Path -LiteralPath $SqliteExe)) {
@@ -65,6 +65,7 @@ if (-not (Test-Path -LiteralPath $SqliteExe) -and -not (Get-Command $SqliteExe -
 Initialize-MusicServerDatabase -DbPath $DbPath -SqliteExe $SqliteExe
 Initialize-MusicServerSchema
 Apply-ConfiguredMusicDir -Config $Config
+Initialize-MusicServerLibrary -Config $Config | Out-Null
 Write-Host ("API v2 ready | db={0} | music_dir={1} | migration=NOT_REQUESTED" -f $DbPath, $Config.MusicDir) -ForegroundColor Green
 
 function Send-Json([psobject]$Context) {

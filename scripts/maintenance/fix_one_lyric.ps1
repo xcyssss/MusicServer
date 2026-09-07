@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     手动修正个别歌曲的歌词（当自动匹配错误时用）
 .DESCRIPTION
@@ -11,12 +11,15 @@
 param(
     [Parameter(Mandatory=$true)][string]$FilePattern,
     [long]$SongId = 0,
-    [string]$Search = ''
+    [string]$Search = '',
+    [string]$MusicDir = ''
 )
 
 $ProgressPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-$MusicDir = 'E:\Project\MusicServer\Music'
+. (Join-Path $PSScriptRoot 'MusicServer.Maintenance.ps1')
+$Maintenance = Resolve-MusicServerMaintenanceContext -MusicDir $MusicDir
+$MusicDir = $Maintenance.MusicDir
 $Headers = @{
     'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36'
     'Referer'    = 'https://music.163.com/'

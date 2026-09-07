@@ -178,6 +178,7 @@ try {
         Apply-ConfiguredMusicDir -Config $Config
     }
 } catch {}
+try { Initialize-MusicServerLibrary -Config $Config | Out-Null } catch {}
 
 function Invoke-NavidromeSqliteJson {
     param([Parameter(Mandatory)][string]$Sql)
