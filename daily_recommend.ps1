@@ -49,6 +49,7 @@ if ($DryRun) {
     Initialize-MusicServerState -Config $Config
     Initialize-MusicServerDatabase -DbPath $dbPath -SqliteExe $Config.Sqlite
     Initialize-MusicServerSchema
+    Apply-ConfiguredMusicDir -Config $Config
 }
 
 # Legacy import is an explicit activation step. DryRun never opens the

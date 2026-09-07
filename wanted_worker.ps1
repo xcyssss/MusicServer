@@ -31,6 +31,7 @@ $Config = New-MusicServerConfig -Root $Root
 Initialize-MusicServerState -Config $Config
 Initialize-MusicServerDatabase -DbPath (Join-Path $Config.StateDir 'musicserver.db') -SqliteExe $Config.Sqlite
 Initialize-MusicServerSchema
+Apply-ConfiguredMusicDir -Config $Config
 $WorkerMutex = [Threading.Mutex]::new($false, 'MusicServer_WantedWorker')
 $OwnsWorkerMutex = $false
 try {

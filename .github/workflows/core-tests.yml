@@ -140,7 +140,7 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $BuildMarker = 'musicserver-backend-b-v4'
+          $BuildMarker = 'musicserver-backend-b-v5'
           $installer = Get-ChildItem -LiteralPath '.\src-tauri\target\release\bundle\nsis' -Filter '*.exe' -File | Select-Object -First 1
           if (-not $installer) { throw 'Installer not found for smoke test.' }
 

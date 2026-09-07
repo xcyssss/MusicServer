@@ -20,8 +20,8 @@ Describe 'MusicServer Tauri desktop shell' {
         $main | Should Match 'FALLBACK_PAIRS'
         $main | Should Match '-UiPrefix'
         $main | Should Match '-ApiPrefix'
-        $web | Should Match 'musicserver-backend-b-v4'
-        $api | Should Match "BuildMarker = 'musicserver-backend-b-v4'"
+        $web | Should Match 'musicserver-backend-b-v5'
+        $api | Should Match "BuildMarker = 'musicserver-backend-b-v5'"
         $smoke | Should Match 'CloseLaunchedApp'
         $smoke | Should Match 'ServicesStopped'
     }

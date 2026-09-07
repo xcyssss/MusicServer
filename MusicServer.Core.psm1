@@ -429,6 +429,11 @@ function Get-NavidromeSongIdForPath {
     finally { Remove-Item -LiteralPath "$tmp*" -Force -ErrorAction SilentlyContinue }
 }
 
+function Get-DefaultMusicDir {
+    param([Parameter(Mandatory)][string]$Root)
+    return [IO.Path]::GetFullPath((Join-Path $Root 'Music'))
+}
+
 function Get-MusicServerLocalIdentity {
     param([Parameter(Mandatory)][string]$File)
     # Preserve the existing path spelling and hash contract in both API and UI.
