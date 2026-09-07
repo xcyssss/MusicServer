@@ -14,20 +14,23 @@ $exePath = (Resolve-Path -LiteralPath $Executable).Path
 $RuntimeSource = (Resolve-Path -LiteralPath $RuntimeSource).Path
 $fixture = New-MusicServerRuntimeFixture -ProjectRoot $RuntimeSource -Parent (Join-Path $project 'artifacts')
 $oldHome = $env:MUSICSERVER_APP_HOME
+$oldWorker = $env:MUSICSERVER_DISABLE_WORKER
+$env:MUSICSERVER_DISABLE_WORKER = '1'
 $child = $null
 $samples = @()
 try {
     $bin = Join-Path $fixture.Root 'desktop-bin'
     $bundle = Join-Path $bin 'resources/runtime'
     New-Item -ItemType Directory -Path $bundle -Force | Out-Null
-    foreach ($name in @('start_musicserver_ui.ps1','music_api.ps1','watchdog_ui.ps1','MusicServer.Core.psm1','MusicServer.Database.psm1','MusicServer.State.psm1','MusicServer.Http.psm1','MusicServer.Providers.psm1','web')) {
+    foreach ($name in @('start_musicserver_ui.ps1','music_api.ps1','watchdog_ui.ps1','MusicServer.Core.psm1','MusicServer.Database.psm1','MusicServer.State.psm1','MusicServer.Http.psm1','MusicServer.Identity.psm1','wanted_worker.ps1','MusicServer.Providers.psm1','web')) {
         Copy-Item -LiteralPath (Join-Path $RuntimeSource $name) -Destination $bundle -Recurse
     }
     New-Item -ItemType Directory -Path (Join-Path $bundle 'tools') -Force | Out-Null
     Copy-Item -LiteralPath $fixture.Config.Sqlite -Destination (Join-Path $bundle 'tools/sqlite3.exe')
     $testExe = Join-Path $bin 'musicserver-desktop.exe'
     Copy-Item -LiteralPath $exePath -Destination $testExe
-    $marker = [regex]::Match([IO.File]::ReadAllText((Join-Path $RuntimeSource 'web/app.js')), 'musicserver-[a-z0-9-]+').Value
+    Import-Module (Join-Path $RuntimeSource 'MusicServer.Identity.psm1') -Force
+    $marker = Get-MusicServerBuildIdentity -Root $RuntimeSource
     if (-not $marker) { throw 'Runtime build marker is missing.' }
     $env:MUSICSERVER_APP_HOME = $fixture.Root
     foreach ($run in 1..$Runs) {
@@ -64,6 +67,7 @@ try {
     Write-Output ($report | ConvertTo-Json -Compress)
 } finally {
     $env:MUSICSERVER_APP_HOME = $oldHome
+    $env:MUSICSERVER_DISABLE_WORKER = $oldWorker
     if ($child -and -not $child.HasExited) { Start-Process -FilePath taskkill.exe -ArgumentList @('/PID', [string]$child.Id, '/T', '/F') -WindowStyle Hidden -Wait | Out-Null }
     Remove-MusicServerRuntimeFixture -Fixture $fixture
 }

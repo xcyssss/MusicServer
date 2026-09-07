@@ -193,6 +193,8 @@ After completing a meaningful task, update this `AGENTS.md` checkpoint when the 
 
 ## Current checkpoint — 2026-09-08
 
+- Runtime source identity is computed by MusicServer.Identity.psm1 from sorted relative names and SHA-256 content hashes. Rust embeds the same digest at build time; UI/API cache it at process startup. Machine paths and user state are excluded. Source changes therefore cannot relabel an already running service. MUSICSERVER_DISABLE_WORKER=1 explicitly disables the downloader for isolated EXE measurements; normal startup is unchanged.
+
 - Desktop identity probes have a 1.2-second total network deadline and a 1 MiB response cap. Only a completed HTTP 200 response with the marker in its body is accepted; declared Content-Length must match. Each launched port pair has a 30-second readiness budget including network probes and sleeps. Rust TCP regressions run in the existing desktop gate. These bounds do not cover runtime staging/process teardown or establish faster normal startup.
 
 - `tests/run_suite.ps1` pins Pester 3.4.0, excludes RequiresLocalRuntime by default, and reports failures from TestResult (name, message and stack). Exit codes are 0/1/2 for pass/test failure/runner error; zero discovered tests is an error. The state CI group includes TestRunner subprocess regressions; the suite index is tests/README.md.

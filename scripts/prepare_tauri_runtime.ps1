@@ -39,6 +39,7 @@ $runtimeFiles = @(
     'MusicServer.Core.psm1',
     'MusicServer.Database.psm1',
     'MusicServer.Http.psm1',
+    'MusicServer.Identity.psm1',
     'MusicServer.State.psm1',
     'MusicServer.Providers.psm1'
 )
