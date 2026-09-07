@@ -25,10 +25,11 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $path = 'MusicServer.State.psm1'
           $text = [IO.File]::ReadAllText($path, [Text.Encoding]::UTF8)
-          $old = "    # Priority 3: Default`n    return `$Config.MusicDir`n"
-          $new = "    # Priority 3: Default. Config.MusicDir is mutable after Apply-ConfiguredMusicDir.`n    return (Get-DefaultMusicDir -Root `$Config.Root)`n"
-          if (-not $text.Contains($old)) { throw 'Resolver fallback pattern not found.' }
-          $text = $text.Replace($old, $new)
+          $pattern = '(?m)^    # Priority 3: Default\r?\n    return \$Config\.MusicDir\r?\n'
+          $rx = New-Object Text.RegularExpressions.Regex($pattern)
+          if (-not $rx.IsMatch($text)) { throw 'Resolver fallback pattern not found.' }
+          $new = "    # Priority 3: Default. Config.MusicDir is mutable after Apply-ConfiguredMusicDir.`r`n    return (Get-DefaultMusicDir -Root `$Config.Root)`r`n"
+          $text = $rx.Replace($text, $new, 1)
           [IO.File]::WriteAllText($path, $text, (New-Object Text.UTF8Encoding($true)))
           Remove-Item -LiteralPath '.github/workflows/pr19-resolver-fix.yml' -Force
 
