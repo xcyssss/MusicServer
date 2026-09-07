@@ -1,0 +1,553 @@
+name: PR19 Direct Fix
+
+on:
+  push:
+    branches:
+      - feature/configurable-music-library
+    paths:
+      - '.github/workflows/pr19-direct-fix.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/configurable-music-library
+          fetch-depth: 0
+
+      - name: Apply reviewed fixes
+        shell: pwsh
+        run: |
+          @'
+          from pathlib import Path
+          import json
+          import re
+
+          ROOT = Path('.')
+
+          def read_text(path):
+              p = ROOT / path
+              data = p.read_bytes()
+              bom = data.startswith(b'\xef\xbb\xbf')
+              if bom:
+                  return data.decode('utf-8-sig'), True
+              return data.decode('utf-8'), False
+
+          def write_text(path, text, bom=None):
+              p = ROOT / path
+              if bom is None:
+                  bom = p.suffix.lower() in {'.ps1', '.psm1'}
+              enc = 'utf-8-sig' if bom else 'utf-8'
+              p.write_text(text, encoding=enc, newline='')
+
+          def replace_once(path, old, new, label):
+              text, bom = read_text(path)
+              if old not in text:
+                  raise RuntimeError(f'{label}: pattern not found in {path}')
+              text = text.replace(old, new, 1)
+              write_text(path, text, bom)
+
+          # -----------------------------------------------------------------
+          # Core initialization: state storage can be initialized without
+          # creating a misleading default Music/ before the configured path is
+          # known. Existing callers keep the old behavior unless -SkipLibrary.
+          # -----------------------------------------------------------------
+          replace_once(
+              'MusicServer.Core.psm1',
+              """function Initialize-MusicServerState {\n    param([Parameter(Mandatory)][psobject]$Config)\n\n    foreach ($path in @($Config.DataDir, $Config.StateDir, $Config.MusicDir, $Config.DailyDir)) {\n        if (-not (Test-Path -LiteralPath $path)) {\n            New-Item -ItemType Directory -Force -Path $path | Out-Null\n        }\n    }\n}\n""",
+              """function Initialize-MusicServerState {\n    param(\n        [Parameter(Mandatory)][psobject]$Config,\n        [switch]$SkipLibrary\n    )\n\n    $paths = @($Config.DataDir, $Config.StateDir)\n    if (-not $SkipLibrary) { $paths += @($Config.MusicDir, $Config.DailyDir) }\n    foreach ($path in $paths) {\n        if (-not (Test-Path -LiteralPath $path)) {\n            New-Item -ItemType Directory -Force -Path $path | Out-Null\n        }\n    }\n}\n\nfunction Initialize-MusicServerLibrary {\n    param([Parameter(Mandatory)][psobject]$Config)\n\n    $defaultDir = Get-DefaultMusicDir -Root $Config.Root\n    $isDefault = ([IO.Path]::GetFullPath([string]$Config.MusicDir) -eq [IO.Path]::GetFullPath($defaultDir))\n\n    # A configured removable/offline library must stay unavailable. Never\n    # create the default library as a silent fallback, and never recreate a\n    # missing custom path merely because the APP started. PUT settings is the\n    # explicit operation that may create a newly selected directory.\n    if (-not (Test-Path -LiteralPath $Config.MusicDir -PathType Container)) {\n        if (-not $isDefault) { return $false }\n        New-Item -ItemType Directory -Force -Path $Config.MusicDir | Out-Null\n    }\n    if (-not (Test-Path -LiteralPath $Config.DailyDir -PathType Container)) {\n        New-Item -ItemType Directory -Force -Path $Config.DailyDir | Out-Null\n    }\n    return $true\n}\n""",
+              'split state/library initialization'
+          )
+
+          # -----------------------------------------------------------------
+          # Resolver reset must be a pure default calculation; Config.MusicDir
+          # is mutable and may still contain the previous custom path.
+          # Navidrome TOML is written as a double-quoted basic string with
+          # correct Windows backslash escaping.
+          # -----------------------------------------------------------------
+          state, state_bom = read_text('MusicServer.State.psm1')
+          old_default = """    # Priority 3: Default\n    return $Config.MusicDir\n"""
+          new_default = """    # Priority 3: Default. Do not use the mutable Config.MusicDir here:\n    # Apply-ConfiguredMusicDir changes it in place, so reset must recompute.\n    return (Get-DefaultMusicDir -Root $Config.Root)\n"""
+          if old_default not in state:
+              raise RuntimeError('resolver fallback pattern not found')
+          state = state.replace(old_default, new_default, 1)
+
+          nav_function = r'''function Sync-NavidromeMusicFolder {
+    <#
+    .SYNOPSIS
+      Updates navidrome.toml MusicFolder to match the configured MusicDir.
+      Uses a TOML basic string so Windows backslashes and quotes are encoded
+      correctly. Only writes when the effective line changes.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$NdConfigPath,
+        [Parameter(Mandatory)][string]$NewMusicFolder
+    )
+    if (-not (Test-Path -LiteralPath $NdConfigPath -PathType Leaf)) { return $false }
+
+    $content = Get-Content -LiteralPath $NdConfigPath -Raw -Encoding UTF8
+    $encoded = $NewMusicFolder.Replace('\', '\\').Replace('"', '\"')
+    $desiredLine = 'MusicFolder = "' + $encoded + '"'
+    $pattern = '(?m)^\s*MusicFolder\s*=.*$'
+
+    if ([regex]::IsMatch($content, $pattern)) {
+        $currentLine = [regex]::Match($content, $pattern).Value.Trim()
+        if ($currentLine -eq $desiredLine) { return $false }
+        $updated = [regex]::Replace(
+            $content,
+            $pattern,
+            [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $desiredLine },
+            1
+        )
+    } else {
+        $updated = $desiredLine + [Environment]::NewLine + $content
+    }
+
+    [IO.File]::WriteAllText($NdConfigPath, $updated, (New-Object Text.UTF8Encoding($false)))
+    return $true
+}'''
+          pattern = r'function Sync-NavidromeMusicFolder \{.*?\n\}\n\nExport-ModuleMember -Function \*'
+          state, count = re.subn(pattern, nav_function + '\n\nExport-ModuleMember -Function *', state, count=1, flags=re.S)
+          if count != 1:
+              raise RuntimeError(f'Navidrome function replacement count={count}')
+          write_text('MusicServer.State.psm1', state, state_bom)
+
+          # -----------------------------------------------------------------
+          # Runtime entry points: initialize storage first, resolve MusicDir,
+          # then initialize the effective library only when it is safe.
+          # -----------------------------------------------------------------
+          for path in ['music_api.ps1', 'wanted_worker.ps1', 'daily_cleanup.ps1']:
+              text, bom = read_text(path)
+              marker = 'Initialize-MusicServerState -Config $Config'
+              if marker not in text:
+                  raise RuntimeError(f'{marker} not found in {path}')
+              text = text.replace(marker, marker + ' -SkipLibrary', 1)
+              startup = 'Initialize-MusicServerSchema\nApply-ConfiguredMusicDir -Config $Config\n'
+              if startup not in text:
+                  raise RuntimeError(f'Apply startup block not found in {path}')
+              text = text.replace(startup, startup + 'Initialize-MusicServerLibrary -Config $Config | Out-Null\n', 1)
+              write_text(path, text, bom)
+
+          # daily_recommend has separate DryRun/non-DryRun DB paths.
+          rec, rec_bom = read_text('daily_recommend.ps1')
+          rec = rec.replace('Initialize-MusicServerState -Config $Config\n', 'Initialize-MusicServerState -Config $Config -SkipLibrary\n', 1)
+          dry_connect = '    Connect-MusicServerDatabase -DbPath $dbPath -SqliteExe $Config.Sqlite\n'
+          if dry_connect not in rec:
+              raise RuntimeError('daily_recommend DryRun connect block missing')
+          rec = rec.replace(dry_connect, dry_connect + '    Apply-ConfiguredMusicDir -Config $Config\n', 1)
+          non_dry = '    Initialize-MusicServerSchema\n    Apply-ConfiguredMusicDir -Config $Config\n'
+          if non_dry not in rec:
+              raise RuntimeError('daily_recommend non-DryRun apply block missing')
+          rec = rec.replace(non_dry, non_dry + '    Initialize-MusicServerLibrary -Config $Config | Out-Null\n', 1)
+          write_text('daily_recommend.ps1', rec, rec_bom)
+
+          # daily_cleanup should not be tied to one development checkout.
+          cleanup, cleanup_bom = read_text('daily_cleanup.ps1')
+          cleanup = cleanup.replace(
+              """param(\n    [switch]$DryRun,\n    [int]$KeepDays = 1\n)\n""",
+              """param(\n    [switch]$DryRun,\n    [int]$KeepDays = 1,\n    [string]$Root = $PSScriptRoot\n)\n""",
+              1,
+          )
+          cleanup = cleanup.replace("$Root      = 'E:\\Project\\MusicServer'\n", '', 1)
+          write_text('daily_cleanup.ps1', cleanup, cleanup_bom)
+
+          # API PUT/DELETE initialize the selected/reset library immediately.
+          api, api_bom = read_text('music_api.ps1')
+          put_block = """                    Set-AppSettingDb -Key 'music_library_path' -Value $newPath\n                    Apply-ConfiguredMusicDir -Config $Config\n"""
+          if put_block not in api:
+              raise RuntimeError('settings PUT apply block missing')
+          api = api.replace(put_block, put_block + '                    Initialize-MusicServerLibrary -Config $Config | Out-Null\n', 1)
+          delete_block = """            Remove-AppSettingDb -Key 'music_library_path'\n            Apply-ConfiguredMusicDir -Config $Config\n"""
+          if delete_block not in api:
+              raise RuntimeError('settings DELETE apply block missing')
+          api = api.replace(delete_block, delete_block + '            Initialize-MusicServerLibrary -Config $Config | Out-Null\n', 1)
+          # Report the actual persisted source, even when a DB setting equals default.
+          old_source = "$source = if ($env:MUSICSERVER_MUSIC_DIR) { 'environment' } elseif (-not $isDefault) { 'database' } else { 'default' }"
+          new_source = "$savedSetting = Get-AppSettingDb -Key 'music_library_path'\n            $source = if ($env:MUSICSERVER_MUSIC_DIR) { 'environment' } elseif ($savedSetting) { 'database' } else { 'default' }"
+          if old_source in api:
+              api = api.replace(old_source, new_source, 1)
+          write_text('music_api.ps1', api, api_bom)
+
+          # -----------------------------------------------------------------
+          # Tauri bridge: static web/ has no JS bundler, so expose the core
+          # invoke bridge and keep the native dialog entirely behind a Rust
+          # command. The front-end no longer assumes plugin JS globals exist.
+          # -----------------------------------------------------------------
+          conf_path = ROOT / 'src-tauri/tauri.conf.json'
+          conf = json.loads(conf_path.read_text(encoding='utf-8'))
+          conf['app']['withGlobalTauri'] = True
+          conf_path.write_text(json.dumps(conf, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+
+          main, main_bom = read_text('src-tauri/src/main.rs')
+          if 'use tauri_plugin_dialog::DialogExt;' not in main:
+              main = main.replace('use tauri::Manager;\n', 'use tauri::Manager;\nuse tauri_plugin_dialog::DialogExt;\n', 1)
+          rust_command = r'''
+#[tauri::command]
+async fn pick_music_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    let selected = app.dialog().file().blocking_pick_folder();
+    match selected {
+        Some(path) => {
+            let path = path
+                .into_path()
+                .map_err(|error| format!("Selected folder is not a filesystem path: {error}"))?;
+            Ok(Some(path.to_string_lossy().into_owned()))
+        }
+        None => Ok(None),
+    }
+}
+
+'''
+          if 'async fn pick_music_folder' not in main:
+              marker = '#[tauri::command]\nfn open_folder(path: String) -> Result<(), String> {'
+              if marker not in main:
+                  raise RuntimeError('open_folder marker missing in main.rs')
+              main = main.replace(marker, rust_command + marker, 1)
+          old_handler = '.invoke_handler(tauri::generate_handler![open_folder])'
+          new_handler = '.invoke_handler(tauri::generate_handler![pick_music_folder, open_folder])'
+          if old_handler not in main and new_handler not in main:
+              raise RuntimeError('Tauri invoke handler marker missing')
+          main = main.replace(old_handler, new_handler, 1)
+          write_text('src-tauri/src/main.rs', main, main_bom)
+
+          app, app_bom = read_text('web/app.js')
+          browse_pattern = re.compile(r"// Native folder picker via Tauri dialog plugin\n\$\('#music-library-browse'\)\.addEventListener\('click', async \(\) => \{.*?\n\}\);", re.S)
+          browse_replacement = r'''// Native folder picker via a Rust Tauri command. web/ is intentionally a
+// static bundle, so plugin-specific JavaScript globals are not required.
+$('#music-library-browse').addEventListener('click', async () => {
+  try {
+    const { invoke } = window.__TAURI__?.core || {};
+    if (!invoke) { showToast('文件夹选择器不可用'); return; }
+    const selected = await invoke('pick_music_folder');
+    if (!selected) return; // user cancelled
+    await saveMusicLibraryPath(selected);
+  } catch (e) {
+    showToast(`无法选择文件夹：${e.message}`);
+  }
+});'''
+          app, count = browse_pattern.subn(browse_replacement, app, count=1)
+          if count != 1:
+              raise RuntimeError(f'web browse handler replacement count={count}')
+          write_text('web/app.js', app, app_bom)
+
+          # -----------------------------------------------------------------
+          # Shared resolver for standalone maintenance tools. These utilities
+          # are not packaged runtime, but should no longer silently write to a
+          # developer-specific E:\\Project path.
+          # -----------------------------------------------------------------
+          helper = r'''﻿function Resolve-MaintenanceMusicDir {
+    param(
+        [string]$ExplicitPath = '',
+        [string]$ProjectRoot = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($ExplicitPath)) {
+        return [IO.Path]::GetFullPath($ExplicitPath)
+    }
+    $envPath = [Environment]::GetEnvironmentVariable('MUSICSERVER_MUSIC_DIR')
+    if (-not [string]::IsNullOrWhiteSpace($envPath)) {
+        return [IO.Path]::GetFullPath($envPath)
+    }
+
+    try {
+        Import-Module (Join-Path $ProjectRoot 'MusicServer.Core.psm1') -Force
+        Import-Module (Join-Path $ProjectRoot 'MusicServer.Database.psm1') -Force
+        Import-Module (Join-Path $ProjectRoot 'MusicServer.State.psm1') -Force
+        $config = New-MusicServerConfig -Root $ProjectRoot
+        $dbPath = Join-Path $config.StateDir 'musicserver.db'
+        if (Test-Path -LiteralPath $dbPath -PathType Leaf) {
+            Connect-MusicServerDatabase -DbPath $dbPath -SqliteExe $config.Sqlite
+            $saved = Get-AppSettingDb -Key 'music_library_path'
+            if ($saved -and -not [string]::IsNullOrWhiteSpace([string]$saved)) {
+                return [IO.Path]::GetFullPath([string]$saved)
+            }
+        }
+        return Get-DefaultMusicDir -Root $ProjectRoot
+    } catch {
+        return [IO.Path]::GetFullPath((Join-Path $ProjectRoot 'Music'))
+    }
+}
+'''
+          write_text('scripts/maintenance/_music_library.ps1', helper, True)
+
+          # fetch_lyrics
+          p, bom = read_text('scripts/maintenance/fetch_lyrics.ps1')
+          p = p.replace("    [switch]$Force,\n    [string]$Filter = '*'\n", "    [switch]$Force,\n    [string]$Filter = '*',\n    [string]$MusicDir = ''\n", 1)
+          p = p.replace("$MusicDir = 'E:\\Project\\MusicServer\\Music'\n", ". (Join-Path $PSScriptRoot '_music_library.ps1')\n$ProjectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)\n$MusicDir = Resolve-MaintenanceMusicDir -ExplicitPath $MusicDir -ProjectRoot $ProjectRoot\n", 1)
+          p = p.replace("$Report   = 'E:\\Project\\MusicServer\\lyrics_report.csv'", "$Report   = Join-Path $ProjectRoot 'lyrics_report.csv'", 1)
+          p = p.replace("$StateDb  = 'E:\\Project\\MusicServer\\DailyMix_data\\state\\musicserver.db'", "$StateDb  = Join-Path $ProjectRoot 'DailyMix_data\\state\\musicserver.db'", 1)
+          write_text('scripts/maintenance/fetch_lyrics.ps1', p, bom)
+
+          # fix_one_lyric
+          p, bom = read_text('scripts/maintenance/fix_one_lyric.ps1')
+          p = p.replace("    [long]$SongId = 0,\n    [string]$Search = ''\n", "    [long]$SongId = 0,\n    [string]$Search = '',\n    [string]$MusicDir = ''\n", 1)
+          p = p.replace("$MusicDir = 'E:\\Project\\MusicServer\\Music'\n", ". (Join-Path $PSScriptRoot '_music_library.ps1')\n$ProjectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)\n$MusicDir = Resolve-MaintenanceMusicDir -ExplicitPath $MusicDir -ProjectRoot $ProjectRoot\n", 1)
+          write_text('scripts/maintenance/fix_one_lyric.ps1', p, bom)
+
+          # fix_tags
+          p, bom = read_text('scripts/maintenance/fix_tags.ps1')
+          if not p.lstrip('\ufeff').startswith('<#'):
+              raise RuntimeError('unexpected fix_tags header')
+          insert_at = p.find("#>\n") + 3
+          p = p[:insert_at] + "\nparam([string]$MusicDir = '')\n\n" + p[insert_at:]
+          p = p.replace('$musicDir = "E:\\Project\\MusicServer\\Music"\n', ". (Join-Path $PSScriptRoot '_music_library.ps1')\n$ProjectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)\n$musicDir = Resolve-MaintenanceMusicDir -ExplicitPath $MusicDir -ProjectRoot $ProjectRoot\n", 1)
+          write_text('scripts/maintenance/fix_tags.ps1', p, bom)
+
+          # download_bilibili_favorites
+          p, bom = read_text('scripts/maintenance/download_bilibili_favorites.ps1')
+          p = p.replace('[string]$OutputDir = "E:\\Project\\MusicServer\\Music"', '[string]$OutputDir = ""', 1)
+          param_end = ')\n\n# yt-dlp 可执行文件路径'
+          if param_end not in p:
+              raise RuntimeError('favorites param end missing')
+          p = p.replace(param_end, ")\n\n. (Join-Path $PSScriptRoot '_music_library.ps1')\n$ProjectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)\n$OutputDir = Resolve-MaintenanceMusicDir -ExplicitPath $OutputDir -ProjectRoot $ProjectRoot\n\n# yt-dlp 可执行文件路径", 1)
+          p = p.replace('音频输出目录，默认 E:\\Project\\MusicServer\\Music', '音频输出目录；未指定时使用 MusicServer 当前配置的音乐库', 1)
+          write_text('scripts/maintenance/download_bilibili_favorites.ps1', p, bom)
+
+          # add_song
+          p, bom = read_text('scripts/maintenance/add_song.ps1')
+          header_end = p.find('#>\n') + 3
+          p = p[:header_end] + "\nparam([string]$MusicDir = '')\n\n" + p[header_end:]
+          p = p.replace('$OutputDir = "E:\\Project\\MusicServer\\Music"\n$CookieFile = "E:\\Project\\MusicServer\\cookies.txt"\n', ". (Join-Path $PSScriptRoot '_music_library.ps1')\n$ProjectRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)\n$OutputDir = Resolve-MaintenanceMusicDir -ExplicitPath $MusicDir -ProjectRoot $ProjectRoot\n$CookieFile = Join-Path $ProjectRoot 'cookies.txt'\n", 1)
+          write_text('scripts/maintenance/add_song.ps1', p, bom)
+
+          # -----------------------------------------------------------------
+          # Regression suite for resolver, persistence, reset, unavailable
+          # drives, Unicode/SQL escaping, Junctions, Navidrome and Tauri bridge.
+          # -----------------------------------------------------------------
+          settings_tests = r'''﻿$ErrorActionPreference = 'Stop'
+$ProjectRoot = Split-Path -Parent $PSScriptRoot
+Import-Module (Join-Path $ProjectRoot 'MusicServer.Core.psm1') -Force
+Import-Module (Join-Path $ProjectRoot 'MusicServer.Database.psm1') -Force
+Import-Module (Join-Path $ProjectRoot 'MusicServer.State.psm1') -Force
+
+Describe 'Configurable music library' {
+    BeforeEach {
+        $script:OldMusicEnv = [Environment]::GetEnvironmentVariable('MUSICSERVER_MUSIC_DIR')
+        [Environment]::SetEnvironmentVariable('MUSICSERVER_MUSIC_DIR', $null)
+        $script:Root = Join-Path ([IO.Path]::GetTempPath()) ('ms_settings_' + [guid]::NewGuid().ToString('N'))
+        $script:Config = New-MusicServerConfig -Root $script:Root
+        Initialize-MusicServerState -Config $script:Config -SkipLibrary
+        Initialize-MusicServerDatabase -DbPath (Join-Path $script:Config.StateDir 'musicserver.db') -SqliteExe $script:Config.Sqlite
+        Initialize-MusicServerSchema
+    }
+
+    AfterEach {
+        [Environment]::SetEnvironmentVariable('MUSICSERVER_MUSIC_DIR', $script:OldMusicEnv)
+        Remove-Item -LiteralPath $script:Root -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'uses the real default when no override exists' {
+        (Resolve-ConfiguredMusicDir -Config $script:Config) | Should Be (Get-DefaultMusicDir -Root $script:Root)
+    }
+
+    It 'persists a custom path and resets immediately to the real default' {
+        $custom = Join-Path $script:Root 'External Music'
+        New-Item -ItemType Directory -Force -Path $custom | Out-Null
+        Set-AppSettingDb -Key 'music_library_path' -Value $custom
+        Apply-ConfiguredMusicDir -Config $script:Config | Out-Null
+        $script:Config.MusicDir | Should Be ([IO.Path]::GetFullPath($custom))
+        $script:Config.DailyDir | Should Be (Join-Path ([IO.Path]::GetFullPath($custom)) 'DailyMix')
+
+        Remove-AppSettingDb -Key 'music_library_path'
+        Apply-ConfiguredMusicDir -Config $script:Config | Out-Null
+        $script:Config.MusicDir | Should Be (Get-DefaultMusicDir -Root $script:Root)
+    }
+
+    It 'gives the environment override highest runtime priority' {
+        $saved = Join-Path $script:Root 'Saved'
+        $envPath = Join-Path $script:Root 'Env Override'
+        Set-AppSettingDb -Key 'music_library_path' -Value $saved
+        [Environment]::SetEnvironmentVariable('MUSICSERVER_MUSIC_DIR', $envPath)
+        (Resolve-ConfiguredMusicDir -Config $script:Config) | Should Be ([IO.Path]::GetFullPath($envPath))
+    }
+
+    It 'round-trips Unicode spaces and apostrophes through SQLite' {
+        $custom = Join-Path $script:Root "音乐 My Library O'Brien"
+        Set-AppSettingDb -Key 'music_library_path' -Value $custom
+        (Resolve-ConfiguredMusicDir -Config $script:Config) | Should Be ([IO.Path]::GetFullPath($custom))
+    }
+
+    It 'rejects a file path as a music library' {
+        $file = Join-Path $script:Root 'not-a-directory.txt'
+        [IO.File]::WriteAllText($file, 'x')
+        $result = Test-MusicLibraryPath -Path $file
+        $result.Valid | Should Be $false
+        $result.Reason | Should Be 'IS_FILE'
+    }
+
+    It 'keeps an unavailable custom path and does not create a silent default library' {
+        $missing = Join-Path $script:Root 'offline\Music'
+        Set-AppSettingDb -Key 'music_library_path' -Value $missing
+        Apply-ConfiguredMusicDir -Config $script:Config | Out-Null
+        (Initialize-MusicServerLibrary -Config $script:Config) | Should Be $false
+        (Test-Path -LiteralPath $missing) | Should Be $false
+        (Test-Path -LiteralPath (Get-DefaultMusicDir -Root $script:Root)) | Should Be $false
+    }
+
+    It 'creates the default library only after the effective path is known' {
+        Apply-ConfiguredMusicDir -Config $script:Config | Out-Null
+        (Initialize-MusicServerLibrary -Config $script:Config) | Should Be $true
+        (Test-Path -LiteralPath $script:Config.MusicDir -PathType Container) | Should Be $true
+        (Test-Path -LiteralPath $script:Config.DailyDir -PathType Container) | Should Be $true
+    }
+
+    It 'accepts a Windows junction as the configured library' {
+        $target = Join-Path $script:Root 'target-library'
+        $link = Join-Path $script:Root 'linked-library'
+        New-Item -ItemType Directory -Force -Path $target | Out-Null
+        New-Item -ItemType Junction -Path $link -Target $target | Out-Null
+        Set-AppSettingDb -Key 'music_library_path' -Value $link
+        Apply-ConfiguredMusicDir -Config $script:Config | Out-Null
+        (Test-Path -LiteralPath $script:Config.MusicDir -PathType Container) | Should Be $true
+    }
+
+    It 'writes a stable Navidrome TOML basic string and is idempotent' {
+        $toml = Join-Path $script:Root 'navidrome.toml'
+        [IO.File]::WriteAllText($toml, "MusicFolder = 'C:\\Old'`r`nLogLevel = 'info'`r`n")
+        $custom = "E:\\音乐 Folder O'Brien"
+        (Sync-NavidromeMusicFolder -NdConfigPath $toml -NewMusicFolder $custom) | Should Be $true
+        $content = Get-Content -LiteralPath $toml -Raw -Encoding UTF8
+        $content.Contains('MusicFolder = "E:\\音乐 Folder O''Brien"') | Should Be $true
+        (Sync-NavidromeMusicFolder -NdConfigPath $toml -NewMusicFolder $custom) | Should Be $false
+    }
+
+    It 'uses a Rust native picker through the Tauri invoke bridge' {
+        $conf = Get-Content -LiteralPath (Join-Path $ProjectRoot 'src-tauri\tauri.conf.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+        $conf.app.withGlobalTauri | Should Be $true
+        $rust = Get-Content -LiteralPath (Join-Path $ProjectRoot 'src-tauri\src\main.rs') -Raw -Encoding UTF8
+        $web = Get-Content -LiteralPath (Join-Path $ProjectRoot 'web\app.js') -Raw -Encoding UTF8
+        $rust | Should Match 'pick_music_folder'
+        $rust | Should Match 'blocking_pick_folder'
+        $web | Should Match "invoke\('pick_music_folder'\)"
+        $web | Should Not Match '__TAURI__\?\.dialog'
+    }
+
+    It 'removes developer-specific Music paths from standalone maintenance tools' {
+        foreach ($name in @('fetch_lyrics.ps1','fix_one_lyric.ps1','fix_tags.ps1','add_song.ps1','download_bilibili_favorites.ps1')) {
+            $text = Get-Content -LiteralPath (Join-Path $ProjectRoot "scripts\maintenance\$name") -Raw -Encoding UTF8
+            $text | Should Not Match 'E:\\Project\\MusicServer\\Music'
+            $text | Should Match '_music_library.ps1'
+        }
+    }
+}
+'''
+          write_text('tests/MusicServer.Settings.Tests.ps1', settings_tests, True)
+
+          # Add Settings suite and strengthen the installed APP smoke with a
+          # pre-seeded external library. The test uses only runner temp data.
+          wf, wf_bom = read_text('.github/workflows/core-tests.yml')
+          old_group = "state = @('Core', 'Database', 'V2', 'WorkerConcurrency', 'Recommendation', 'LegacyRetirement', 'Listening', 'Web', 'Tauri')"
+          new_group = "state = @('Core', 'Database', 'V2', 'WorkerConcurrency', 'Recommendation', 'LegacyRetirement', 'Listening', 'Web', 'Tauri', 'Settings')"
+          if old_group not in wf:
+              raise RuntimeError('state suite group marker missing')
+          wf = wf.replace(old_group, new_group, 1)
+
+          seed_marker = """          New-Item -ItemType Directory -Force -Path $installDir,$appHome | Out-Null\n\n          $install = Start-Process"""
+          seed_block = """          New-Item -ItemType Directory -Force -Path $installDir,$appHome | Out-Null\n\n          # Pre-seed an external music library in SQLite before first APP launch.\n          # This proves the installed runtime does not require APP_HOME\\Music.\n          $externalLibrary = Join-Path $env:RUNNER_TEMP 'MusicServerExternalLibrary'\n          Remove-Item -LiteralPath $externalLibrary -Recurse -Force -ErrorAction SilentlyContinue\n          New-Item -ItemType Directory -Force -Path $externalLibrary | Out-Null\n          $fixtureAudio = Join-Path $externalLibrary 'ci-external.wav'\n          $fixtureLyric = Join-Path $externalLibrary 'ci-external.lrc'\n          [IO.File]::WriteAllBytes($fixtureAudio, [byte[]](0..255))\n          [IO.File]::WriteAllText($fixtureLyric, \"[00:00.00]external library smoke`r`n\", (New-Object Text.UTF8Encoding($false)))\n          $stateDir = Join-Path $appHome 'DailyMix_data\\state'\n          New-Item -ItemType Directory -Force -Path $stateDir | Out-Null\n          $stateDb = Join-Path $stateDir 'musicserver.db'\n          $escapedExternal = $externalLibrary.Replace(\"'\", \"''\")\n          & $env:MUSICSERVER_SQLITE $stateDb \"CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT ''); INSERT INTO app_settings(key,value,updated_at) VALUES('music_library_path','$escapedExternal','ci') ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at;\"\n          if ($LASTEXITCODE -ne 0) { throw 'Failed to pre-seed external library setting.' }\n\n          $install = Start-Process"""
+          if seed_marker not in wf:
+              raise RuntimeError('installed smoke seed marker missing')
+          wf = wf.replace(seed_marker, seed_block, 1)
+
+          verify_marker = """            Write-Host \"portable runtime ready -> $appHome\"\n            Write-Host \"service pair -> UI=$($pair.Ui) API=$($pair.Api)\"\n"""
+          verify_block = """            Write-Host \"portable runtime ready -> $appHome\"\n            Write-Host \"service pair -> UI=$($pair.Ui) API=$($pair.Api)\"\n\n            $apiBase = \"http://127.0.0.1:$($pair.Api)\"\n            $settings = Invoke-RestMethod -UseBasicParsing -Uri \"$apiBase/api/settings/music-library\" -TimeoutSec 10\n            if ([IO.Path]::GetFullPath([string]$settings.path) -ne [IO.Path]::GetFullPath($externalLibrary)) {\n              throw \"Installed APP ignored external music library: $($settings.path)\"\n            }\n            if (-not $settings.available) { throw 'External library was reported unavailable.' }\n\n            $library = Invoke-RestMethod -UseBasicParsing -Uri \"$apiBase/api/library\" -TimeoutSec 15\n            $fixture = @($library.items | Where-Object { [string]$_.title -match 'ci-external' -or [string]$_.path -match 'ci-external' } | Select-Object -First 1)\n            if ($fixture.Count -eq 0) {\n              # Metadata parsers may choose a different title; with a one-file fixture,\n              # any returned local item is sufficient to prove the external scan.\n              $fixture = @($library.items | Select-Object -First 1)\n            }\n            if ($fixture.Count -eq 0) { throw 'Installed APP external library scan returned no items.' }\n            $libraryId = [string]$fixture[0].id\n            $stream = Invoke-WebRequest -UseBasicParsing -Uri \"$apiBase/api/library/$libraryId/stream\" -TimeoutSec 10\n            if ($stream.StatusCode -notin 200,206) { throw \"External stream failed: $($stream.StatusCode)\" }\n            $lyrics = Invoke-RestMethod -UseBasicParsing -Uri \"$apiBase/api/library/$libraryId/lyrics\" -TimeoutSec 10\n            if (-not $lyrics.available) { throw 'External adjacent .lrc was not discovered.' }\n\n            Invoke-RestMethod -UseBasicParsing -Method Delete -Uri \"$apiBase/api/settings/music-library\" -TimeoutSec 10 | Out-Null\n            $reset = Invoke-RestMethod -UseBasicParsing -Uri \"$apiBase/api/settings/music-library\" -TimeoutSec 10\n            $expectedDefault = Join-Path $appHome 'Music'\n            if ([IO.Path]::GetFullPath([string]$reset.path) -ne [IO.Path]::GetFullPath($expectedDefault)) {\n              throw \"Reset did not restore installed default library: $($reset.path)\"\n            }\n            if (-not (Test-Path -LiteralPath $expectedDefault -PathType Container)) {\n              throw 'Reset default library directory was not initialized.'\n            }\n"""
+          if verify_marker not in wf:
+              raise RuntimeError('installed smoke verify marker missing')
+          wf = wf.replace(verify_marker, verify_block, 1)
+          write_text('.github/workflows/core-tests.yml', wf, wf_bom)
+
+          # -----------------------------------------------------------------
+          # User-facing docs. Append only once and keep Markdown UTF-8.
+          # -----------------------------------------------------------------
+          readme, readme_bom = read_text('README.md')
+          section = r'''
+
+## 可配置音乐库
+
+安装版默认音乐库仍为 `%LOCALAPPDATA%\com.musicserver.desktop\Music`，源码 checkout 默认为 `<repo>\Music`。桌面 APP 的设置面板可以把音乐库切换到任意本地目录，例如 `D:\Music` 或 `E:\MyMusic`；设置保存在 SQLite `app_settings` 中，`MUSICSERVER_MUSIC_DIR` 仅作为高级用户/调试 override。
+
+切换路径只改变 MusicServer 使用的目录，**不会移动、复制或删除**旧目录中的歌曲。若外置磁盘暂时离线，MusicServer 保留原配置并显示“音乐库不可用”，不会静默切回一个新的空目录。歌曲与歌词继续采用同名邻接方式，例如 `Song.mp3` + `Song.lrc`。
+'''
+          if '## 可配置音乐库' not in readme:
+              readme += section
+          write_text('README.md', readme, readme_bom)
+
+          guide, guide_bom = read_text('docs/USER_GUIDE.zh-CN.md')
+          guide_section = r'''
+
+## 音乐库位置
+
+桌面 APP 可以在设置面板中选择音乐库目录、打开当前目录或恢复默认目录。安装版默认目录是 `%LOCALAPPDATA%\com.musicserver.desktop\Music`，但可以改为 `D:\Music`、`E:\MyMusic` 等任意可用目录。
+
+更改音乐库位置只会修改 MusicServer 的路径配置，不会移动、复制或删除原目录里的文件。外置磁盘断开时，原路径会被保留并显示为不可用；重新连接磁盘或重新选择目录即可。恢复默认后会重新使用 `<APP_HOME>\Music`。
+
+歌词仍与歌曲放在同一目录、使用同名文件，例如：
+
+```text
+Song.mp3
+Song.lrc
+```
+'''
+          if '## 音乐库位置' not in guide:
+              guide += guide_section
+          write_text('docs/USER_GUIDE.zh-CN.md', guide, guide_bom)
+
+          agents, agents_bom = read_text('AGENTS.md')
+          agents_section = r'''
+
+### Configurable music library checkpoint
+
+- Effective `MusicDir` priority: `MUSICSERVER_MUSIC_DIR` -> SQLite `app_settings.music_library_path` -> `<Root>\Music`.
+- Resolve storage first, then apply the configured library path. A missing custom/removable path must remain unavailable; never silently create/fallback to default Music.
+- `DailyDir` is always `<MusicDir>\DailyMix`; adjacent lyrics remain `Song.mp3` + `Song.lrc`.
+- Changing/resetting the library never moves or deletes user music. Navidrome config may be synchronized, but its live DB must never be written while Navidrome is running.
+- Static `web/` uses the Tauri core invoke bridge; native folder picking stays behind the Rust `pick_music_folder` command.
+'''
+          if '### Configurable music library checkpoint' not in agents:
+              agents += agents_section
+          write_text('AGENTS.md', agents, agents_bom)
+
+          # Remove this one-shot workflow from the final source commit.
+          one_shot = ROOT / '.github/workflows/pr19-direct-fix.yml'
+          if one_shot.exists():
+              one_shot.unlink()
+
+          print('PR19 fixes applied.')
+          '@ | Set-Content -LiteralPath pr19_fix.py -Encoding UTF8
+          python pr19_fix.py
+          Remove-Item -LiteralPath pr19_fix.py -Force
+
+      - name: Format Rust
+        shell: pwsh
+        working-directory: src-tauri
+        run: cargo fmt
+
+      - name: PowerShell parser preflight
+        shell: powershell
+        run: |
+          $bad = @()
+          Get-ChildItem -LiteralPath . -Recurse -File | Where-Object { $_.Extension -in '.ps1','.psm1' } | ForEach-Object {
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors)
+            if ($errors.Count -gt 0) {
+              $bad += $_.FullName
+              $errors | ForEach-Object { Write-Host "$($_.Extent.File):$($_.Extent.StartLineNumber): $($_.Message)" }
+            }
+          }
+          if ($bad.Count -gt 0) { throw "PowerShell parser failures: $($bad -join ', ')" }
+
+      - name: Commit fixes to existing PR branch
+        shell: pwsh
+        run: |
+          git diff --check
+          git status --short
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if (git diff --cached --quiet) { throw 'No fixes were produced.' }
+          git commit -m "fix: harden configurable music library integration"
+          git push origin HEAD:feature/configurable-music-library
