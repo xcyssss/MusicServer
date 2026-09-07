@@ -141,7 +141,7 @@ MusicServer/
 
 | Job | 验证内容 |
 |---|---|
-| `state` | Core / Database / V2 / WorkerConcurrency / Recommendation / LegacyRetirement / Listening / Web / Tauri / ConfigurableLibrary / TestRunner Pester |
+| `state` | Core / Database / V2 / WorkerConcurrency / Recommendation / LegacyRetirement / Listening / Web / Tauri / ConfigurableLibrary / TestRunner / Identity Pester |
 | `api` | Http / UiProxyRuntime / MediaRuntime / ApiTransaction / ApiRuntime Pester |
 | `desktop-build` | `cargo fmt --check`、`cargo check --locked`、真实 NSIS 构建、安装包脱离源码 runtime 启动 smoke、artifact 上传 |
 
@@ -178,3 +178,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/measure_musicser
 `MUSICSERVER_DIAGNOSTICS=1` 可让 API JSON 响应携带 `X-MusicServer-State-Sqlite-Calls`，表示该请求经状态库包装器启动的 sqlite3 进程数；它不包括 Navidrome 只读查询，默认关闭。
 
 API 与 UI 代理的 JSON 控制请求最多 64 KiB，完整请求体须在 5 秒内到达。空请求体继续兼容；非空请求体必须是 UTF-8 JSON 对象。非法/不完整 JSON 返回 400，超时返回 408，chunked 请求返回 411，超限返回 413，不支持的压缩编码返回 415；连接已断开时可能无法返回错误正文。
+
+## Runtime 构建标识与部署校验
+
+桌面端、UI/API 和 smoke 使用 runtime 内容 SHA-256 标识，替代手写版本字符串。标识不包含机器路径或用户数据库；进程启动后保持不变。安装包的 schema 2 清单记录每个应用文件的大小与哈希，部署前检查完整性，再逐文件准备和替换。
+
+此机制可在写入前发现包损坏，并避免单文件复制失败截断旧文件；尚不提供整组文件的原子升级、断电恢复或数据库版本回退。`MUSICSERVER_DISABLE_WORKER=1` 仅用于明确禁用下载 worker 的隔离启动测量，默认不设置。

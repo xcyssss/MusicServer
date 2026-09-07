@@ -105,7 +105,7 @@ $payload = @(Get-ChildItem -LiteralPath $Destination -File -Recurse | Where-Obje
     [ordered]@{
         path = $_.FullName.Substring($Destination.TrimEnd('\','/').Length + 1).Replace('\','/')
         size = $_.Length
-        sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        sha256 = Get-MusicServerFileHash -Path $_.FullName
     }
 })
 $manifest = [ordered]@{

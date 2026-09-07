@@ -6,6 +6,8 @@ cookies.txt
 .env.*
 
 # Personal/runtime state
+/runtime-manifest.json
+/.musicserver-update-*
 DailyMix_data/
 lyrics_report.csv
 Navidrome/Data/

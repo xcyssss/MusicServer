@@ -141,6 +141,14 @@ fn resolve_app_home() -> PathBuf {
 }
 
 fn copy_runtime_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
+    copy_runtime_tree_into(source, destination, destination)
+}
+
+fn copy_runtime_tree_into(
+    source: &Path,
+    destination: &Path,
+    staging_root: &Path,
+) -> std::io::Result<()> {
     fs::create_dir_all(destination)?;
     for entry in fs::read_dir(source)? {
         let entry = entry?;
@@ -150,7 +158,7 @@ fn copy_runtime_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
         let source_path = entry.path();
         let destination_path = destination.join(entry.file_name());
         if entry.file_type()?.is_dir() {
-            copy_runtime_tree(&source_path, &destination_path)?;
+            copy_runtime_tree_into(&source_path, &destination_path, staging_root)?;
         } else {
             if let Some(parent) = destination_path.parent() {
                 fs::create_dir_all(parent)?;
@@ -162,17 +170,21 @@ fn copy_runtime_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
                 || fs::metadata(&source_path)?.len() != fs::metadata(&destination_path)?.len()
                 || fs::read(&source_path)? != fs::read(&destination_path)?
             {
-                replace_runtime_file(&source_path, &destination_path)?;
+                replace_runtime_file(&source_path, &destination_path, staging_root)?;
             }
         }
     }
     Ok(())
 }
 
-fn replace_runtime_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+fn replace_runtime_file(
+    source: &Path,
+    destination: &Path,
+    staging_root: &Path,
+) -> std::io::Result<()> {
     static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let temporary = destination.with_file_name(format!(
+    let temporary = staging_root.join(format!(
         ".musicserver-update-{}-{sequence}",
         std::process::id()
     ));
@@ -239,11 +251,11 @@ mod tests {
             .share_mode(0)
             .open(&target)
             .unwrap();
-        assert!(replace_runtime_file(&source, &target).is_err());
+        assert!(replace_runtime_file(&source, &target, &root).is_err());
         drop(lock);
         assert_eq!(fs::read(&target).unwrap(), b"old runtime");
         assert_eq!(fs::read_dir(&root).unwrap().count(), 2);
-        replace_runtime_file(&source, &target).unwrap();
+        replace_runtime_file(&source, &target, &root).unwrap();
         assert_eq!(fs::read(&target).unwrap(), b"new runtime");
         fs::remove_dir_all(root).unwrap();
     }
