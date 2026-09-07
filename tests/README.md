@@ -26,5 +26,6 @@ Invoke-Pester -Path tests -Tag RequiresLocalRuntime -PassThru
 - `RuntimeFixture`、`WorkerChild`、`HttpRacer` 是测试辅助脚本。
 - `verify_tauri_desktop.ps1` 用于真实 Tauri APP smoke；`worker_smoke.ps1` 是独立 worker smoke 工具。
 - `desktop-build` 另行执行 Rust、NSIS 与脱离源码的安装验证。Pester 通过不能替代这个门禁或实际 APP 交互验收。
+- Rust 的 `startup_probe` TCP 回归覆盖分段响应、旧标识、错误状态、仅头部含标识、长度不符、慢速持续发送、未关闭连接、响应大小上限和过期预算；由 `cargo test --locked` 执行。
 
 测试与测量日志存入忽略目录 `artifacts/`，不提交运行数据。

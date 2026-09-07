@@ -7,12 +7,13 @@
 
 use std::env;
 use std::fs;
-use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+mod startup_probe;
 
 use tauri::Manager;
 
@@ -45,24 +46,12 @@ fn endpoint_url(port: u16) -> String {
 /// is only used for startup identity checks, not for normal application API
 /// traffic.
 fn http_contains(port: u16, path: &str, marker: &str) -> bool {
-    let address: std::net::SocketAddr = match format!("127.0.0.1:{port}").parse() {
-        Ok(address) => address,
-        Err(_) => return false,
-    };
-    let mut stream = match TcpStream::connect_timeout(&address, Duration::from_millis(400)) {
-        Ok(stream) => stream,
-        Err(_) => return false,
-    };
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(1200)));
-    let _ = stream.set_write_timeout(Some(Duration::from_millis(1200)));
-    let request =
-        format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
-    if stream.write_all(request.as_bytes()).is_err() {
-        return false;
-    }
-    let mut response = Vec::new();
-    let _ = stream.read_to_end(&mut response);
-    !response.is_empty() && String::from_utf8_lossy(&response).contains(marker)
+    startup_probe::contains(
+        port,
+        path,
+        marker,
+        Instant::now() + Duration::from_millis(1200),
+    )
 }
 
 fn api_is_current(port: u16) -> bool {
@@ -319,12 +308,23 @@ fn ensure_ui_ready(bundle_runtime: &Path, app_home: &Path, state: &AppState) -> 
         }
         drop(guard);
 
-        // 轮询最多 ~30s（launcher 启动 API 需要几秒）
-        for _ in 0..60 {
-            if service_is_current(ui_port, api_port) {
+        // Include network time in the per-pair budget, not just sleep time.
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < deadline {
+            let probe_deadline = deadline.min(Instant::now() + Duration::from_millis(1200));
+            if startup_probe::contains(ui_port, "/app.js", BUILD_MARKER, probe_deadline)
+                && startup_probe::contains(
+                    api_port,
+                    "/health",
+                    BUILD_MARKER,
+                    deadline.min(Instant::now() + Duration::from_millis(1200)),
+                )
+            {
                 return Some(endpoint_url(ui_port));
             }
-            std::thread::sleep(Duration::from_millis(500));
+            std::thread::sleep(
+                Duration::from_millis(500).min(deadline.saturating_duration_since(Instant::now())),
+            );
         }
         stop_owned_launcher(state);
     }
