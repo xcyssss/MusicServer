@@ -90,7 +90,7 @@ fn inventory(root: &Path, folder: &Path, names: &mut BTreeSet<String>) -> io::Re
     Ok(())
 }
 
-pub fn verify(root: &Path, expected_identity: &str) -> io::Result<()> {
+pub fn verify(root: &Path, expected_identity: &str) -> io::Result<Vec<String>> {
     let bytes = fs::read(root.join("runtime-manifest.json"))?;
     let manifest: Manifest =
         serde_json::from_slice(&bytes).map_err(|_| invalid("invalid runtime manifest"))?;
@@ -124,6 +124,36 @@ pub fn verify(root: &Path, expected_identity: &str) -> io::Result<()> {
         return Err(invalid(
             "runtime payload is missing or has undeclared files",
         ));
+    }
+    declared.insert("runtime-manifest.json".to_string());
+    Ok(declared.into_iter().collect())
+}
+
+pub fn verify_destination(root: &Path, files: &[String]) -> io::Result<()> {
+    // Do not follow a junction/symlink out of the chosen APP home during update.
+    for relative in files {
+        let mut path = root.to_path_buf();
+        for component in std::iter::once("").chain(relative.split('/')) {
+            if !component.is_empty() {
+                path.push(component);
+            }
+            match fs::symlink_metadata(&path) {
+                Ok(metadata) => {
+                    #[cfg(windows)]
+                    {
+                        use std::os::windows::fs::MetadataExt;
+                        if metadata.file_attributes() & 0x400 != 0 {
+                            return Err(invalid("runtime destination reparse point"));
+                        }
+                    }
+                    if metadata.file_type().is_symlink() {
+                        return Err(invalid("runtime destination symlink"));
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+                Err(error) => return Err(error),
+            }
+        }
     }
     Ok(())
 }

@@ -162,17 +162,40 @@ fn copy_runtime_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
                 || fs::metadata(&source_path)?.len() != fs::metadata(&destination_path)?.len()
                 || fs::read(&source_path)? != fs::read(&destination_path)?
             {
-                fs::copy(&source_path, &destination_path)?;
+                replace_runtime_file(&source_path, &destination_path)?;
             }
         }
     }
     Ok(())
 }
 
+fn replace_runtime_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temporary = destination.with_file_name(format!(
+        ".musicserver-update-{}-{sequence}",
+        std::process::id()
+    ));
+    let mut input = fs::File::open(source)?;
+    // create_new ensures an existing user file can never be overwritten here.
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    let prepared = std::io::copy(&mut input, &mut output).and_then(|_| output.sync_all());
+    drop(output);
+    let result = prepared.and_then(|_| fs::rename(&temporary, destination));
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
 /// Synchronize only packaged runtime files into the writable APP home. Existing
 /// Music/, DailyMix_data/, Navidrome/, logs/ and user files are not deleted.
 fn stage_runtime(bundle_runtime: &Path, app_home: &Path) -> std::io::Result<()> {
-    runtime_manifest::verify(bundle_runtime, BUILD_MARKER)?;
+    let files = runtime_manifest::verify(bundle_runtime, BUILD_MARKER)?;
+    runtime_manifest::verify_destination(app_home, &files)?;
     copy_runtime_tree(bundle_runtime, app_home)?;
     if !has_launcher(app_home) {
         return Err(std::io::Error::new(
@@ -186,6 +209,44 @@ fn stage_runtime(bundle_runtime: &Path, app_home: &Path) -> std::io::Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn corrupt_package_never_changes_existing_runtime() {
+        let root = env::temp_dir().join(format!("musicserver-corrupt-{}", std::process::id()));
+        let source = root.join("source");
+        let target = root.join("target");
+        runtime_manifest::fixture(&source, BUILD_MARKER);
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join(LAUNCHER), b"old runtime").unwrap();
+        fs::write(source.join("web/app.js"), b"corruption").unwrap();
+        assert!(stage_runtime(&source, &target).is_err());
+        assert_eq!(fs::read(target.join(LAUNCHER)).unwrap(), b"old runtime");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn locked_destination_preserves_old_bytes_and_removes_temporary_file() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = env::temp_dir().join(format!("musicserver-locked-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("source");
+        let target = root.join("target");
+        fs::write(&source, b"new runtime").unwrap();
+        fs::write(&target, b"old runtime").unwrap();
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&target)
+            .unwrap();
+        assert!(replace_runtime_file(&source, &target).is_err());
+        drop(lock);
+        assert_eq!(fs::read(&target).unwrap(), b"old runtime");
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 2);
+        replace_runtime_file(&source, &target).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"new runtime");
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn staging_skips_equal_files_and_repairs_same_size_changes() {
