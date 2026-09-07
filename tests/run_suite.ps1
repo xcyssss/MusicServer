@@ -1,25 +1,31 @@
-# One-shot test runner: writes a summary + failures to -LogFile.
+﻿# One-shot test runner: writes a summary + failures to -LogFile.
 param(
     [Parameter(Mandatory)][string]$SuiteFile,
-    [Parameter(Mandatory)][string]$LogFile
+    [Parameter(Mandatory)][string]$LogFile,
+    [string[]]$ExcludeTag = @('RequiresLocalRuntime')
 )
-$suite = Join-Path (Split-Path $SuiteFile -Parent) (Split-Path $SuiteFile -Leaf)
+$ErrorActionPreference = 'Stop'
 $lines = @()
 try {
-    Import-Module Pester -ErrorAction Stop
-    $r = Invoke-Pester -Path $suite -PassThru -Quiet
+    $logPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($LogFile)
+    New-Item -ItemType Directory -Path (Split-Path -Parent $logPath) -Force | Out-Null
+    $suite = (Resolve-Path -LiteralPath $SuiteFile -ErrorAction Stop).ProviderPath
+    Import-Module Pester -RequiredVersion 3.4.0 -Force -ErrorAction Stop
+    $r = Invoke-Pester -Path $suite -ExcludeTag $ExcludeTag -PassThru -Quiet
     $lines += "SUITE: $suite"
+    $lines += 'Pester: 3.4.0'
     $lines += "Passed: $($r.PassedCount)  Failed: $($r.FailedCount)  Total: $($r.TotalCount)"
-    if ($r.Failed) {
-        foreach ($f in @($r.Failed)) {
-            $lines += "FAILED: $($f.ExpandedPath)"
-            if ($f.ErrorRecord) { $lines += "  :: $($f.ErrorRecord.Exception.Message)" }
-            if ($f.Block) { $lines += "  :: " + (($f.Block.ScriptBlock.ToString().Split("`n") | Where-Object { $_ -match 'FAIL|throw|Should' } | Select-Object -First 5) -join " | ") }
-        }
+    foreach ($f in @($r.TestResult | Where-Object { $_.Result -eq 'Failed' })) {
+        $lines += "FAILED: $($f.Describe) / $($f.Context) / $($f.Name)"
+        $lines += "  :: $($f.FailureMessage)"
+        if ($f.StackTrace) { $lines += "  :: $($f.StackTrace)" }
     }
-    $lines | Set-Content -LiteralPath $LogFile -Encoding UTF8
+    if ($r.TotalCount -eq 0) { throw 'No tests discovered after filtering.' }
+    $lines | Set-Content -LiteralPath $logPath -Encoding UTF8
     exit ($(if ($r.FailedCount -gt 0) { 1 } else { 0 }))
 } catch {
-    "RUNNER EXCEPTION: $($_.Exception.Message)" | Set-Content -LiteralPath $LogFile -Encoding UTF8
+    $message = "RUNNER EXCEPTION: $($_.Exception.Message)"
+    try { @($lines) + $message | Set-Content -LiteralPath $LogFile -Encoding UTF8 } catch { }
+    [Console]::Error.WriteLine($message)
     exit 2
 }

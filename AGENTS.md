@@ -125,7 +125,7 @@ CI: `.github/workflows/core-tests.yml` on `windows-latest`.
 
 | Job | Responsibility |
 |---|---|
-| `state` | Core, Database, V2, WorkerConcurrency, Recommendation, LegacyRetirement, Listening, Web, Tauri |
+| `state` | Core, Database, V2, WorkerConcurrency, Recommendation, LegacyRetirement, Listening, Web, Tauri, ConfigurableLibrary, TestRunner |
 | `api` | Http, UiProxyRuntime, MediaRuntime, ApiTransaction, ApiRuntime |
 | `desktop-build` | real Rust/Tauri compile, NSIS installer, installed-app portability smoke, installer artifact |
 
@@ -192,6 +192,8 @@ For non-trivial work:
 After completing a meaningful task, update this `AGENTS.md` checkpoint when the task changes architecture, release behavior, test gates, or important operating rules. Keep only current durable facts; do not accumulate transient debugging notes.
 
 ## Current checkpoint — 2026-09-07
+
+- `tests/run_suite.ps1` pins Pester 3.4.0, excludes RequiresLocalRuntime by default, and reports failures from TestResult (name, message and stack). Exit codes are 0/1/2 for pass/test failure/runner error; zero discovered tests is an error. The state CI group includes TestRunner subprocess regressions; the suite index is tests/README.md.
 
 - B backend reads: recommendation assembly uses four bounded State queries (one for an empty day); health statistics use one query. Schema bootstrap groups compatible DDL while retaining the lease-column upgrade and existing durability settings.
 - API Navidrome snapshots/maps live for one request only; API and UI share the stable local identity helper. UI caches serialized library responses with the existing list lifetime; explicit refresh sends `refresh=1`, and deletion invalidates the list. External downloads become visible on the existing 30-second refresh lifetime or explicit refresh.

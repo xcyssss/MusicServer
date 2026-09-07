@@ -141,8 +141,8 @@ MusicServer/
 
 | Job | 验证内容 |
 |---|---|
-| `state` | Core / Database / V2 / WorkerConcurrency / Recommendation / LegacyRetirement / Listening / Web / Tauri Pester |
-| `api` | Http / UiProxyRuntime / ApiTransaction / ApiRuntime Pester |
+| `state` | Core / Database / V2 / WorkerConcurrency / Recommendation / LegacyRetirement / Listening / Web / Tauri / ConfigurableLibrary / TestRunner Pester |
+| `api` | Http / UiProxyRuntime / MediaRuntime / ApiTransaction / ApiRuntime Pester |
 | `desktop-build` | `cargo fmt --check`、`cargo check --locked`、真实 NSIS 构建、安装包脱离源码 runtime 启动 smoke、artifact 上传 |
 
 `desktop-build` 不只检查源码字符串：它会在干净 GitHub runner 上真正生成安装 EXE，然后静默安装到临时目录，临时禁用 checkout 中的 launcher/API/web，再启动已安装 APP。只有 bundle runtime 能自行部署、UI/API build marker 正常、SQLite 状态库建立且 APP 退出后所拥有的服务树全部停止，才算通过。
@@ -156,6 +156,8 @@ musicserver-windows-installer
 的 GitHub Actions artifact。
 
 ## 运行规则
+
+本地正式测试入口和套件索引见 [`tests/README.md`](tests/README.md)。`tests/run_suite.ps1` 固定使用 Pester 3.4.0，默认排除本机运行时测试，并记录具体失败详情与退出码。
 
 - SQLite 是 MusicServer 唯一运行时状态真源；JSON 仅用于迁移输入、备份或兼容输出。
 - 不要在 Navidrome 运行时直接写其 live DB。
