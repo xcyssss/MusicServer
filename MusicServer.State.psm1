@@ -32,8 +32,6 @@ CREATE TABLE IF NOT EXISTS canonical_tracks (
     updated_at TEXT DEFAULT '',
     revision INTEGER NOT NULL DEFAULT 0
 );
-"@
-    Invoke-MusicServerSqlNonQuery -Query @"
 CREATE TABLE IF NOT EXISTS daily_recommendations (
     date TEXT NOT NULL,
     rank INTEGER NOT NULL,
@@ -53,8 +51,6 @@ CREATE TABLE IF NOT EXISTS daily_recommendations (
     updated_at TEXT NOT NULL DEFAULT '',
     PRIMARY KEY(date, rank)
 );
-"@
-    Invoke-MusicServerSqlNonQuery -Query @"
 CREATE TABLE IF NOT EXISTS recommendation_feedback (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     track_id TEXT NOT NULL,
@@ -63,8 +59,6 @@ CREATE TABLE IF NOT EXISTS recommendation_feedback (
     value TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
 );
-"@
-    Invoke-MusicServerSqlNonQuery -Query @"
 CREATE TABLE IF NOT EXISTS recommendation_files (
     file_name TEXT PRIMARY KEY,
     track_id TEXT NOT NULL DEFAULT '',
@@ -78,15 +72,11 @@ CREATE TABLE IF NOT EXISTS recommendation_files (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL DEFAULT ''
 );
-"@
-    Invoke-MusicServerSqlNonQuery -Query @"
 CREATE TABLE IF NOT EXISTS migration_markers (
     source_key TEXT PRIMARY KEY,
     imported_at TEXT NOT NULL,
     result_json TEXT NOT NULL DEFAULT ''
 );
-"@
-    Invoke-MusicServerSqlNonQuery -Query @"
 CREATE TABLE IF NOT EXISTS wanted_queue (
     track_id TEXT PRIMARY KEY,
     wanted_id TEXT NOT NULL DEFAULT '',
@@ -118,8 +108,6 @@ SET lease_expires_epoch = CAST(strftime('%s', lease_expires_at) AS INTEGER)
 WHERE lease_expires_epoch IS NULL
   AND lease_expires_at IS NOT NULL
   AND lease_expires_at != '';
-"@
-    Invoke-MusicServerSqlNonQuery -Query @"
 CREATE TABLE IF NOT EXISTS provider_health (
     provider TEXT PRIMARY KEY,
     state TEXT NOT NULL DEFAULT 'CLOSED',
@@ -137,8 +125,6 @@ CREATE TABLE IF NOT EXISTS provider_health (
     revision INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL DEFAULT ''
 );
-"@
-    Invoke-MusicServerSqlNonQuery -Query @"
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     event_type TEXT NOT NULL,
@@ -154,8 +140,6 @@ CREATE TABLE IF NOT EXISTS events (
     message TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
 );
-"@
-    Invoke-MusicServerSqlNonQuery -Query @"
 CREATE TABLE IF NOT EXISTS listening_stats (
     identity TEXT PRIMARY KEY,
     track_id TEXT NOT NULL DEFAULT '',
@@ -165,8 +149,6 @@ CREATE TABLE IF NOT EXISTS listening_stats (
     first_played_at TEXT,
     updated_at TEXT NOT NULL
 );
-"@
-    Invoke-MusicServerSqlNonQuery -Query @"
 CREATE TABLE IF NOT EXISTS listening_play_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     identity TEXT NOT NULL,
@@ -176,8 +158,6 @@ CREATE TABLE IF NOT EXISTS listening_play_events (
     played_at TEXT NOT NULL,
     UNIQUE(identity, session_id)
 );
-"@
-    Invoke-MusicServerSqlNonQuery -Query @"
 CREATE TRIGGER IF NOT EXISTS trg_listening_play_event_stats
 AFTER INSERT ON listening_play_events
 BEGIN
@@ -192,8 +172,6 @@ BEGIN
            updated_at = NEW.played_at
      WHERE identity = NEW.identity;
 END;
-"@
-    Invoke-MusicServerSqlNonQuery -Query @"
 CREATE INDEX IF NOT EXISTS idx_wanted_state ON wanted_queue(state);
 CREATE INDEX IF NOT EXISTS idx_wanted_lease ON wanted_queue(lease_expires_at);
 CREATE INDEX IF NOT EXISTS idx_wanted_lease_epoch ON wanted_queue(lease_expires_epoch);
@@ -741,6 +719,33 @@ function Get-TodayRecommendationsDb {
     return @($rows | ForEach-Object { Convert-DbRecRow -Row $_ })
 }
 
+# Four bounded reads regardless of recommendation count. Use the existing row
+# converters so JSON fields, missing wanted items and feedback semantics agree
+# with the single-track endpoints. As before, writes may occur between reads.
+function Get-TodayRecommendationBatchDb {
+    param([string]$Date = (Get-TodayDate))
+    $recs = @(Get-TodayRecommendationsDb -Date $Date)
+    if (-not $recs.Count) { return @() }
+    $tracks = @{}
+    foreach ($row in @(Invoke-MusicServerParamSql -Template 'SELECT c.* FROM canonical_tracks c WHERE c.id IN (SELECT track_id FROM daily_recommendations WHERE date = @d);' -Params @{ d = $Date })) {
+        $tracks[[string]$row.id] = Convert-DbTrackRow -Row $row
+    }
+    $wanted = @{}
+    foreach ($row in @(Invoke-MusicServerParamSql -Template 'SELECT w.* FROM wanted_queue w WHERE w.track_id IN (SELECT track_id FROM daily_recommendations WHERE date = @d);' -Params @{ d = $Date })) {
+        $wanted[[string]$row.track_id] = Convert-DbWantedRow -Row $row
+    }
+    $feedback = @{}
+    foreach ($row in @(Invoke-MusicServerParamSql -Template "SELECT DISTINCT r.track_id, (SELECT feedback_type FROM recommendation_feedback f WHERE f.track_id = r.track_id AND feedback_type IN ('LIKE','UNLIKE') ORDER BY created_at DESC, id DESC LIMIT 1) AS feedback_type FROM daily_recommendations r WHERE date = @d;" -Params @{ d = $Date })) {
+        $feedback[[string]$row.track_id] = [string]$row.feedback_type
+    }
+    return @(foreach ($rec in $recs) {
+        $id = [string]$rec.track_id
+        if ($tracks.ContainsKey($id)) {
+            [pscustomobject]@{ Recommendation = $rec; Track = $tracks[$id]; Wanted = $wanted[$id]; Feedback = $feedback[$id] }
+        }
+    })
+}
+
 function Convert-DbRecRow {
     param([Parameter(Mandatory)][psobject]$Row)
     $preview = @()
@@ -1264,16 +1269,11 @@ function Get-LatestRecommendationFeedbackDb {
 
 function Get-DbStats {
     $stats = @{}
-    foreach ($table in @('canonical_tracks','daily_recommendations','recommendation_feedback','recommendation_files','wanted_queue','provider_health','events')) {
-        $rows = @(Invoke-MusicServerSqlJson -Query "SELECT COUNT(*) as cnt FROM $table;")
-        if ($rows.Count -gt 0) {
-            $cnt = 0
-            if ($rows[0] -is [pscustomobject]) {
-                $p = $rows[0].PSObject.Properties['cnt']
-                if ($p) { $cnt = [int]$p.Value }
-            } else { $cnt = [int]$rows[0] }
-            $stats[$table] = $cnt
-        } else { $stats[$table] = 0 }
+    $parts = foreach ($table in @('canonical_tracks','daily_recommendations','recommendation_feedback','recommendation_files','wanted_queue','provider_health','events')) {
+        "SELECT '$table' AS table_name, COUNT(*) AS cnt FROM $table"
+    }
+    foreach ($row in @(Invoke-MusicServerSqlJson -Query (($parts -join ' UNION ALL ') + ';'))) {
+        $stats[[string]$row.table_name] = [int]$row.cnt
     }
     return $stats
 }

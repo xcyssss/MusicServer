@@ -142,7 +142,7 @@ function Get-TrackLocalFile {
         # current media_file snapshot so canonical local tracks can be played.
         $navId = if ($value.StartsWith('library-')) { $value.Substring('library-'.Length) } else { $value }
         try {
-            $navRow = @(Read-NavidromeLibrary | Where-Object { [string]$_.id -eq $navId } | Select-Object -First 1)
+            $navRow = @(Find-RequestNavidromeItem -Id $navId)
             if ($navRow) {
                 $navPath = [string]$navRow[0].path
                 if ($navPath -and -not [System.IO.Path]::IsPathRooted($navPath)) {
@@ -159,15 +159,7 @@ function Get-TrackLocalFile {
 
 function Get-StableLocalIdentity {
     param([Parameter(Mandatory)][string]$File)
-    $sha = [System.Security.Cryptography.SHA256]::Create()
-    try {
-        $fullPath = [System.IO.Path]::GetFullPath($File)
-        $bytes = [System.Text.Encoding]::UTF8.GetBytes($fullPath)
-        $hex = [System.BitConverter]::ToString($sha.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant()
-        return 'na-' + $hex.Substring(0, 16)
-    } finally {
-        $sha.Dispose()
-    }
+    return Get-MusicServerLocalIdentity -File $File
 }
 
 function Resolve-LibraryNaPath {
@@ -222,18 +214,41 @@ function Read-NavidromeLibrary {
     return @(Invoke-SqliteJson -DbPath $Config.NdDb -Sql $sql -Params $Params)
 }
 
+function Get-RequestNavidromeLibrary {
+    if ($null -eq $script:RequestNavidromeLibrary) {
+        $script:RequestNavidromeLibrary = @(Read-NavidromeLibrary)
+    }
+    return $script:RequestNavidromeLibrary
+}
+
+function Find-RequestNavidromeItem {
+    param([string]$Id = '', [string]$File = '')
+    if ($null -eq $script:RequestNavidromeById) {
+        $script:RequestNavidromeById = @{}
+        $script:RequestNavidromeByFile = @{}
+        foreach ($row in @(Get-RequestNavidromeLibrary)) {
+            $script:RequestNavidromeById[[string]$row.id] = $row
+            $path = [string]$row.path
+            if (-not $path) { continue }
+            try {
+                if (-not [IO.Path]::IsPathRooted($path)) { $path = Join-Path $Config.MusicDir $path }
+                $path = [IO.Path]::GetFullPath($path)
+                if (-not $script:RequestNavidromeByFile.ContainsKey($path)) { $script:RequestNavidromeByFile[$path] = $row }
+            } catch {}
+        }
+    }
+    if ($Id) { return $script:RequestNavidromeById[$Id] }
+    if ($File) { return $script:RequestNavidromeByFile[[IO.Path]::GetFullPath($File)] }
+}
+
 function Get-NavidromeLibrary {
-    return @(Read-NavidromeLibrary)
+    return @(Get-RequestNavidromeLibrary)
 }
 
 function Get-NavidromeLibraryId {
     param([Parameter(Mandatory)][string]$File)
     $fullFile = [System.IO.Path]::GetFullPath($File)
-    $row = @(Read-NavidromeLibrary | Where-Object {
-        $rowPath = [string]$_.path
-        if ($rowPath -and -not [System.IO.Path]::IsPathRooted($rowPath)) { $rowPath = Join-Path $Config.MusicDir $rowPath }
-        $rowPath -and ([System.IO.Path]::GetFullPath($rowPath) -eq $fullFile)
-    } | Select-Object -First 1)
+    $row = Find-RequestNavidromeItem -File $fullFile
     if ($row) { return 'library-' + [string]$row.id }
     return Get-StableLocalIdentity -File $File
 }
@@ -243,11 +258,7 @@ function Get-NavidromeLibraryItem {
     $file = Get-TrackLocalFile -Track $Track
     if (-not $file) { return $null }
     $fullFile = [System.IO.Path]::GetFullPath($file)
-    return @(Read-NavidromeLibrary | Where-Object {
-        $rowPath = [string]$_.path
-        if ($rowPath -and -not [System.IO.Path]::IsPathRooted($rowPath)) { $rowPath = Join-Path $Config.MusicDir $rowPath }
-        $rowPath -and ([System.IO.Path]::GetFullPath($rowPath) -eq $fullFile)
-    } | Select-Object -First 1)
+    return @(Find-RequestNavidromeItem -File $fullFile)
 }
 
 function Get-LocalCanonicalTrackMap {
@@ -299,9 +310,9 @@ function Get-LocalListeningItems {
             if (-not [System.IO.Path]::IsPathRooted($file)) { $file = Join-Path $Config.MusicDir $file }
             $file = [System.IO.Path]::GetFullPath($file)
         } catch { continue }
-        if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { continue }
         $fileKey = $file.ToLowerInvariant()
         if ($seenFiles.ContainsKey($fileKey)) { continue }
+        if (-not [IO.File]::Exists($file)) { continue }
         $seenFiles[$fileKey] = $true
         $localId = 'library-' + [string]$row.id
         [void]$items.Add((New-ListeningLibraryItem -Row $row -File $file -Source 'navidrome' -LocalId $localId -CanonicalByLocalId $canonicalByLocalId))
@@ -376,7 +387,7 @@ function Get-LibraryItemResponse {
     param([Parameter(Mandatory)][string]$LocalId)
     if ($LocalId.StartsWith('library-')) {
         $idPart = $LocalId.Substring('library-'.Length)
-        $row = @(Read-NavidromeLibrary | Where-Object { [string]$_.id -eq $idPart } | Select-Object -First 1)
+        $row = @(Read-NavidromeLibrary -WhereSql ("id = " + (ConvertTo-MusicServerSqlLiteral $idPart)))
         if ($row) {
             $file = [string]$row[0].path
             if (-not [System.IO.Path]::IsPathRooted($file)) { $file = Join-Path $Config.MusicDir $file }
@@ -483,16 +494,14 @@ function Remove-LibraryTrack {
 }
 
 function Get-TodayRecommendationResponse {
-    $recs = @(Get-TodayRecommendationsDb)
-    return @(foreach ($rec in $recs) {
+    $batch = @(Get-TodayRecommendationBatchDb)
+    return @(foreach ($entry in $batch) {
+        $rec = $entry.Recommendation
         $trackId = [string]$rec.track_id
-        $track = Get-CanonicalTrackDb -TrackId $trackId
-        if (-not $track) { continue }
-        $wanted = $null
-        try { $wanted = Get-WantedItemDb -TrackId $trackId } catch {}
+        $track = $entry.Track
+        $wanted = $entry.Wanted
         $liked = [bool]$rec.liked
-        $feedback = $null
-        try { $feedback = Get-LatestRecommendationFeedbackDb -TrackId $trackId } catch {}
+        $feedback = $entry.Feedback
         if ($feedback) { $liked = ($feedback -eq 'LIKE') }
         $playback = $null
         try { $playback = Get-TrackPlaybackSource -Track $track -TrackId $trackId -Recommendation $rec } catch {}
@@ -614,7 +623,7 @@ $listener.Start()
 Write-Host "API listening on $($listener.Prefixes[0])" -ForegroundColor Cyan
 
 $script:requestCount = 0
-$script:BuildMarker = 'musicserver-single-page-v3'
+$script:BuildMarker = 'musicserver-backend-b-v4'
 # /api/today is recomputed per request and costs ~5s (each DB read spawns a
 # sqlite3 subprocess; 20 tracks x several reads). The UI polls it every 15s,
 # and because the UI proxies on a single thread, a slow /api/today blocks
@@ -625,6 +634,9 @@ $script:TodayCacheAt = [DateTime]::MinValue
 $script:TodayCacheSeconds = 60
 while ($true) {
     $script:Context = $listener.GetContext()
+    $script:RequestNavidromeLibrary = $null
+    $script:RequestNavidromeById = $null
+    $script:RequestNavidromeByFile = $null
     $Context = $script:Context
     $request = $Context.Request
     $path = [System.Web.HttpUtility]::UrlDecode($request.Url.AbsolutePath, [System.Text.Encoding]::UTF8)
