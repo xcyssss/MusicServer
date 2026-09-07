@@ -178,6 +178,8 @@ For live desktop smoke, use `tests/verify_tauri_desktop.ps1` and exercise the ac
 
 For non-trivial work:
 
+Batch related steps as local commits; after a meaningful stage and local validation, push the group once and verify CI. Avoid pushing each small step separately.
+
 1. inspect current branch/files before modifying;
 2. preserve unrelated local/user work;
 3. make the smallest coherent change;
