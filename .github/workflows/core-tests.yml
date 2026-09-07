@@ -125,7 +125,7 @@ jobs:
         shell: powershell
         run: cargo check --locked
 
-      - name: Runtime staging regression
+      - name: Runtime staging and startup probe regressions
         working-directory: src-tauri
         shell: powershell
         run: cargo test --locked
