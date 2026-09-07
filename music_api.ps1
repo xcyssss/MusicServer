@@ -45,7 +45,7 @@ Import-Module (Join-Path $PSScriptRoot 'MusicServer.State.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Http.psm1') -Force
 
 $Config = New-MusicServerConfig -Root $Root
-Initialize-MusicServerState -Config $Config
+Initialize-MusicServerState -Config $Config -SkipLibrary
 $DbPath = Join-Path $Config.StateDir 'musicserver.db'
 $SqliteExe = [string]$Config.Sqlite
 if (-not $SqliteExe -or -not (Test-Path -LiteralPath $SqliteExe)) {
@@ -64,7 +64,9 @@ if (-not (Test-Path -LiteralPath $SqliteExe) -and -not (Get-Command $SqliteExe -
 }
 Initialize-MusicServerDatabase -DbPath $DbPath -SqliteExe $SqliteExe
 Initialize-MusicServerSchema
-Write-Host ("API v2 ready | db={0} | migration=NOT_REQUESTED" -f $DbPath) -ForegroundColor Green
+Apply-ConfiguredMusicDir -Config $Config
+Initialize-MusicServerLibrary -Config $Config | Out-Null
+Write-Host ("API v2 ready | db={0} | music_dir={1} | migration=NOT_REQUESTED" -f $DbPath, $Config.MusicDir) -ForegroundColor Green
 
 function Send-Json([psobject]$Context) {
     $body = $Context.Body
@@ -377,9 +379,12 @@ function Read-NeteaseLyrics([string]$Path) {
 function Get-LrcPath {
     param([string]$Path)
     if (-not $Path) { return $null }
-    if (Test-Path -LiteralPath $Path) { return $Path }
-    $lrc = [System.IO.Path]::ChangeExtension($Path, '.lrc')
-    if (Test-Path -LiteralPath $lrc) { return $lrc }
+    $candidate = if ([System.IO.Path]::GetExtension($Path) -ieq '.lrc') {
+        $Path
+    } else {
+        [System.IO.Path]::ChangeExtension($Path, '.lrc')
+    }
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
     return $null
 }
 
@@ -623,7 +628,7 @@ $listener.Start()
 Write-Host "API listening on $($listener.Prefixes[0])" -ForegroundColor Cyan
 
 $script:requestCount = 0
-$script:BuildMarker = 'musicserver-backend-b-v4'
+$script:BuildMarker = 'musicserver-backend-b-v5'
 # /api/today is recomputed per request and costs ~5s (each DB read spawns a
 # sqlite3 subprocess; 20 tracks x several reads). The UI polls it every 15s,
 # and because the UI proxies on a single thread, a slow /api/today blocks
@@ -749,7 +754,7 @@ while ($true) {
             $lrcPath = Get-LrcPath -Path ([string]$item.file)
             if ($lrcPath) {
                 $lyrics = Read-NeteaseLyrics -Path $lrcPath
-                $body = @{ id = $localId; lyrics = $lyrics; path = $lrcPath }
+                $body = @{ id = $localId; available = $true; format = 'lrc'; text = $lyrics; lyrics = $lyrics; path = $lrcPath }
                 Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 200 })
             } else {
                 $body = @{ error = 'LYRICS_NOT_FOUND'; id = $localId }
@@ -774,7 +779,7 @@ while ($true) {
                         Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 404 })
                     } else {
                         $lyrics = Read-NeteaseLyrics -Path $lrcPath
-                        $body = @{ track_id = $trackId; lyrics = $lyrics; path = $lrcPath }
+                        $body = @{ track_id = $trackId; available = $true; format = 'lrc'; text = $lyrics; lyrics = $lyrics; path = $lrcPath }
                         Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 200 })
                     }
                 }
@@ -883,6 +888,76 @@ while ($true) {
         elseif ($method -eq 'GET' -and $path -eq '/api/providers/status') {
             $providers = @(Get-ProviderStatusesDb)
             $body = @{ items = $providers; total = $providers.Count }
+            Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 200 })
+        }
+        elseif ($method -eq 'GET' -and $path -eq '/api/settings/music-library') {
+            $currentPath = $Config.MusicDir
+            $defaultPath = Get-DefaultMusicDir -Root $Config.Root
+            $isDefault = ($currentPath -eq $defaultPath)
+            $available = (Test-Path -LiteralPath $currentPath -PathType Container)
+            $source = if ($env:MUSICSERVER_MUSIC_DIR) { 'environment' } elseif (-not $isDefault) { 'database' } else { 'default' }
+            $body = [pscustomobject]@{
+                path = $currentPath
+                default_path = $defaultPath
+                source = $source
+                available = $available
+                daily_dir = $Config.DailyDir
+            }
+            Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 200 })
+        }
+        elseif ($method -eq 'PUT' -and $path -eq '/api/settings/music-library') {
+            $bodyObj = $null
+            try { if ($bodyText) { $bodyObj = ConvertFrom-Json -InputObject $bodyText } } catch {}
+            if (-not $bodyObj -or -not $bodyObj.path) {
+                $body = @{ error = 'INVALID_REQUEST'; message = 'Request body must contain "path".' }
+                Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 400 })
+            } else {
+                $candidate = [string]$bodyObj.path
+                $validation = Test-MusicLibraryPath -Path $candidate
+                if (-not $validation.Valid) {
+                    $body = @{ error = 'INVALID_PATH'; message = "Path is not valid: $($validation.Reason)"; reason = $validation.Reason }
+                    Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 400 })
+                } else {
+                    $newPath = $validation.FullPath
+                    # Create directory if it doesn't exist (user is choosing a new location)
+                    if (-not (Test-Path -LiteralPath $newPath -PathType Container)) {
+                        try { New-Item -ItemType Directory -Force -Path $newPath | Out-Null } catch {
+                            $body = @{ error = 'CREATE_FAILED'; message = "Cannot create directory: $_" }
+                            Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 400 })
+                            return
+                        }
+                    }
+                    $previousPath = $Config.MusicDir
+                    Set-AppSettingDb -Key 'music_library_path' -Value $newPath
+                    Apply-ConfiguredMusicDir -Config $Config
+                    # Sync Navidrome MusicFolder
+                    try { Sync-NavidromeMusicFolder -NdConfigPath $Config.NdConfig -NewMusicFolder $Config.MusicDir | Out-Null } catch {}
+                    $body = [pscustomobject]@{
+                        accepted = $true
+                        path = $Config.MusicDir
+                        previous_path = $previousPath
+                        daily_dir = $Config.DailyDir
+                        message = 'Music library path updated. Restart MusicServer for all services to pick up the change.'
+                        requires_restart = $true
+                    }
+                    Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 200 })
+                }
+            }
+        }
+        elseif ($method -eq 'DELETE' -and $path -eq '/api/settings/music-library') {
+            $previousPath = $Config.MusicDir
+            $defaultPath = Get-DefaultMusicDir -Root $Config.Root
+            Remove-AppSettingDb -Key 'music_library_path'
+            Apply-ConfiguredMusicDir -Config $Config
+            try { Sync-NavidromeMusicFolder -NdConfigPath $Config.NdConfig -NewMusicFolder $Config.MusicDir | Out-Null } catch {}
+            $body = [pscustomobject]@{
+                accepted = $true
+                path = $Config.MusicDir
+                previous_path = $previousPath
+                daily_dir = $Config.DailyDir
+                message = 'Music library path reset to default. Restart MusicServer for all services to pick up the change.'
+                requires_restart = $true
+            }
             Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 200 })
         }
         elseif ($method -eq 'GET' -and $path -eq '/health') {

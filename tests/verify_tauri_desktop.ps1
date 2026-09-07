@@ -8,7 +8,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$BuildMarker = 'musicserver-backend-b-v4'
+$BuildMarker = 'musicserver-backend-b-v5'
 $launchedDesktopPid = $null
 if (-not $Root) {
     $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)

@@ -7,7 +7,7 @@
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Database.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Core.psm1') -Force
 
-$script:SchemaVersion = 5
+$script:SchemaVersion = 6
 $script:LeaseMinutes = 30
 
 # ================================================================
@@ -172,6 +172,11 @@ BEGIN
            updated_at = NEW.played_at
      WHERE identity = NEW.identity;
 END;
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT ''
+);
 CREATE INDEX IF NOT EXISTS idx_wanted_state ON wanted_queue(state);
 CREATE INDEX IF NOT EXISTS idx_wanted_lease ON wanted_queue(lease_expires_at);
 CREATE INDEX IF NOT EXISTS idx_wanted_lease_epoch ON wanted_queue(lease_expires_epoch);
@@ -1756,4 +1761,131 @@ function Get-ListeningOverviewDb {
     }
 }
 
+# ================================================================
+# App Settings & Music Dir Resolution
+# ================================================================
+
+function Resolve-ConfiguredMusicDir {
+    <#
+    .SYNOPSIS
+      Centralized MusicDir resolver. Priority: env var > SQLite setting > default.
+      Must be called after Initialize-MusicServerDatabase + Initialize-MusicServerSchema.
+    #>
+    param([Parameter(Mandatory)][psobject]$Config)
+
+    # Priority 1: Environment variable (developer/debug override)
+    $envDir = [Environment]::GetEnvironmentVariable('MUSICSERVER_MUSIC_DIR')
+    if (-not [string]::IsNullOrWhiteSpace($envDir)) {
+        $resolved = [IO.Path]::GetFullPath($envDir)
+        return $resolved
+    }
+
+    # Priority 2: SQLite persisted setting
+    try {
+        $saved = Get-AppSettingDb -Key 'music_library_path'
+        if ($saved -and -not [string]::IsNullOrWhiteSpace($saved)) {
+            return [IO.Path]::GetFullPath($saved)
+        }
+    } catch {}
+
+    # Priority 3: Default. Config.MusicDir is mutable after Apply-ConfiguredMusicDir.
+    return (Get-DefaultMusicDir -Root $Config.Root)
+}
+
+function Apply-ConfiguredMusicDir {
+    <#
+    .SYNOPSIS
+      Resolves the effective MusicDir and updates Config.MusicDir + Config.DailyDir in place.
+      Safe to call multiple times; idempotent.
+    #>
+    param([Parameter(Mandatory)][psobject]$Config)
+
+    $resolved = Resolve-ConfiguredMusicDir -Config $Config
+    $Config.MusicDir = $resolved
+    $Config.DailyDir = Join-Path $resolved 'DailyMix'
+    return $resolved
+}
+
+function Get-DefaultMusicDirForConfig {
+    param([Parameter(Mandatory)][psobject]$Config)
+    return Get-DefaultMusicDir -Root $Config.Root
+}
+
+function Test-MusicLibraryPath {
+    <#
+    .SYNOPSIS
+      Validates a candidate music library path. Returns @{ Valid=$bool; Reason=$string }.
+    #>
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return @{ Valid = $false; Reason = 'EMPTY_PATH' }
+    }
+    $fullPath = ''
+    try { $fullPath = [IO.Path]::GetFullPath($Path) } catch {
+        return @{ Valid = $false; Reason = 'INVALID_PATH' }
+    }
+    if (Test-Path -LiteralPath $fullPath -PathType Leaf) {
+        return @{ Valid = $false; Reason = 'IS_FILE' }
+    }
+    return @{ Valid = $true; Reason = 'OK'; FullPath = $fullPath }
+}
+
+function Get-AppSettingDb {
+    param([Parameter(Mandatory)][string]$Key)
+    $rows = @(Invoke-MusicServerParamSql -Template 'SELECT value FROM app_settings WHERE key = @key LIMIT 1;' -Params @{ key = $Key })
+    if ($rows.Count -eq 0) { return $null }
+    return [string]$rows[0].value
+}
+
+function Set-AppSettingDb {
+    param(
+        [Parameter(Mandatory)][string]$Key,
+        [Parameter(Mandatory)][string]$Value
+    )
+    $now = Get-NowIso
+    Invoke-MusicServerParamNonQuery -Template @"
+INSERT INTO app_settings (key, value, updated_at) VALUES (@key, @value, @now)
+ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at;
+"@ -Params @{ key = $Key; value = $Value; now = $now }
+}
+
+function Remove-AppSettingDb {
+    param([Parameter(Mandatory)][string]$Key)
+    Invoke-MusicServerParamNonQuery -Template 'DELETE FROM app_settings WHERE key = @key;' -Params @{ key = $Key }
+}
+
+function Sync-NavidromeMusicFolder {
+    <#
+    .SYNOPSIS
+      Updates navidrome.toml MusicFolder to match the effective MusicDir.
+      Writes a TOML basic string with escaped Windows backslashes and quotes.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$NdConfigPath,
+        [Parameter(Mandatory)][string]$NewMusicFolder
+    )
+    if (-not (Test-Path -LiteralPath $NdConfigPath -PathType Leaf)) { return $false }
+
+    $content = Get-Content -LiteralPath $NdConfigPath -Raw -Encoding UTF8
+    $encoded = $NewMusicFolder.Replace('\', '\\').Replace('"', '\"')
+    $desiredLine = 'MusicFolder = "' + $encoded + '"'
+    $pattern = '(?m)^\s*MusicFolder\s*=.*$'
+
+    if ([regex]::IsMatch($content, $pattern)) {
+        $currentLine = [regex]::Match($content, $pattern).Value.Trim()
+        if ($currentLine -eq $desiredLine) { return $false }
+        $updated = [regex]::Replace(
+            $content,
+            $pattern,
+            [Text.RegularExpressions.MatchEvaluator]{ param($m) $desiredLine },
+            1
+        )
+    } else {
+        $updated = $desiredLine + [Environment]::NewLine + $content
+    }
+
+    [IO.File]::WriteAllText($NdConfigPath, $updated, (New-Object Text.UTF8Encoding($false)))
+    return $true
+}
 Export-ModuleMember -Function *

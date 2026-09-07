@@ -1,4 +1,4 @@
-﻿$ProjectRoot = Split-Path -Parent $PSScriptRoot
+$ProjectRoot = Split-Path -Parent $PSScriptRoot
 
 Describe 'MusicServer Tauri desktop shell' {
     It 'uses Tauri v2 and the shared web directory' {
@@ -20,10 +20,25 @@ Describe 'MusicServer Tauri desktop shell' {
         $main | Should Match 'FALLBACK_PAIRS'
         $main | Should Match '-UiPrefix'
         $main | Should Match '-ApiPrefix'
-        $web | Should Match 'musicserver-backend-b-v4'
-        $api | Should Match "BuildMarker = 'musicserver-backend-b-v4'"
+        $web | Should Match 'musicserver-backend-b-v5'
+        $api | Should Match "BuildMarker = 'musicserver-backend-b-v5'"
         $smoke | Should Match 'CloseLaunchedApp'
         $smoke | Should Match 'ServicesStopped'
+        $tauriConf = Get-Content -LiteralPath (Join-Path $ProjectRoot 'src-tauri\tauri.conf.json') -Raw
+        $tauriConf | Should Match '"withGlobalTauri"\s*:\s*true'
+        $web | Should Match 'window\.__TAURI__\?\.dialog'
+        $web | Should Match 'window\.__TAURI__\?\.core'
+
+        # Production navigates the Tauri WebView to the local PowerShell HTTP UI,
+        # which is a remote origin to Tauri's ACL. Keep IPC permission scoped to
+        # only the three owned UI ports instead of granting arbitrary web origins.
+        $capability = ConvertFrom-Json -InputObject (Get-Content -LiteralPath (Join-Path $ProjectRoot 'src-tauri\capabilities\default.json') -Raw)
+        $remoteUrls = @($capability.remote.urls)
+        $remoteUrls.Count | Should Be 3
+        ($remoteUrls -contains 'http://127.0.0.1:8790') | Should Be $true
+        ($remoteUrls -contains 'http://127.0.0.1:8791') | Should Be $true
+        ($remoteUrls -contains 'http://127.0.0.1:8792') | Should Be $true
+        (@($capability.permissions) -contains 'dialog:allow-open') | Should Be $true
     }
 
     It 'packages a writable portable runtime instead of embedding the source-tree path' {

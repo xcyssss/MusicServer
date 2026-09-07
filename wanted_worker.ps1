@@ -28,9 +28,11 @@ Import-Module (Join-Path $PSScriptRoot 'MusicServer.Core.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.State.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Providers.psm1') -Force
 $Config = New-MusicServerConfig -Root $Root
-Initialize-MusicServerState -Config $Config
+Initialize-MusicServerState -Config $Config -SkipLibrary
 Initialize-MusicServerDatabase -DbPath (Join-Path $Config.StateDir 'musicserver.db') -SqliteExe $Config.Sqlite
 Initialize-MusicServerSchema
+Apply-ConfiguredMusicDir -Config $Config
+Initialize-MusicServerLibrary -Config $Config | Out-Null
 $WorkerMutex = [Threading.Mutex]::new($false, 'MusicServer_WantedWorker')
 $OwnsWorkerMutex = $false
 try {

@@ -5,10 +5,13 @@
     交互式脚本，支持连续输入多个B站视频URL，逐个下载音频到 Navidrome 音乐目录
     每次下载完自动显示库中总歌曲数
 #>
+param([string]$MusicDir = '')
 
-$ytDlp = "C:\Users\dell\anaconda3\Scripts\yt-dlp.exe"
-$OutputDir = "E:\Project\MusicServer\Music"
-$CookieFile = "E:\Project\MusicServer\cookies.txt"
+. (Join-Path $PSScriptRoot 'MusicServer.Maintenance.ps1')
+$Maintenance = Resolve-MusicServerMaintenanceContext -MusicDir $MusicDir
+$ytDlp = $Maintenance.Config.YtDlp
+$OutputDir = $Maintenance.MusicDir
+$CookieFile = $Maintenance.Config.CookieFile
 $ArchiveFile = "$OutputDir\.downloaded.txt"
 
 # 确保目录存在

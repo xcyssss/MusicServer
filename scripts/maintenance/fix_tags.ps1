@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     批量修复 B站下载的 MP3 标签
     1. 统一设置 album 为 "B站收藏"
@@ -6,8 +6,12 @@
     3. 触发 Navidrome 重新扫描
 #>
 
-$musicDir = "E:\Project\MusicServer\Music"
-$ffmpeg = "C:\Users\dell\AppData\Local\Microsoft\WinGet\Links\ffmpeg.exe"
+param([string]$MusicDir = '')
+
+. (Join-Path $PSScriptRoot 'MusicServer.Maintenance.ps1')
+$Maintenance = Resolve-MusicServerMaintenanceContext -MusicDir $MusicDir
+$MusicDir = $Maintenance.MusicDir
+$ffmpeg = $Maintenance.Config.FFmpeg
 
 $mp3s = Get-ChildItem $musicDir -Filter "*.mp3"
 Write-Host "找到 $($mp3s.Count) 个 MP3 文件" -ForegroundColor Cyan

@@ -19,7 +19,7 @@ use tauri::Manager;
 const DEFAULT_UI_PORT: u16 = 8790;
 const DEFAULT_API_PORT: u16 = 8787;
 const FALLBACK_PAIRS: &[(u16, u16)] = &[(8791, 8788), (8792, 8789)];
-const BUILD_MARKER: &str = "musicserver-backend-b-v4";
+const BUILD_MARKER: &str = "musicserver-backend-b-v5";
 const LAUNCHER: &str = "start_musicserver_ui.ps1";
 const APP_HOME_ENV: &str = "MUSICSERVER_APP_HOME";
 const PACKAGED_APP_HOME_DIR: &str = "com.musicserver.desktop";
@@ -332,9 +332,31 @@ fn ensure_ui_ready(bundle_runtime: &Path, app_home: &Path, state: &AppState) -> 
     None
 }
 
+#[tauri::command]
+fn open_folder(path: String) -> Result<(), String> {
+    let p = std::path::Path::new(&path);
+    if !p.is_dir() {
+        return Err(format!("Path is not a directory: {}", path));
+    }
+    #[cfg(windows)]
+    {
+        std::process::Command::new("explorer")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("Failed to open folder: {e}"))?;
+    }
+    #[cfg(not(windows))]
+    {
+        return Err("open_folder is only supported on Windows".to_string());
+    }
+    Ok(())
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
+        .invoke_handler(tauri::generate_handler![open_folder])
         .manage(AppState {
             child: Mutex::new(None),
         })

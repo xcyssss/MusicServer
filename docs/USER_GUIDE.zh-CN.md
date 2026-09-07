@@ -12,6 +12,7 @@ E:\Project\MusicServer\
 ├── DailyMix_data\                  # MusicServer 状态与兼容数据
 ├── Navidrome\                      # Navidrome 配置、程序和数据
 ├── scripts\maintenance\           # 独立维护工具
+│   ├── MusicServer.Maintenance.ps1    # 维护脚本共享路径解析
 │   ├── download_bilibili_favorites.ps1
 │   ├── fetch_lyrics.ps1
 │   ├── fix_one_lyric.ps1
@@ -42,6 +43,31 @@ E:\Project\MusicServer\
 ```
 
 如果设置了环境变量 `MUSICSERVER_APP_HOME`，则以该目录为准。
+## 1.1 配置音乐库位置
+
+安装版默认音乐库：
+
+```text
+%LOCALAPPDATA%\com.musicserver.desktop\Music
+```
+
+在 MusicServer APP 中打开“音乐库设置”，可以：
+
+- **选择文件夹**：使用 Windows 原生目录选择器，例如 `D:\Music`、`E:\MyMusic`；
+- **打开文件夹**：在资源管理器中打开当前有效音乐库；
+- **恢复默认**：重新使用 `<APP_HOME>\Music`。
+
+路径配置保存在 SQLite 中。修改位置不会自动移动、复制或删除任何现有歌曲；切换完成后请重启 MusicServer。如果配置的移动硬盘暂时不存在，APP 会保留原路径并显示“音乐库当前不可用”，不会偷偷切换到新的空目录。
+
+歌曲与歌词使用同名邻接方式：
+
+```text
+Music\
+├─ Song.mp3
+└─ Song.lrc
+```
+
+即 `.lrc` 与音频文件放在同一目录，文件名相同。
 
 ### 从源码运行
 

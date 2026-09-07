@@ -166,8 +166,19 @@ function Start-MusicServerWorker {
 }
 
 Import-Module (Join-Path $Root 'MusicServer.Core.psm1') -Force
+Import-Module (Join-Path $Root 'MusicServer.Database.psm1') -Force
+Import-Module (Join-Path $Root 'MusicServer.State.psm1') -Force
 Import-Module (Join-Path $Root 'MusicServer.Http.psm1') -Force
 $Config = New-MusicServerConfig -Root $Root
+# Resolve configured music dir from SQLite if available (DB may already exist from a prior run)
+try {
+    $uiDbPath = Join-Path $Config.StateDir 'musicserver.db'
+    if (Test-Path -LiteralPath $uiDbPath -PathType Leaf) {
+        Connect-MusicServerDatabase -DbPath $uiDbPath -SqliteExe $Config.Sqlite
+        Apply-ConfiguredMusicDir -Config $Config
+    }
+} catch {}
+try { Initialize-MusicServerLibrary -Config $Config | Out-Null } catch {}
 
 function Invoke-NavidromeSqliteJson {
     param([Parameter(Mandatory)][string]$Sql)

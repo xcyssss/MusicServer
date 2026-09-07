@@ -1,7 +1,7 @@
 // Tauri startup uses this marker to reject a stale 8790 UI process after an
 // upgrade. Keep it in the served bundle so the desktop shell can verify that
 // the WebView is loading the same source revision as the backend.
-const MUSICSERVER_BUILD_MARKER = 'musicserver-backend-b-v4';
+const MUSICSERVER_BUILD_MARKER = 'musicserver-backend-b-v5';
 
 const storedLibraryOrder = (() => {
   try {
@@ -834,7 +834,8 @@ $('#volume-control').addEventListener('input', (event) => { $('#audio-player').v
 document.addEventListener('keydown', (event) => {
   if (event.ctrlKey && event.key.toLowerCase() === 'k') { event.preventDefault(); $('#library-search').focus(); }
   if (event.key === 'Escape') {
-    if (!$('#lyrics-panel').hidden) setLyricsOpen(false, true);
+    if (!$('#settings-panel').hidden) setSettingsOpen(false, true);
+    else if (!$('#lyrics-panel').hidden) setLyricsOpen(false, true);
     else if (!$('#listening-sidebar').classList.contains('collapsed')) { setListeningCollapsed(true); $('#listening-toggle').focus(); }
     else if ($('#wanted').open) { $('#wanted').open = false; $('#queue-toggle').focus(); }
   }
@@ -972,3 +973,98 @@ const recPanel = $('#recommendations');
 if (recPanel) recPanel.addEventListener('wheel', forwardScroll, { passive: false });
 const libPanel = $('#library');
 if (libPanel) libPanel.addEventListener('wheel', forwardScroll, { passive: false });
+
+// ======================== Settings Panel ========================
+
+function setSettingsOpen(open, returnFocus = false) {
+  $('#settings-panel').hidden = !open;
+  $('#settings-toggle').setAttribute('aria-expanded', String(open));
+  if (open) loadMusicLibrarySettings();
+  if (returnFocus) $('#settings-toggle').focus();
+}
+
+async function loadMusicLibrarySettings() {
+  try {
+    const data = await fetchJson('/api/settings/music-library');
+    $('#music-library-path').value = data.path || '';
+    const status = $('#music-library-status');
+    if (data.available) {
+      status.className = 'settings-status ok';
+      status.textContent = '目录可用';
+    } else {
+      status.className = 'settings-status unavailable';
+      status.textContent = `音乐库当前不可用：${data.path}\n请连接磁盘或重新选择音乐库。`;
+    }
+    const sourceLabels = { environment: '环境变量指定', database: '自定义设置', default: '默认路径' };
+    $('#music-library-source').textContent = `来源：${sourceLabels[data.source] || data.source}`;
+  } catch (e) {
+    showToast('无法加载音乐库设置');
+  }
+}
+
+// Native folder picker via Tauri dialog plugin
+$('#music-library-browse').addEventListener('click', async () => {
+  try {
+    // tauri-plugin-dialog is loaded via the Tauri IPC bridge
+    const { open } = window.__TAURI__?.dialog || {};
+    if (!open) { showToast('文件夹选择器不可用'); return; }
+    const selected = await open({ directory: true, title: '选择音乐文件夹', multiple: false });
+    if (!selected) return; // user cancelled
+    const path = typeof selected === 'string' ? selected : selected;
+    await saveMusicLibraryPath(path);
+  } catch (e) {
+    // Fallback: prompt the user for a path
+    const path = prompt('输入音乐库完整路径（例如 D:\\Music）：', $('#music-library-path').value);
+    if (path) await saveMusicLibraryPath(path);
+  }
+});
+
+async function saveMusicLibraryPath(path) {
+  try {
+    const result = await fetchJson('/api/settings/music-library', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path }),
+    });
+    showToast(result.requires_restart ? '音乐库路径已更新，重启后生效' : '音乐库路径已更新');
+    await loadMusicLibrarySettings();
+  } catch (e) {
+    showToast(`保存失败：${e.message}`);
+  }
+}
+
+// Open folder in Explorer
+$('#music-library-open').addEventListener('click', async () => {
+  const path = $('#music-library-path').value;
+  if (!path) return;
+  try {
+    const { invoke } = window.__TAURI__?.core || window.__TAURI__?.tauri || {};
+    if (invoke) {
+      await invoke('open_folder', { path });
+    } else {
+      // Fallback for non-Tauri environments
+      showToast('打开文件夹仅在桌面 APP 中可用');
+    }
+  } catch (e) {
+    showToast(`无法打开文件夹：${e.message}`);
+  }
+});
+
+// Reset to default
+$('#music-library-reset').addEventListener('click', async () => {
+  if (!confirm('恢复默认音乐库位置？\n\n这不会移动或删除任何现有文件。')) return;
+  try {
+    const result = await fetchJson('/api/settings/music-library', { method: 'DELETE' });
+    showToast(result.requires_restart ? '已恢复默认，重启后生效' : '已恢复默认');
+    await loadMusicLibrarySettings();
+  } catch (e) {
+    showToast(`恢复失败：${e.message}`);
+  }
+});
+
+// Toggle settings panel
+$('#settings-toggle').addEventListener('click', () => {
+  setSettingsOpen($('#settings-panel').hidden);
+  if (!$('#settings-panel').hidden) $('#settings-close').focus();
+});
+$('#settings-close').addEventListener('click', () => setSettingsOpen(false, true));
