@@ -25,7 +25,7 @@ function Replace-LiteralOnce {
     )
     $text = Read-RepoText $Path
     $index = $text.IndexOf($Old, [StringComparison]::Ordinal)
-    if ($index -lt 0) { throw "$Label: pattern not found in $Path" }
+    if ($index -lt 0) { throw "${Label}: pattern not found in $Path" }
     $updated = $text.Substring(0, $index) + $New + $text.Substring($index + $Old.Length)
     Write-RepoText -Path $Path -Text $updated
 }
@@ -41,7 +41,7 @@ function Replace-RegexOnce {
     $options = [Text.RegularExpressions.RegexOptions]::Singleline -bor [Text.RegularExpressions.RegexOptions]::Multiline
     $regex = New-Object Text.RegularExpressions.Regex($Pattern, $options)
     $matches = $regex.Matches($text)
-    if ($matches.Count -ne 1) { throw "$Label: expected 1 match in $Path, found $($matches.Count)" }
+    if ($matches.Count -ne 1) { throw "${Label}: expected 1 match in $Path, found $($matches.Count)" }
     $updated = $regex.Replace($text, [Text.RegularExpressions.MatchEvaluator]{ param($m) $Replacement }, 1)
     Write-RepoText -Path $Path -Text $updated
 }
@@ -57,7 +57,7 @@ function Ensure-LiteralAfter {
     $text = Read-RepoText $Path
     if ($text.Contains($Sentinel)) { return }
     $index = $text.IndexOf($Anchor, [StringComparison]::Ordinal)
-    if ($index -lt 0) { throw "$Label: anchor not found in $Path" }
+    if ($index -lt 0) { throw "${Label}: anchor not found in $Path" }
     $index += $Anchor.Length
     $updated = $text.Substring(0, $index) + $Insertion + $text.Substring($index)
     Write-RepoText -Path $Path -Text $updated
@@ -126,7 +126,25 @@ if (-not $DryRun) { Initialize-MusicServerLibrary -Config $Config | Out-Null }
 '@
 Replace-RegexOnce -Path 'daily_recommend.ps1' -Pattern '\$Config = New-MusicServerConfig -Root \$Root\r?\n\$dbPath = Join-Path \$Config\.StateDir ''musicserver\.db''\r?\nif \(\$DryRun\) \{.*?\r?\n\}\r?\n\r?\n# Legacy import' -Replacement ($dailyTop + '# Legacy import') -Label 'daily recommend configured dir for dry/non-dry'
 
-Ensure-LiteralAfter -Path 'start_musicserver_ui.ps1' -Anchor '} catch {}' -Insertion "`r`ntry { Initialize-MusicServerLibrary -Config `$Config | Out-Null } catch {}" -Sentinel 'Initialize-MusicServerLibrary -Config $Config | Out-Null' -Label 'UI effective library init'
+$uiInitAnchor = @'
+    }
+} catch {}
+
+function Invoke-NavidromeSqliteJson {
+'@
+$uiInitReplacement = @'
+    }
+} catch {}
+try { Initialize-MusicServerLibrary -Config $Config | Out-Null } catch {}
+
+function Invoke-NavidromeSqliteJson {
+'@
+$uiText = Read-RepoText 'start_musicserver_ui.ps1'
+if (-not $uiText.Contains('Initialize-MusicServerLibrary -Config $Config | Out-Null')) {
+    if (-not $uiText.Contains($uiInitAnchor)) { throw 'UI effective library init anchor missing' }
+    $uiText = $uiText.Replace($uiInitAnchor, $uiInitReplacement)
+    Write-RepoText 'start_musicserver_ui.ps1' $uiText
+}
 
 Write-Host 'Patch 3/9: harden Navidrome TOML path sync'
 $navSync = @'
@@ -217,8 +235,13 @@ function Resolve-MusicServerMaintenanceContext {
 Write-RepoText -Path 'scripts/maintenance/MusicServer.Maintenance.ps1' -Text $maintenanceHelper
 
 $fetch = Read-RepoText 'scripts/maintenance/fetch_lyrics.ps1'
-$fetch = $fetch.Replace("    [string]`$Filter = '*'`r`n)", "    [string]`$Filter = '*',`r`n    [string]`$MusicDir = ''`r`n)")
-$fetch = [regex]::Replace($fetch, "(?ms)^\$MusicDir = 'E:\\\\Project\\\\MusicServer\\\\Music'\r?\n\$FFprobe\s+=.*?\r?\n\$Report\s+=.*?\r?\n\$StateDb\s+=.*?\r?\n\$Sqlite\s+=.*?\r?\nif \(-not \(Test-Path -LiteralPath \$Sqlite\)\) \{ \$Sqlite = 'sqlite3' \}\r?\n", @'
+if ($fetch -notmatch '\[string\]\$MusicDir\s*=') {
+    $fetch = $fetch.Replace("    [string]`$Filter = '*'`r`n)", "    [string]`$Filter = '*',`r`n    [string]`$MusicDir = ''`r`n)")
+}
+$fetchPattern = @'
+(?ms)^\$MusicDir\s*=\s*'.*?'\r?\n\$FFprobe\s*=.*?\r?\n\$Report\s*=.*?\r?\n\$StateDb\s*=.*?\r?\n\$Sqlite\s*=.*?\r?\nif \(-not \(Test-Path -LiteralPath \$Sqlite\)\) \{ \$Sqlite = 'sqlite3' \}\r?\n
+'@
+$fetchReplacement = @'
 . (Join-Path $PSScriptRoot 'MusicServer.Maintenance.ps1')
 $Maintenance = Resolve-MusicServerMaintenanceContext -MusicDir $MusicDir
 $MusicDir = $Maintenance.MusicDir
@@ -226,30 +249,51 @@ $FFprobe = $Maintenance.Config.FFprobe
 $Report = Join-Path $Maintenance.Root 'lyrics_report.csv'
 $StateDb = $Maintenance.StateDb
 $Sqlite = $Maintenance.Config.Sqlite
-'@ + "`r`n", 1)
-if ($fetch -notmatch 'Resolve-MusicServerMaintenanceContext') { throw 'fetch_lyrics maintenance resolver patch failed' }
+'@
+$fetchRegex = New-Object Text.RegularExpressions.Regex($fetchPattern, ([Text.RegularExpressions.RegexOptions]::Singleline -bor [Text.RegularExpressions.RegexOptions]::Multiline))
+if ($fetchRegex.Matches($fetch).Count -ne 1) { throw 'fetch_lyrics hardcoded path block not found exactly once' }
+$fetch = $fetchRegex.Replace($fetch, [Text.RegularExpressions.MatchEvaluator]{ param($m) $fetchReplacement + "`r`n" }, 1)
 Write-RepoText 'scripts/maintenance/fetch_lyrics.ps1' $fetch
 
 $one = Read-RepoText 'scripts/maintenance/fix_one_lyric.ps1'
-$one = $one.Replace("    [string]`$Search = ''`r`n)", "    [string]`$Search = '',`r`n    [string]`$MusicDir = ''`r`n)")
-$one = $one.Replace("`$MusicDir = 'E:\Project\MusicServer\Music'", ". (Join-Path `$PSScriptRoot 'MusicServer.Maintenance.ps1')`r`n`$Maintenance = Resolve-MusicServerMaintenanceContext -MusicDir `$MusicDir`r`n`$MusicDir = `$Maintenance.MusicDir")
-if ($one -notmatch 'Resolve-MusicServerMaintenanceContext') { throw 'fix_one_lyric maintenance resolver patch failed' }
+if ($one -notmatch '\[string\]\$MusicDir\s*=') {
+    $one = $one.Replace("    [string]`$Search = ''`r`n)", "    [string]`$Search = '',`r`n    [string]`$MusicDir = ''`r`n)")
+}
+$onePattern = @'
+(?m)^\$MusicDir\s*=\s*'E:\\Project\\MusicServer\\Music'\s*$
+'@
+$oneReplacement = @'
+. (Join-Path $PSScriptRoot 'MusicServer.Maintenance.ps1')
+$Maintenance = Resolve-MusicServerMaintenanceContext -MusicDir $MusicDir
+$MusicDir = $Maintenance.MusicDir
+'@
+$oneRegex = New-Object Text.RegularExpressions.Regex($onePattern, [Text.RegularExpressions.RegexOptions]::Multiline)
+if ($oneRegex.Matches($one).Count -ne 1) { throw 'fix_one_lyric hardcoded path line not found exactly once' }
+$one = $oneRegex.Replace($one, [Text.RegularExpressions.MatchEvaluator]{ param($m) $oneReplacement }, 1)
 Write-RepoText 'scripts/maintenance/fix_one_lyric.ps1' $one
 
 $tags = Read-RepoText 'scripts/maintenance/fix_tags.ps1'
-$tags = $tags.Replace("`$musicDir = \"E:\Project\MusicServer\Music\"`r`n`$ffmpeg = \"C:\Users\dell\AppData\Local\Microsoft\WinGet\Links\ffmpeg.exe\"", @'
+$tagsPattern = @'
+(?ms)^\$musicDir\s*=.*?\r?\n\$ffmpeg\s*=.*?\r?\n
+'@
+$tagsReplacement = @'
 param([string]$MusicDir = '')
 
 . (Join-Path $PSScriptRoot 'MusicServer.Maintenance.ps1')
 $Maintenance = Resolve-MusicServerMaintenanceContext -MusicDir $MusicDir
 $MusicDir = $Maintenance.MusicDir
 $ffmpeg = $Maintenance.Config.FFmpeg
-'@)
-if ($tags -notmatch 'Resolve-MusicServerMaintenanceContext') { throw 'fix_tags maintenance resolver patch failed' }
+'@
+$tagsRegex = New-Object Text.RegularExpressions.Regex($tagsPattern, ([Text.RegularExpressions.RegexOptions]::Singleline -bor [Text.RegularExpressions.RegexOptions]::Multiline))
+if ($tagsRegex.Matches($tags).Count -ne 1) { throw 'fix_tags hardcoded block not found exactly once' }
+$tags = $tagsRegex.Replace($tags, [Text.RegularExpressions.MatchEvaluator]{ param($m) $tagsReplacement + "`r`n" }, 1)
 Write-RepoText 'scripts/maintenance/fix_tags.ps1' $tags
 
 $add = Read-RepoText 'scripts/maintenance/add_song.ps1'
-$add = $add.Replace("#>`r`n`r`n`$ytDlp = \"C:\Users\dell\anaconda3\Scripts\yt-dlp.exe\"`r`n`$OutputDir = \"E:\Project\MusicServer\Music\"`r`n`$CookieFile = \"E:\Project\MusicServer\cookies.txt\"", @'
+$addPattern = @'
+(?ms)^#>\r?\n\r?\n\$ytDlp\s*=.*?\r?\n\$OutputDir\s*=.*?\r?\n\$CookieFile\s*=.*?\r?\n
+'@
+$addReplacement = @'
 #>
 param([string]$MusicDir = '')
 
@@ -258,19 +302,29 @@ $Maintenance = Resolve-MusicServerMaintenanceContext -MusicDir $MusicDir
 $ytDlp = $Maintenance.Config.YtDlp
 $OutputDir = $Maintenance.MusicDir
 $CookieFile = $Maintenance.Config.CookieFile
-'@)
-if ($add -notmatch 'Resolve-MusicServerMaintenanceContext') { throw 'add_song maintenance resolver patch failed' }
+'@
+$addRegex = New-Object Text.RegularExpressions.Regex($addPattern, ([Text.RegularExpressions.RegexOptions]::Singleline -bor [Text.RegularExpressions.RegexOptions]::Multiline))
+if ($addRegex.Matches($add).Count -ne 1) { throw 'add_song hardcoded block not found exactly once' }
+$add = $addRegex.Replace($add, [Text.RegularExpressions.MatchEvaluator]{ param($m) $addReplacement + "`r`n" }, 1)
 Write-RepoText 'scripts/maintenance/add_song.ps1' $add
 
 $fav = Read-RepoText 'scripts/maintenance/download_bilibili_favorites.ps1'
-$fav = $fav.Replace('[string]$OutputDir = "E:\Project\MusicServer\Music"', "[Alias('MusicDir')]`r`n    [string]`$OutputDir = ''")
-$fav = $fav.Replace("# yt-dlp 可执行文件路径`r`n`$ytDlp = \"C:\Users\dell\anaconda3\Scripts\yt-dlp.exe\"", @'
+$favOld = '[string]$OutputDir = "E:\Project\MusicServer\Music"'
+if ($fav.Contains($favOld)) {
+    $fav = $fav.Replace($favOld, "[Alias('MusicDir')]`r`n    [string]`$OutputDir = ''")
+}
+$favPattern = @'
+(?ms)^# yt-dlp 可执行文件路径\r?\n\$ytDlp\s*=.*?\r?\n
+'@
+$favReplacement = @'
 . (Join-Path $PSScriptRoot 'MusicServer.Maintenance.ps1')
 $Maintenance = Resolve-MusicServerMaintenanceContext -MusicDir $OutputDir
 $OutputDir = $Maintenance.MusicDir
 $ytDlp = $Maintenance.Config.YtDlp
-'@)
-if ($fav -notmatch 'Resolve-MusicServerMaintenanceContext') { throw 'favorites maintenance resolver patch failed' }
+'@
+$favRegex = New-Object Text.RegularExpressions.Regex($favPattern, ([Text.RegularExpressions.RegexOptions]::Singleline -bor [Text.RegularExpressions.RegexOptions]::Multiline))
+if ($favRegex.Matches($fav).Count -ne 1) { throw 'favorites yt-dlp block not found exactly once' }
+$fav = $favRegex.Replace($fav, [Text.RegularExpressions.MatchEvaluator]{ param($m) $favReplacement + "`r`n" }, 1)
 Write-RepoText 'scripts/maintenance/download_bilibili_favorites.ps1' $fav
 
 Write-Host 'Patch 5/9: configurable-library Pester coverage'
@@ -383,10 +437,17 @@ if ($workflow -notmatch 'ConfigurableLibrary') { throw 'CI state suite registrat
 Write-RepoText '.github/workflows/core-tests.yml' $workflow
 
 $tauriTests = Read-RepoText 'tests/MusicServer.Tauri.Tests.ps1'
-$tauriAnchor = "        `$smoke | Should Match 'ServicesStopped'"
 if (-not $tauriTests.Contains('withGlobalTauri')) {
+    $tauriAnchor = "        `$smoke | Should Match 'ServicesStopped'"
     if (-not $tauriTests.Contains($tauriAnchor)) { throw 'Tauri test insertion anchor missing' }
-    $tauriTests = $tauriTests.Replace($tauriAnchor, $tauriAnchor + "`r`n        `$tauriConf = Get-Content -LiteralPath (Join-Path `$ProjectRoot 'src-tauri\tauri.conf.json') -Raw`r`n        `$tauriConf | Should Match '\"withGlobalTauri\"\s*:\s*true'`r`n        `$web | Should Match 'window\.__TAURI__\?\.dialog'`r`n        `$web | Should Match 'window\.__TAURI__\?\.core'")
+    $tauriInsertion = @'
+        $smoke | Should Match 'ServicesStopped'
+        $tauriConf = Get-Content -LiteralPath (Join-Path $ProjectRoot 'src-tauri\tauri.conf.json') -Raw
+        $tauriConf | Should Match '"withGlobalTauri"\s*:\s*true'
+        $web | Should Match 'window\.__TAURI__\?\.dialog'
+        $web | Should Match 'window\.__TAURI__\?\.core'
+'@
+    $tauriTests = $tauriTests.Replace($tauriAnchor, $tauriInsertion.TrimEnd())
     Write-RepoText 'tests/MusicServer.Tauri.Tests.ps1' $tauriTests
 }
 
@@ -592,10 +653,16 @@ foreach ($path in $parseFiles) {
 
 if ((Read-RepoText 'MusicServer.State.psm1') -notmatch 'return \(Get-DefaultMusicDir -Root \$Config\.Root\)') { throw 'immutable default resolver missing' }
 if ((Read-RepoText 'src-tauri/tauri.conf.json') -notmatch '"withGlobalTauri"\s*:\s*true') { throw 'withGlobalTauri is not enabled' }
-if ((Read-RepoText 'scripts/maintenance/fetch_lyrics.ps1') -match 'E:\\Project\\MusicServer\\Music') { throw 'fetch_lyrics still hardcodes the old music library' }
-if ((Read-RepoText 'scripts/maintenance/fix_one_lyric.ps1') -match 'E:\\Project\\MusicServer\\Music') { throw 'fix_one_lyric still hardcodes the old music library' }
-if ((Read-RepoText 'scripts/maintenance/fix_tags.ps1') -match 'E:\\Project\\MusicServer\\Music') { throw 'fix_tags still hardcodes the old music library' }
-if ((Read-RepoText 'scripts/maintenance/add_song.ps1') -match 'E:\\Project\\MusicServer\\Music') { throw 'add_song still hardcodes the old music library' }
-if ((Read-RepoText 'scripts/maintenance/download_bilibili_favorites.ps1') -match 'E:\\Project\\MusicServer\\Music') { throw 'favorites downloader still hardcodes the old music library' }
+foreach ($maintenancePath in @(
+    'scripts/maintenance/fetch_lyrics.ps1',
+    'scripts/maintenance/fix_one_lyric.ps1',
+    'scripts/maintenance/fix_tags.ps1',
+    'scripts/maintenance/add_song.ps1',
+    'scripts/maintenance/download_bilibili_favorites.ps1'
+)) {
+    if ((Read-RepoText $maintenancePath) -match 'E:\\Project\\MusicServer\\Music') {
+        throw "$maintenancePath still hardcodes the old music library"
+    }
+}
 
 Write-Host 'PR19 completion patch prepared successfully.'
