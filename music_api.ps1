@@ -1,4 +1,4 @@
-﻿# music_api.ps1 - 音乐服务器的前端无关 HTTP API（v2 / Phase 3）。
+# music_api.ps1 - 音乐服务器的前端无关 HTTP API（v2 / Phase 3）。
 # ------------------------------------------------------------------
 # Phase 3 契约：
 #   - SQLite 是唯一的运行时状态真源。JSON 仅用于迁移输入 / 备份 / 兼容镜像，
@@ -17,7 +17,7 @@
 #       POST /api/wanted           -> 202 { accepted, queued, wanted }
 #       POST /api/wanted/{id}      -> 202 { accepted, queued, wanted }
 #       POST /api/wanted/{id}/retry -> 202 { accepted, queued, wanted }
-#       POST /api/wanted/{id}/cancel -> { accepted, action, wanted }
+#       POST /api/wanted/{id}/cancel -> { accepted, queued, wanted }
 #       GET  /api/providers/status -> { items=[local, bilibili_search, bilibili_download] }
 #       GET  /api/listening/stats -> { most_played=[...], rediscover=[...], total_local }
 #       GET  /api/listening/random -> one playable local track
@@ -379,9 +379,12 @@ function Read-NeteaseLyrics([string]$Path) {
 function Get-LrcPath {
     param([string]$Path)
     if (-not $Path) { return $null }
-    if (Test-Path -LiteralPath $Path) { return $Path }
-    $lrc = [System.IO.Path]::ChangeExtension($Path, '.lrc')
-    if (Test-Path -LiteralPath $lrc) { return $lrc }
+    $candidate = if ([System.IO.Path]::GetExtension($Path) -ieq '.lrc') {
+        $Path
+    } else {
+        [System.IO.Path]::ChangeExtension($Path, '.lrc')
+    }
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
     return $null
 }
 
@@ -751,7 +754,7 @@ while ($true) {
             $lrcPath = Get-LrcPath -Path ([string]$item.file)
             if ($lrcPath) {
                 $lyrics = Read-NeteaseLyrics -Path $lrcPath
-                $body = @{ id = $localId; lyrics = $lyrics; path = $lrcPath }
+                $body = @{ id = $localId; available = $true; format = 'lrc'; text = $lyrics; lyrics = $lyrics; path = $lrcPath }
                 Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 200 })
             } else {
                 $body = @{ error = 'LYRICS_NOT_FOUND'; id = $localId }
@@ -776,7 +779,7 @@ while ($true) {
                         Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 404 })
                     } else {
                         $lyrics = Read-NeteaseLyrics -Path $lrcPath
-                        $body = @{ track_id = $trackId; lyrics = $lyrics; path = $lrcPath }
+                        $body = @{ track_id = $trackId; available = $true; format = 'lrc'; text = $lyrics; lyrics = $lyrics; path = $lrcPath }
                         Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 200 })
                     }
                 }
