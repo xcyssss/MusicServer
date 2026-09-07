@@ -309,6 +309,11 @@ jobs:
             if ($stream.StatusCode -ne 200) { throw "External stream failed: $($stream.StatusCode)" }
             $lyrics = Invoke-RestMethod -Uri "http://127.0.0.1:$($pair.Api)/api/library/$libraryId/lyrics" -TimeoutSec 15
             if (-not $lyrics.available) { throw 'External adjacent LRC was not available.' }
+            if ([string]$lyrics.text -notmatch 'external smoke') { throw 'External adjacent LRC content was not returned.' }
+            $expectedLrc = [IO.Path]::GetFullPath((Join-Path $externalLibrary 'external-test.lrc'))
+            if ([IO.Path]::GetFullPath([string]$lyrics.path) -ne $expectedLrc) {
+              throw "Lyrics API returned the wrong adjacent file: $($lyrics.path)"
+            }
 
             $reset = Invoke-RestMethod -Uri $settingsUri -Method Delete -TimeoutSec 15
             $expectedDefault = [IO.Path]::GetFullPath($defaultMusic)
