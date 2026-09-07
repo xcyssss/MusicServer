@@ -1,4 +1,4 @@
-﻿$ProjectRoot = Split-Path -Parent $PSScriptRoot
+$ProjectRoot = Split-Path -Parent $PSScriptRoot
 
 Describe 'MusicServer Tauri desktop shell' {
     It 'uses Tauri v2 and the shared web directory' {
@@ -35,10 +35,10 @@ Describe 'MusicServer Tauri desktop shell' {
         $capability = ConvertFrom-Json -InputObject (Get-Content -LiteralPath (Join-Path $ProjectRoot 'src-tauri\capabilities\default.json') -Raw)
         $remoteUrls = @($capability.remote.urls)
         $remoteUrls.Count | Should Be 3
-        $remoteUrls | Should Contain 'http://127.0.0.1:8790'
-        $remoteUrls | Should Contain 'http://127.0.0.1:8791'
-        $remoteUrls | Should Contain 'http://127.0.0.1:8792'
-        @($capability.permissions) | Should Contain 'dialog:allow-open'
+        ($remoteUrls -contains 'http://127.0.0.1:8790') | Should Be $true
+        ($remoteUrls -contains 'http://127.0.0.1:8791') | Should Be $true
+        ($remoteUrls -contains 'http://127.0.0.1:8792') | Should Be $true
+        (@($capability.permissions) -contains 'dialog:allow-open') | Should Be $true
     }
 
     It 'packages a writable portable runtime instead of embedding the source-tree path' {
