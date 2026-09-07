@@ -11,6 +11,7 @@ Describe 'PowerShell 5.1 test runner contract' {
             Set-Content -LiteralPath $fixture -Value $Content -Encoding UTF8
         }
         $savedPreference = $ErrorActionPreference
+        $savedExitCode = $global:LASTEXITCODE
         try {
             # PS5.1 wraps native stderr as ErrorRecord; inspect the process exit code.
             $ErrorActionPreference = 'Continue'
@@ -18,6 +19,9 @@ Describe 'PowerShell 5.1 test runner contract' {
             $code = $LASTEXITCODE
         } finally {
             $ErrorActionPreference = $savedPreference
+            # Actions checks LASTEXITCODE after Pester returns. Expected child
+            # failures must not become the exit status of the parent test job.
+            $global:LASTEXITCODE = $savedExitCode
         }
         [pscustomobject]@{ Code = $code; Log = (Get-Content -LiteralPath $log -Raw -Encoding UTF8) }
     }
