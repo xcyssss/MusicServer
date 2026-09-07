@@ -1,0 +1,53 @@
+name: PR19 Complete Fix
+
+on:
+  push:
+    branches:
+      - feature/configurable-music-library
+    paths:
+      - '.github/workflows/pr19-complete-fix.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/configurable-music-library
+          fetch-depth: 0
+
+      - name: Apply completion patch
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\pr19_apply_fixes.ps1
+
+      - name: Parser and diff preflight
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git diff --check
+          if ($LASTEXITCODE -ne 0) { throw 'git diff --check failed' }
+          git status --short
+
+      - name: Remove temporary patch machinery
+        shell: powershell
+        run: |
+          Remove-Item -LiteralPath '.\scripts\pr19_apply_fixes.ps1' -Force
+          Remove-Item -LiteralPath '.\.github\workflows\pr19-complete-fix.yml' -Force
+
+      - name: Commit fixes to PR branch
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          if ($LASTEXITCODE -ne 0) { throw 'staged diff check failed' }
+          git commit -m "fix: complete configurable music library safety"
+          git push origin HEAD:feature/configurable-music-library
