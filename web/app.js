@@ -1,7 +1,7 @@
 // Tauri startup uses this marker to reject a stale 8790 UI process after an
 // upgrade. Keep it in the served bundle so the desktop shell can verify that
 // the WebView is loading the same source revision as the backend.
-const MUSICSERVER_BUILD_MARKER = 'musicserver-development';
+const MUSICSERVER_BUILD_MARKER = 'musicserver-backend-b-v4';
 
 const storedLibraryOrder = (() => {
   try {
@@ -1005,17 +1005,19 @@ async function loadMusicLibrarySettings() {
 // Native folder picker via Tauri dialog plugin
 $('#music-library-browse').addEventListener('click', async () => {
   try {
-    // tauri-plugin-dialog is loaded via the Tauri IPC bridge
-    const { open } = window.__TAURI__?.dialog || {};
-    if (!open) { showToast('文件夹选择器不可用'); return; }
-    const selected = await open({ directory: true, title: '选择音乐文件夹', multiple: false });
+    // Tauri v2 IPC: invoke the pick_folder command registered in main.rs
+    const invoke = window.__TAURI__?.core?.invoke;
+    if (!invoke) {
+      // Not running in Tauri WebView — fallback to prompt
+      const path = prompt('输入音乐库完整路径（例如 D:\\Music）：', $('#music-library-path').value);
+      if (path) await saveMusicLibraryPath(path);
+      return;
+    }
+    const selected = await invoke('pick_folder');
     if (!selected) return; // user cancelled
-    const path = typeof selected === 'string' ? selected : selected;
-    await saveMusicLibraryPath(path);
+    await saveMusicLibraryPath(selected);
   } catch (e) {
-    // Fallback: prompt the user for a path
-    const path = prompt('输入音乐库完整路径（例如 D:\\Music）：', $('#music-library-path').value);
-    if (path) await saveMusicLibraryPath(path);
+    showToast(`文件夹选择失败：${e}`);
   }
 });
 

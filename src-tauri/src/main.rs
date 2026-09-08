@@ -430,11 +430,28 @@ fn open_folder(path: String) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+async fn pick_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.dialog()
+        .file()
+        .set_title("选择音乐文件夹")
+        .pick_folder(move |result| {
+            let _ = tx.send(result);
+        });
+    let result = rx.recv().map_err(|e| format!("Dialog channel error: {e}"))?;
+    match result {
+        Some(path) => Ok(Some(path.to_string())),
+        None => Ok(None),
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![open_folder])
+        .invoke_handler(tauri::generate_handler![open_folder, pick_folder])
         .manage(AppState {
             child: Mutex::new(None),
         })
