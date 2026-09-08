@@ -62,7 +62,7 @@ The packaged runtime contains only what the desktop APP needs to boot its own UI
 - `watchdog_ui.ps1`
 - `music_api.ps1`
 - `wanted_worker.ps1`
-- Core/Database/Http/State/Providers modules
+- Core/Database/Http/State/Providers/Identity modules
 - `web/`
 - a real `sqlite3.exe`
 
@@ -125,7 +125,7 @@ CI: `.github/workflows/core-tests.yml` on `windows-latest`.
 
 | Job | Responsibility |
 |---|---|
-| `state` | Core, Database, V2, WorkerConcurrency, Recommendation, LegacyRetirement, Listening, Web, Tauri |
+| `state` | Core, Database, V2, WorkerConcurrency, Recommendation, LegacyRetirement, Listening, Web, Tauri, ConfigurableLibrary, TestRunner, Identity |
 | `api` | Http, UiProxyRuntime, MediaRuntime, ApiTransaction, ApiRuntime |
 | `desktop-build` | real Rust/Tauri compile, NSIS installer, installed-app portability smoke, installer artifact |
 
@@ -178,6 +178,8 @@ For live desktop smoke, use `tests/verify_tauri_desktop.ps1` and exercise the ac
 
 For non-trivial work:
 
+Batch related steps as local commits; after a meaningful stage and local validation, push the group once and verify CI. Avoid pushing each small step separately.
+
 1. inspect current branch/files before modifying;
 2. preserve unrelated local/user work;
 3. make the smallest coherent change;
@@ -191,7 +193,18 @@ For non-trivial work:
 
 After completing a meaningful task, update this `AGENTS.md` checkpoint when the task changes architecture, release behavior, test gates, or important operating rules. Keep only current durable facts; do not accumulate transient debugging notes.
 
-## Current checkpoint — 2026-09-07
+## Current checkpoint — 2026-09-08
+
+- Installed smoke restart checks the actual APP process exit and then requires all service ports closed. A nonzero taskkill tree result is diagnostic only after confirmed APP exit; it must never bypass the process/port shutdown gates. PS5.1 Tauri tests cover this distinction.
+
+- Desktop launches PowerShell and taskkill through `background_process::command` with Windows CREATE_NO_WINDOW and disconnected standard handles. PowerShell also uses NonInteractive; do not rely on WindowStyle Hidden alone, which can briefly allocate a console. The Rust regression queries GetConsoleWindow inside a real child process. Release builds retain the Windows GUI subsystem.
+
+- Runtime manifests use schema 2 with per-file size/SHA-256 and content build identity. Desktop validates required files, managed paths, duplicate names, hashes and reparse points before modifying APP home. Changed files are fully written and synced in APP home before individual rename replacement; this is not a whole-runtime transaction or schema rollback.
+- Runtime source identity is computed by MusicServer.Identity.psm1 from sorted relative names and SHA-256 content hashes. Rust embeds the same digest at build time; UI/API cache it at process startup. Machine paths and user state are excluded. Source changes therefore cannot relabel an already running service. MUSICSERVER_DISABLE_WORKER=1 explicitly disables the downloader for isolated EXE measurements; normal startup is unchanged.
+
+- Desktop identity probes have a 1.2-second total network deadline and a 1 MiB response cap. Only a completed HTTP 200 response with the marker in its body is accepted; declared Content-Length must match. Each launched port pair has a 30-second readiness budget including network probes and sleeps. Rust TCP regressions run in the existing desktop gate. These bounds do not cover runtime staging/process teardown or establish faster normal startup.
+
+- `tests/run_suite.ps1` pins Pester 3.4.0, excludes RequiresLocalRuntime by default, and reports failures from TestResult (name, message and stack). Exit codes are 0/1/2 for pass/test failure/runner error; zero discovered tests is an error. The state CI group includes TestRunner subprocess regressions; the suite index is tests/README.md.
 
 - B backend reads: recommendation assembly uses four bounded State queries (one for an empty day); health statistics use one query. Schema bootstrap groups compatible DDL while retaining the lease-column upgrade and existing durability settings.
 - API Navidrome snapshots/maps live for one request only; API and UI share the stable local identity helper. UI caches serialized library responses with the existing list lifetime; explicit refresh sends `refresh=1`, and deletion invalidates the list. External downloads become visible on the existing 30-second refresh lifetime or explicit refresh.

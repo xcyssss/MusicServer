@@ -150,6 +150,7 @@ function Test-WorkerReady {
 }
 
 function Start-MusicServerWorker {
+    if ($env:MUSICSERVER_DISABLE_WORKER -eq '1') { return }
     if (Test-WorkerReady) {
         Write-UiLog 'Wanted worker already running (queue mutex held).'
         return
@@ -169,6 +170,8 @@ Import-Module (Join-Path $Root 'MusicServer.Core.psm1') -Force
 Import-Module (Join-Path $Root 'MusicServer.Database.psm1') -Force
 Import-Module (Join-Path $Root 'MusicServer.State.psm1') -Force
 Import-Module (Join-Path $Root 'MusicServer.Http.psm1') -Force
+Import-Module (Join-Path $Root 'MusicServer.Identity.psm1') -Force
+$script:BuildMarker = Get-MusicServerBuildIdentity -Root $Root
 $Config = New-MusicServerConfig -Root $Root
 # Resolve configured music dir from SQLite if available (DB may already exist from a prior run)
 try {
@@ -481,6 +484,9 @@ function Send-StaticFile {
     }
 
     $bytes = [System.IO.File]::ReadAllBytes($file)
+    if ($RelativePath -eq 'app.js') {
+        $bytes = [Text.Encoding]::UTF8.GetBytes([Text.Encoding]::UTF8.GetString($bytes).Replace('musicserver-development', $script:BuildMarker))
+    }
     $Context.Response.StatusCode = 200
     $Context.Response.ContentType = $ContentType
     $Context.Response.ContentLength64 = $bytes.Length

@@ -39,6 +39,7 @@ $runtimeFiles = @(
     'MusicServer.Core.psm1',
     'MusicServer.Database.psm1',
     'MusicServer.Http.psm1',
+    'MusicServer.Identity.psm1',
     'MusicServer.State.psm1',
     'MusicServer.Providers.psm1'
 )
@@ -99,8 +100,18 @@ if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace((@($sqliteVersion) -joi
     throw "Bundled sqlite3.exe is not runnable: $sqliteTarget"
 }
 
+Import-Module (Join-Path $ProjectRoot 'MusicServer.Identity.psm1') -Force
+$payload = @(Get-ChildItem -LiteralPath $Destination -File -Recurse | Where-Object { $_.Name -ne '.gitkeep' } | ForEach-Object {
+    [ordered]@{
+        path = $_.FullName.Substring($Destination.TrimEnd('\','/').Length + 1).Replace('\','/')
+        size = $_.Length
+        sha256 = Get-MusicServerFileHash -Path $_.FullName
+    }
+})
 $manifest = [ordered]@{
-    schema = 1
+    schema = 2
+    build_id = Get-MusicServerBuildIdentity -Root $Destination
+    files = $payload
     generated_utc = [DateTime]::UtcNow.ToString('o')
     runtime_files = $runtimeFiles
     web = 'web'
