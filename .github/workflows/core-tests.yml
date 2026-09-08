@@ -160,6 +160,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           Import-Module .\MusicServer.Identity.psm1 -Force
+          . .\tests\MusicServer.DesktopSmoke.ps1
           $BuildMarker = Get-MusicServerBuildIdentity -Root (Get-Location).Path
           $installer = Get-ChildItem -LiteralPath '.\src-tauri\target\release\bundle\nsis' -Filter '*.exe' -File | Select-Object -First 1
           if (-not $installer) { throw 'Installer not found for smoke test.' }
@@ -272,9 +273,7 @@ jobs:
               throw 'Installed APP did not accept external music library setting.'
             }
 
-            $kill = Start-Process -FilePath 'taskkill.exe' -ArgumentList @('/PID', "$($desktop.Id)", '/T', '/F') -Wait -PassThru -NoNewWindow
-            if ($kill.ExitCode -ne 0) { throw "Failed to stop installed APP before configured-library restart: $($kill.ExitCode)" }
-            try { $desktop.WaitForExit(5000) | Out-Null } catch {}
+            Stop-MusicServerSmokeDesktop -Process $desktop
             $desktop = $null
             Wait-PortsClosed
 
