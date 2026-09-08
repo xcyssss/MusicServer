@@ -9,10 +9,11 @@ use std::env;
 use std::fs;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Child;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+mod background_process;
 mod runtime_manifest;
 mod startup_probe;
 
@@ -309,10 +310,11 @@ fn spawn_launcher(root: &Path, ui_port: u16, api_port: u16) -> Option<Child> {
     let api_prefix = endpoint_url(api_port);
     let sqlite_path = root.join("tools").join("sqlite3.exe");
 
-    let mut command = Command::new("powershell.exe");
+    let mut command = background_process::command("powershell.exe");
     command
         .args([
             "-NoProfile",
+            "-NonInteractive",
             "-WindowStyle",
             "Hidden",
             "-ExecutionPolicy",
@@ -325,10 +327,7 @@ fn spawn_launcher(root: &Path, ui_port: u16, api_port: u16) -> Option<Child> {
         .arg("-UiPrefix")
         .arg(&ui_prefix)
         .arg("-NoBrowser")
-        .current_dir(root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .current_dir(root);
 
     if sqlite_path.is_file() {
         command.env("MUSICSERVER_SQLITE", sqlite_path);
@@ -480,11 +479,8 @@ fn main() {
 
 #[cfg(windows)]
 fn kill_process_tree(pid: u32) -> std::io::Result<()> {
-    Command::new("taskkill")
+    background_process::command("taskkill")
         .args(["/PID", &pid.to_string(), "/T", "/F"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
         .spawn()
         .and_then(|mut c| c.wait())
         .map(|_| ())
