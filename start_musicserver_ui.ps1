@@ -7,6 +7,8 @@
 )
 
 $ErrorActionPreference = 'Stop'
+$startupClock = [Diagnostics.Stopwatch]::StartNew()
+$startupPhases = [ordered]@{}
 $ProgressPreference = 'SilentlyContinue'
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 try { Add-Type -AssemblyName System.Web -ErrorAction SilentlyContinue } catch {}
@@ -171,7 +173,9 @@ Import-Module (Join-Path $Root 'MusicServer.Database.psm1') -Force
 Import-Module (Join-Path $Root 'MusicServer.State.psm1') -Force
 Import-Module (Join-Path $Root 'MusicServer.Http.psm1') -Force
 Import-Module (Join-Path $Root 'MusicServer.Identity.psm1') -Force
+$startupPhases['module_imports'] = $startupClock.Elapsed.TotalMilliseconds
 $script:BuildMarker = Get-MusicServerBuildIdentity -Root $Root
+$startupPhases['build_identity'] = $startupClock.Elapsed.TotalMilliseconds
 $Config = New-MusicServerConfig -Root $Root
 # Resolve configured music dir from SQLite if available (DB may already exist from a prior run)
 try {
@@ -182,6 +186,7 @@ try {
     }
 } catch {}
 try { Initialize-MusicServerLibrary -Config $Config | Out-Null } catch {}
+$startupPhases['config_library'] = $startupClock.Elapsed.TotalMilliseconds
 
 function Invoke-NavidromeSqliteJson {
     param([Parameter(Mandatory)][string]$Sql)
@@ -986,8 +991,11 @@ if (Test-UiReady) {
 }
 
 try {
+    $startupPhases['ui_port_probe'] = $startupClock.Elapsed.TotalMilliseconds
     Start-MusicServerApi
+    $startupPhases['api_start_wait'] = $startupClock.Elapsed.TotalMilliseconds
     Start-MusicServerWorker
+    $startupPhases['worker_start'] = $startupClock.Elapsed.TotalMilliseconds
 
     $script:Listener = [System.Net.HttpListener]::new()
     $script:Listener.Prefixes.Add($UiPrefix)
@@ -1002,6 +1010,7 @@ try {
     }
     Write-UiLog "UI started at $UiPrefix pid=$PID"
     Initialize-MediaPool
+    $startupPhases['listener_media_pool'] = $startupClock.Elapsed.TotalMilliseconds
 
     # External watchdog: watches the heartbeat file this loop writes and
     # restarts the UI if a wedged handler freezes the single-threaded listener.
@@ -1020,6 +1029,8 @@ try {
         try { Start-Process $UiPrefix | Out-Null } catch { Write-UiLog "Could not open browser: $($_.Exception.Message)" }
     }
 
+    $startupPhases['watchdog_start'] = $startupClock.Elapsed.TotalMilliseconds
+    Write-MusicServerStartupTrace -Role ui -Checkpoints $startupPhases
     $pending = $script:Listener.BeginGetContext($null, $null)
     while ($script:Listener.IsListening) {
         Complete-MediaJobs

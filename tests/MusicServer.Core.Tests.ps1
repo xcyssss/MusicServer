@@ -1,5 +1,34 @@
 ﻿$ProjectRoot = Split-Path -Parent $PSScriptRoot
 
+Describe 'Startup diagnostics' {
+    BeforeEach {
+        Import-Module (Join-Path $ProjectRoot 'MusicServer.Core.psm1') -Force
+        $oldTrace = $env:MUSICSERVER_STARTUP_TRACE
+        $traceBase = Join-Path $TestDrive 'startup.json'
+        $env:MUSICSERVER_STARTUP_TRACE = $traceBase
+        Remove-Item -LiteralPath ($traceBase + '.api.json') -ErrorAction SilentlyContinue
+    }
+    AfterEach { $env:MUSICSERVER_STARTUP_TRACE = $oldTrace }
+
+    It 'records phase differences and preserves an existing report' {
+        Write-MusicServerStartupTrace -Role api -Checkpoints ([ordered]@{ imports = 10; schema = 25 })
+        $before = [IO.File]::ReadAllText($traceBase + '.api.json')
+        $report = $before | ConvertFrom-Json
+        $report.events[1].duration_ms | Should Be 15
+        $report.role | Should Be 'api'
+        Write-MusicServerStartupTrace -Role api -Checkpoints ([ordered]@{ changed = 99 })
+        [IO.File]::ReadAllText($traceBase + '.api.json') | Should Be $before
+    }
+
+    It 'does not write when disabled and tolerates an unavailable output directory' {
+        $env:MUSICSERVER_STARTUP_TRACE = ''
+        Write-MusicServerStartupTrace -Role api -Checkpoints ([ordered]@{ imports = 10 })
+        Test-Path -LiteralPath ($traceBase + '.api.json') | Should Be $false
+        $env:MUSICSERVER_STARTUP_TRACE = Join-Path $TestDrive 'missing/startup.json'
+        { Write-MusicServerStartupTrace -Role api -Checkpoints ([ordered]@{ imports = 10 }) } | Should Not Throw
+    }
+}
+
 Describe 'MusicServer canonical state and queue' {
     BeforeEach {
         $TestRoot = Join-Path ([IO.Path]::GetTempPath()) "musicserver_pester_$([guid]::NewGuid().ToString('N'))"

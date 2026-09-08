@@ -22,6 +22,7 @@ $env:MUSICSERVER_DISABLE_WORKER = '1'
 $child = $null
 $samples = @()
 $traces = @()
+$serviceTraces = @()
 
 function Wait-MeasurementPortsClosed {
     $deadline = [DateTime]::UtcNow.AddSeconds(10)
@@ -83,7 +84,13 @@ try {
         if (-not $trace -or $trace.schema -ne 1 -or $trace.build_id -ne $marker -or $trace.outcome -ne 'services_ready') {
             throw 'EXE startup trace missing, incompatible, or not ready. Rebuild the current desktop EXE.'
         }
-        if ($run -gt 0) { $samples += $elapsed; $traces += $trace }
+        $roles = [ordered]@{}
+        foreach ($role in @('ui', 'api')) {
+            $serviceTrace = Get-Content -LiteralPath ($tracePath + '.' + $role + '.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($serviceTrace.schema -ne 1 -or $serviceTrace.role -ne $role) { throw 'Invalid service startup trace.' }
+            $roles[$role] = $serviceTrace
+        }
+        if ($run -gt 0) { $samples += $elapsed; $traces += $trace; $serviceTraces += $roles }
         # This is a forced-tree cleanup, not a graceful-window-close test.
         Stop-MusicServerSmokeDesktop -Process $child
         Wait-MeasurementPortsClosed
@@ -92,6 +99,7 @@ try {
     $sorted = @($samples | Sort-Object)
     $report = [ordered]@{ label = $Label; scenario = $Scenario; executable_sha256 = (Get-FileHash $exePath).Hash; runtime_marker = $marker; runs = $Runs; startup_to_services_ms = $samples; p50_ms = $sorted[[int][Math]::Ceiling($Runs * .5) - 1]; p95_ms = $sorted[[int][Math]::Ceiling($Runs * .95) - 1]; desktop_traces = $traces; scope = 'Real EXE, isolated empty state, downloader omitted; excludes installer, rendered UI, and OS cold-cache guarantees' }
     $output = Join-Path $project ('artifacts/startup-' + [guid]::NewGuid().ToString('N') + '.json')
+    $report['service_traces'] = $serviceTraces
     $report | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $output -Encoding UTF8
     Write-Output $output
     Write-Output ($report | ConvertTo-Json -Depth 8 -Compress)
