@@ -1,5 +1,32 @@
 ﻿$ProjectRoot = Split-Path -Parent $PSScriptRoot
 
+. (Join-Path $PSScriptRoot 'MusicServer.DesktopSmoke.ps1')
+
+Describe 'Installed APP shutdown outcome' {
+    It 'accepts a taskkill tree error only when the APP has exited' {
+        Mock Start-Process { [pscustomobject]@{ ExitCode = 128 } }
+        $process = [pscustomobject]@{ Id = 123; HasExited = $false }
+        $process | Add-Member ScriptMethod WaitForExit { param($milliseconds) return $true }
+        { Stop-MusicServerSmokeDesktop -Process $process } | Should Not Throw
+        Assert-MockCalled Start-Process -Times 1 -Exactly -Scope It
+    }
+
+    It 'fails when the APP survives even if taskkill reports success' {
+        Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
+        $process = [pscustomobject]@{ Id = 123; HasExited = $false }
+        $process | Add-Member ScriptMethod WaitForExit { param($milliseconds) return $false }
+        { Stop-MusicServerSmokeDesktop -Process $process } | Should Throw
+    }
+
+    It 'does not target an already exited APP PID' {
+        Mock Start-Process { throw 'Must not kill an exited process.' }
+        $process = [pscustomobject]@{ Id = 123; HasExited = $true }
+        $process | Add-Member ScriptMethod WaitForExit { param($milliseconds) return $true }
+        { Stop-MusicServerSmokeDesktop -Process $process } | Should Not Throw
+        Assert-MockCalled Start-Process -Times 0 -Exactly -Scope It
+    }
+}
+
 Describe 'MusicServer Tauri desktop shell' {
     It 'uses Tauri v2 and the shared web directory' {
         $config = ConvertFrom-Json -InputObject (Get-Content -LiteralPath (Join-Path $ProjectRoot 'src-tauri\tauri.conf.json') -Raw)
