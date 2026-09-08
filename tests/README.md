@@ -30,4 +30,13 @@ Invoke-Pester -Path tests -Tag RequiresLocalRuntime -PassThru
 
 测试与测量日志存入忽略目录 `artifacts/`，不提交运行数据。
 
+启动阶段测量（先构建当前 release EXE，再依次执行；不要并发占用桌面端口）：
+
+```powershell
+powershell.exe -NoProfile -File scripts/measure_musicserver_startup.ps1 -Executable src-tauri/target/release/musicserver-desktop.exe -Scenario FreshRuntime -Runs 5
+powershell.exe -NoProfile -File scripts/measure_musicserver_startup.ps1 -Executable src-tauri/target/release/musicserver-desktop.exe -Scenario Restart -Runs 5
+```
+
+`FreshRuntime` 每次使用空 runtime 目录，不包含安装器耗时；`Restart` 排除一次预热后复用 APP home。报告包含外部服务就绪时间和 Rust setup 阶段明细，两者计时起点不同，不应直接相减作为界面时间。未测量首绘、可操作时间或操作系统冷缓存。Rust `startup_trace` 回归验证记录上限、禁用时不收集、已有输出不覆盖。正常启动不写报告；手动诊断可设置 `MUSICSERVER_STARTUP_TRACE` 为父目录已存在的新文件路径。
+
 `Identity` 验证跨目录标识一致、用户数据不影响标识、内容变化产生新标识及旧进程不会更新自身标识。Rust 还验证清单损坏、缺失/多余文件、路径约束和锁定目标的单文件替换。

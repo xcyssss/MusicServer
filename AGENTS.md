@@ -195,6 +195,9 @@ After completing a meaningful task, update this `AGENTS.md` checkpoint when the 
 
 ## Current checkpoint — 2026-09-08
 
+- `MUSICSERVER_STARTUP_TRACE` optionally writes a bounded desktop startup report to a new file at the caller-supplied path. Its parent must exist; an existing file is never overwritten, and diagnostic write failure does not block startup. Events cover runtime verification/sync, port/identity checks, launcher and service readiness through navigation request; they do not measure rendered UI or individual PowerShell/SQLite initialization. Normal launches create no report.
+- Startup measurement supports `FreshRuntime` (empty runtime home per sample, excluding installation) and `Restart` (one excluded warm-up followed by reused-home samples). Each launch requires its matching trace, actual APP exit and service-port closure. This remains forced-tree cleanup, not graceful-window-close acceptance.
+
 - Installed smoke restart checks the actual APP process exit and then requires all service ports closed. A nonzero taskkill tree result is diagnostic only after confirmed APP exit; it must never bypass the process/port shutdown gates. PS5.1 Tauri tests cover this distinction.
 
 - Desktop launches PowerShell and taskkill through `background_process::command` with Windows CREATE_NO_WINDOW and disconnected standard handles. PowerShell also uses NonInteractive; do not rely on WindowStyle Hidden alone, which can briefly allocate a console. The Rust regression queries GetConsoleWindow inside a real child process. Release builds retain the Windows GUI subsystem.
