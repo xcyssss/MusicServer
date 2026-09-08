@@ -7,10 +7,8 @@ MusicServer 是一个 Windows 本地音乐应用，主客户端为 **Tauri v2 �
 ## 目录结构
 
 ```text
-E:\Project\MusicServer\
-├── Music\                          # 本地音乐
-├── DailyMix_data\                  # MusicServer 状态与兼容数据
-├── Navidrome\                      # Navidrome 配置、程序和数据
+Repository\
+├── 源码、测试、文档和构建 workspace     # 可随时重新 clone
 ├── scripts\maintenance\           # 独立维护工具
 │   ├── MusicServer.Maintenance.ps1    # 维护脚本共享路径解析
 │   ├── download_bilibili_favorites.ps1
@@ -26,7 +24,15 @@ E:\Project\MusicServer\
 ├── start_musicserver_ui.bat        # 源码环境便捷启动入口
 ├── web\                            # 桌面 APP WebView2 UI
 └── src-tauri\                      # Tauri 桌面壳与打包
+
+APP_HOME\
+├── DailyMix_data\state\            # SQLite 状态库
+├── Navidrome\Data\                 # Navidrome 持久数据库
+├── logs\、backups\、output\、secrets\ # 运行时持久数据
+└── Music\                           # 默认 MusicDir（可改到其他盘）
 ```
+
+三者边界固定为：`Repository = 源码/构建 workspace`，`APP_HOME = 应用持久化状态`，`MusicDir = 独立音乐库`。删除或清理 repository 不会删除 APP_HOME 或外置 MusicDir。
 
 ---
 
@@ -43,6 +49,12 @@ E:\Project\MusicServer\
 ```
 
 如果设置了环境变量 `MUSICSERVER_APP_HOME`，则以该目录为准。
+
+源码开发时可以在当前 PowerShell 会话指定已有数据目录；程序不会把这个示例路径写入源码：
+
+```powershell
+$env:MUSICSERVER_APP_HOME = 'E:\Project\MusicSever_app'
+```
 ## 1.1 配置音乐库位置
 
 安装版默认音乐库：
@@ -97,19 +109,20 @@ Tauri APP 会加载同一套 `web/` UI；浏览器页面不是另一套独立产
 
 Navidrome 用于扫描和提供本地音乐库。
 
-典型位置：
+Navidrome 的持久化配置和数据库位置：
 
 ```text
-E:\Project\MusicServer\Navidrome\bin\navidrome.exe
-E:\Project\MusicServer\Navidrome\navidrome.toml
-E:\Project\MusicServer\Navidrome\Data\
+<APP_HOME>\Navidrome\navidrome.toml
+<APP_HOME>\Navidrome\Data\
 ```
+
+Navidrome binary 属于可重新下载的外部运行时，可通过 PATH 或 `MUSICSERVER_NAVIDROME` 指定；源码中的 `Navidrome\navidrome.toml.template` 只是模板，具体配置由程序写入 APP_HOME。
 
 手动启动：
 
 ```powershell
-E:\Project\MusicServer\Navidrome\bin\navidrome.exe `
-    -c E:\Project\MusicServer\Navidrome\navidrome.toml
+navidrome.exe `
+    -c "$env:MUSICSERVER_APP_HOME\Navidrome\navidrome.toml"
 ```
 
 默认 Web 地址：
@@ -147,7 +160,7 @@ Bilibili 下载功能通常需要有效的 `cookies.txt`。Cookie 属于本地�
 建议放在：
 
 ```text
-E:\Project\MusicServer\cookies.txt
+<APP_HOME>\secrets\cookies.txt
 ```
 
 如果下载出现登录失效、验证失败或无法解析等问题，优先重新从已登录 B站的浏览器导出 Cookie。
@@ -159,7 +172,7 @@ cd E:\Project\MusicServer
 
 .\scripts\maintenance\download_bilibili_favorites.ps1 `
     -FavoritesUrl "https://www.bilibili.com/medialist/detail/ml你的收藏夹编号" `
-    -CookieFile "E:\Project\MusicServer\cookies.txt"
+    -CookieFile "$env:MUSICSERVER_APP_HOME\secrets\cookies.txt"
 ```
 
 B站存在频率限制和 HTTP 412 风控。遇到风控时不要做无界重试；MusicServer 的正式 Provider / Wanted Queue 路径会按 provider health 和退避逻辑处理。
@@ -210,7 +223,7 @@ cd E:\Project\MusicServer
 运行后会生成：
 
 ```text
-E:\Project\MusicServer\lyrics_report.csv
+<APP_HOME>\output\lyrics_report.csv
 ```
 
 常见 `Status`：
@@ -395,7 +408,7 @@ B站风控通常是服务端限制。停止高频重试，等待 provider block 
 
 ### 源码目录和安装版数据在哪
 
-源码 checkout 默认使用项目目录中的本地数据。正式安装版默认使用：
+源码 checkout 只保存代码和可重新生成的构建输出，不承载用户数据。正式安装版默认使用：
 
 ```text
 %LOCALAPPDATA%\com.musicserver.desktop\
@@ -410,13 +423,13 @@ B站风控通常是服务端限制。停止高频重试，等待 provider block 
 以下内容都属于本地数据或敏感内容，不要随意删除，也不要提交 Git：
 
 ```text
-Music\
-DailyMix_data\
-Navidrome\Data\
-cookies.txt
+<APP_HOME>\Music\
+<APP_HOME>\DailyMix_data\
+<APP_HOME>\Navidrome\Data\
+<APP_HOME>\secrets\cookies.txt
 *.db
-logs\
-backups\
+<APP_HOME>\logs\
+<APP_HOME>\backups\
 ```
 
 SQLite 是 MusicServer 唯一运行时状态真源。JSON/CSV 只用于 migration、backup 或兼容输出。

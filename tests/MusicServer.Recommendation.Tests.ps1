@@ -43,7 +43,9 @@ function New-RecommendationTestRow {
 
 function Initialize-RecommendationScratchDb {
     $root = Join-Path ([IO.Path]::GetTempPath()) ('musicserver_recommendation_' + [guid]::NewGuid().ToString('N'))
-    $cfg = New-MusicServerConfig -Root $root
+    $script:RecommendationOldAppHome = [Environment]::GetEnvironmentVariable('MUSICSERVER_APP_HOME', 'Process')
+    [Environment]::SetEnvironmentVariable('MUSICSERVER_APP_HOME', $root)
+    $cfg = New-MusicServerConfig -Root $ProjectRoot -AppHome $root
     Initialize-MusicServerState -Config $cfg
     $db = Join-Path $cfg.StateDir 'musicserver.db'
     Initialize-MusicServerDatabase -DbPath $db -SqliteExe $cfg.Sqlite
@@ -137,11 +139,13 @@ Describe 'MusicServer Hardening v2 - Recommendation State' {
 
     AfterEach {
         Stop-RecommendationTestApi
+        [Environment]::SetEnvironmentVariable('MUSICSERVER_APP_HOME', $script:RecommendationOldAppHome)
         if ($script:RecommendationTestRoot -and (Test-Path -LiteralPath $script:RecommendationTestRoot)) {
             Remove-Item -LiteralPath $script:RecommendationTestRoot -Recurse -Force -ErrorAction SilentlyContinue
         }
         $script:RecommendationTestRoot = $null
         $script:RecommendationTestConfig = $null
+        $script:RecommendationOldAppHome = $null
     }
 
     It 'assembles recommendations with four reads and preserves latest feedback and missing wanted rows' {

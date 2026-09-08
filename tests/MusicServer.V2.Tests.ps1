@@ -10,7 +10,7 @@ Describe 'MusicServer Hardening v2 - SQLite State Layer' {
         Import-Module (Join-Path $ProjectRoot 'MusicServer.Database.psm1') -Force
         Import-Module (Join-Path $ProjectRoot 'MusicServer.State.psm1') -Force
         Import-Module (Join-Path $ProjectRoot 'MusicServer.Migration.psm1') -Force
-        $Config = New-MusicServerConfig -Root $TestRoot
+        $Config = New-MusicServerConfig -Root $ProjectRoot -AppHome $TestRoot
         Initialize-MusicServerState -Config $Config
         $dbPath = Join-Path $Config.StateDir 'musicserver.db'
         $sqlite = & $Config.Sqlite --version 2>$null

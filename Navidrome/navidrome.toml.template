@@ -1,0 +1,15 @@
+# Template for the generated APP_HOME\Navidrome\navidrome.toml.
+# MusicServer creates the concrete file on first runtime initialization.
+# Do not replace these tokens with a checkout-specific path in Git.
+
+MusicFolder = "__MUSICSERVER_MUSIC_DIR__"
+DataFolder = "__MUSICSERVER_NAVIDROME_DATA_DIR__"
+LogLevel = 'info'
+LogFile = "__MUSICSERVER_NAVIDROME_LOG_FILE__"
+Port = 4533
+Address = '0.0.0.0'
+Scanner.Schedule = '@every 6h'
+Scanner.PurgeMissing = 'full'
+AutoImportPlaylists = true
+LyricsPriority = '.lrc,.txt,embedded'
+EnableInsightsCollector = false

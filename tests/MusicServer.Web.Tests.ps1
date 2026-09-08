@@ -16,7 +16,11 @@ Describe 'MusicServer web playback safeguards' -Tag @('RequiresLocalRuntime') {
     }
 
     It 'does not expose a known low-confidence lyric match as valid' {
-        $report = Import-Csv -LiteralPath (Join-Path $PSScriptRoot '..\lyrics_report.csv') |
+        $appHome = [Environment]::GetEnvironmentVariable('MUSICSERVER_APP_HOME', 'Process')
+        if ([string]::IsNullOrWhiteSpace($appHome)) {
+            $appHome = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)) 'com.musicserver.desktop'
+        }
+        $report = Import-Csv -LiteralPath (Join-Path $appHome 'output\lyrics_report.csv') |
             Where-Object { $_.File -eq $suspectFile } | Select-Object -First 1
         $report.Status | Should Be 'SUSPECT'
         $lyrics = Invoke-RestMethod -Uri "$uiRoot$($suspect.lyrics_url)" -TimeoutSec 10
@@ -113,7 +117,9 @@ Describe 'MusicServer web UI safeguards' {
 
     It 'quality-gates local lrc files using lyrics_report before exposing them' {
         $launcher = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\start_musicserver_ui.ps1') -Raw -Encoding UTF8
-        $launcher | Should Match 'lyrics_report\.csv'
+        $launcher | Should Match 'LyricsReportPath'
+        $launcher | Should Match 'Config\.LyricsReport'
+        $launcher | Should Match 'output'
         $launcher | Should Match 'function Get-LyricQuality'
         $launcher | Should Match 'SUSPECT'
         $launcher | Should Match 'available.:false'

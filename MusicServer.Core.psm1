@@ -22,24 +22,106 @@ function Resolve-MusicServerExecutable {
     return [string]$Commands[0]
 }
 
+function Resolve-MusicServerAppHome {
+    param([string]$ConfiguredPath = '')
+
+    $candidate = $ConfiguredPath
+    if ([string]::IsNullOrWhiteSpace($candidate)) {
+        $candidate = [Environment]::GetEnvironmentVariable('MUSICSERVER_APP_HOME', 'Process')
+    }
+    if (-not [string]::IsNullOrWhiteSpace($candidate)) {
+        return [IO.Path]::GetFullPath($candidate)
+    }
+
+    $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+    if ([string]::IsNullOrWhiteSpace($localAppData)) {
+        $localAppData = [Environment]::GetEnvironmentVariable('LOCALAPPDATA', 'Process')
+    }
+    if ([string]::IsNullOrWhiteSpace($localAppData)) {
+        return [IO.Path]::GetFullPath((Join-Path ([IO.Path]::GetTempPath()) 'com.musicserver.desktop'))
+    }
+    return [IO.Path]::GetFullPath((Join-Path $localAppData 'com.musicserver.desktop'))
+}
+
+function ConvertTo-MusicServerTomlString {
+    param([Parameter(Mandatory)][string]$Value)
+    return $Value.Replace('\', '\\').Replace('"', '\"')
+}
+
+function Initialize-MusicServerNavidromeConfig {
+    param([Parameter(Mandatory)][psobject]$Config)
+
+    $parent = Split-Path -Parent $Config.NdConfig
+    if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
+        New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    }
+    if (Test-Path -LiteralPath $Config.NdConfig -PathType Leaf) { return $false }
+
+    $music = ConvertTo-MusicServerTomlString -Value ([string]$Config.MusicDir)
+    $data = ConvertTo-MusicServerTomlString -Value ([string]$Config.NavidromeDataDir)
+    $log = ConvertTo-MusicServerTomlString -Value ([string]$Config.NavidromeLogFile)
+    $templatePath = Join-Path $Config.Root 'Navidrome\navidrome.toml.template'
+    if (Test-Path -LiteralPath $templatePath -PathType Leaf) {
+        $content = (Get-Content -LiteralPath $templatePath -Raw -Encoding UTF8).
+            Replace('__MUSICSERVER_MUSIC_DIR__', $music).
+            Replace('__MUSICSERVER_NAVIDROME_DATA_DIR__', $data).
+            Replace('__MUSICSERVER_NAVIDROME_LOG_FILE__', $log)
+    } else {
+        $content = @"
+# Generated runtime configuration. Keep this file in APP_HOME, not in the repository.
+MusicFolder = "$music"
+DataFolder = "$data"
+LogLevel = 'info'
+LogFile = "$log"
+Port = 4533
+Address = '0.0.0.0'
+Scanner.Schedule = '@every 6h'
+Scanner.PurgeMissing = 'full'
+AutoImportPlaylists = true
+LyricsPriority = '.lrc,.txt,embedded'
+EnableInsightsCollector = false
+"@
+    }
+    [IO.File]::WriteAllText($Config.NdConfig, $content.TrimStart(), (New-Object Text.UTF8Encoding($false)))
+    return $true
+}
+
 function New-MusicServerConfig {
-    param([string]$Root = $PSScriptRoot)
+    param(
+        [string]$Root = $PSScriptRoot,
+        [string]$AppHome = ''
+    )
 
     $rootPath = [System.IO.Path]::GetFullPath($Root)
+    $appHomePath = Resolve-MusicServerAppHome -ConfiguredPath $AppHome
+    $dataDir = Join-Path $appHomePath 'DailyMix_data'
+    $stateDir = Join-Path $dataDir 'state'
+    $navidromeDir = Join-Path $appHomePath 'Navidrome'
+    $navidromeDataDir = Join-Path $navidromeDir 'Data'
     return [pscustomobject]@{
-        Root       = $rootPath
-        MusicDir   = Join-Path $rootPath 'Music'
-        DailyDir   = Join-Path $rootPath 'Music\DailyMix'
-        DataDir    = Join-Path $rootPath 'DailyMix_data'
-        StateDir   = Join-Path $rootPath 'DailyMix_data\state'
-        NdDb       = Join-Path $rootPath 'Navidrome\Data\navidrome.db'
-        NdExe      = Join-Path $rootPath 'Navidrome\bin\navidrome.exe'
-        NdConfig   = Join-Path $rootPath 'Navidrome\navidrome.toml'
-        YtDlp      = Resolve-MusicServerExecutable -EnvironmentVariable 'MUSICSERVER_YTDLP' -Commands @('yt-dlp.exe','yt-dlp') -FallbackPaths @('C:\Users\dell\anaconda3\Scripts\yt-dlp.exe')
-        FFprobe    = Resolve-MusicServerExecutable -EnvironmentVariable 'MUSICSERVER_FFPROBE' -Commands @('ffprobe.exe','ffprobe') -FallbackPaths @('C:\Users\dell\AppData\Local\Microsoft\WinGet\Links\ffprobe.exe')
-        FFmpeg     = Resolve-MusicServerExecutable -EnvironmentVariable 'MUSICSERVER_FFMPEG' -Commands @('ffmpeg.exe','ffmpeg') -FallbackPaths @('C:\Users\dell\AppData\Local\Microsoft\WinGet\Links\ffmpeg.exe')
-        CookieFile = Join-Path $rootPath 'cookies.txt'
-        Sqlite     = Resolve-MusicServerExecutable -EnvironmentVariable 'MUSICSERVER_SQLITE' -Commands @('sqlite3.exe','sqlite3') -FallbackPaths @('C:\Users\dell\anaconda3\Library\bin\sqlite3.exe')
+        Root                = $rootPath
+        AppHome             = $appHomePath
+        AppHomeDir          = $appHomePath
+        MusicDir            = Join-Path $appHomePath 'Music'
+        DailyDir            = Join-Path $appHomePath 'Music\DailyMix'
+        DataDir             = $dataDir
+        StateDir            = $stateDir
+        LogDir              = Join-Path $appHomePath 'logs'
+        BackupDir           = Join-Path $appHomePath 'backups'
+        OutputDir           = Join-Path $appHomePath 'output'
+        SecretsDir          = Join-Path $appHomePath 'secrets'
+        LyricsReport        = Join-Path $appHomePath 'output\lyrics_report.csv'
+        NavidromeDir        = $navidromeDir
+        NavidromeDataDir    = $navidromeDataDir
+        NavidromeLogFile    = Join-Path $appHomePath 'logs\navidrome.log'
+        NdDb                = Join-Path $navidromeDataDir 'navidrome.db'
+        NdExe               = Resolve-MusicServerExecutable -EnvironmentVariable 'MUSICSERVER_NAVIDROME' -Commands @('navidrome.exe','navidrome') -FallbackPaths @(Join-Path $rootPath 'Navidrome\bin\navidrome.exe')
+        NdConfig            = Join-Path $navidromeDir 'navidrome.toml'
+        YtDlp               = Resolve-MusicServerExecutable -EnvironmentVariable 'MUSICSERVER_YTDLP' -Commands @('yt-dlp.exe','yt-dlp')
+        FFprobe             = Resolve-MusicServerExecutable -EnvironmentVariable 'MUSICSERVER_FFPROBE' -Commands @('ffprobe.exe','ffprobe')
+        FFmpeg              = Resolve-MusicServerExecutable -EnvironmentVariable 'MUSICSERVER_FFMPEG' -Commands @('ffmpeg.exe','ffmpeg')
+        CookieFile          = Join-Path $appHomePath 'secrets\cookies.txt'
+        Sqlite              = Resolve-MusicServerExecutable -EnvironmentVariable 'MUSICSERVER_SQLITE' -Commands @('sqlite3.exe','sqlite3')
     }
 }
 
@@ -49,19 +131,23 @@ function Initialize-MusicServerState {
         [switch]$SkipLibrary
     )
 
-    $paths = @($Config.DataDir, $Config.StateDir)
+    $paths = @(
+        $Config.DataDir, $Config.StateDir, $Config.LogDir, $Config.BackupDir,
+        $Config.OutputDir, $Config.SecretsDir, $Config.NavidromeDir, $Config.NavidromeDataDir
+    )
     if (-not $SkipLibrary) { $paths += @($Config.MusicDir, $Config.DailyDir) }
     foreach ($path in $paths) {
         if (-not (Test-Path -LiteralPath $path)) {
             New-Item -ItemType Directory -Force -Path $path | Out-Null
         }
     }
+    Initialize-MusicServerNavidromeConfig -Config $Config | Out-Null
 }
 
 function Initialize-MusicServerLibrary {
     param([Parameter(Mandatory)][psobject]$Config)
 
-    $defaultDir = Get-DefaultMusicDir -Root $Config.Root
+    $defaultDir = Get-DefaultMusicDir -AppHome $Config.AppHome
     $effective = [IO.Path]::GetFullPath([string]$Config.MusicDir)
     $isDefault = ($effective -eq [IO.Path]::GetFullPath($defaultDir))
 
@@ -454,8 +540,8 @@ function Get-NavidromeSongIdForPath {
 }
 
 function Get-DefaultMusicDir {
-    param([Parameter(Mandatory)][string]$Root)
-    return [IO.Path]::GetFullPath((Join-Path $Root 'Music'))
+    param([Parameter(Mandatory)][string]$AppHome)
+    return [IO.Path]::GetFullPath((Join-Path $AppHome 'Music'))
 }
 
 function Get-MusicServerLocalIdentity {

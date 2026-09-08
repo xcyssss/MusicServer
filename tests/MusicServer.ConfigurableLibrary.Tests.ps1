@@ -10,7 +10,7 @@ Describe 'Configurable music library' {
         $script:OldMusicDirEnv = [Environment]::GetEnvironmentVariable('MUSICSERVER_MUSIC_DIR')
         [Environment]::SetEnvironmentVariable('MUSICSERVER_MUSIC_DIR', $null)
         $script:Root = Join-Path ([IO.Path]::GetTempPath()) ('musicserver_library_' + [guid]::NewGuid().ToString('N'))
-        $script:Config = New-MusicServerConfig -Root $script:Root
+        $script:Config = New-MusicServerConfig -Root $ProjectRoot -AppHome $script:Root
         Initialize-MusicServerState -Config $script:Config -SkipLibrary
         Initialize-MusicServerDatabase -DbPath (Join-Path $script:Config.StateDir 'musicserver.db') -SqliteExe $script:Config.Sqlite
         Initialize-MusicServerSchema
@@ -22,14 +22,14 @@ Describe 'Configurable music library' {
     }
 
     It 'uses the immutable default when no override is configured' {
-        $expected = Get-DefaultMusicDir -Root $script:Config.Root
+        $expected = Get-DefaultMusicDir -AppHome $script:Config.AppHome
         (Resolve-ConfiguredMusicDir -Config $script:Config) | Should Be $expected
     }
 
     It 'persists a custom path and restores it in a fresh config object' {
         $custom = Join-Path $script:Root 'external library'
         Set-AppSettingDb -Key 'music_library_path' -Value $custom
-        $fresh = New-MusicServerConfig -Root $script:Root
+        $fresh = New-MusicServerConfig -Root $ProjectRoot -AppHome $script:Root
         (Resolve-ConfiguredMusicDir -Config $fresh) | Should Be ([IO.Path]::GetFullPath($custom))
     }
 
@@ -40,7 +40,7 @@ Describe 'Configurable music library' {
         $script:Config.MusicDir | Should Be ([IO.Path]::GetFullPath($custom))
         Remove-AppSettingDb -Key 'music_library_path'
         Apply-ConfiguredMusicDir -Config $script:Config | Out-Null
-        $script:Config.MusicDir | Should Be (Get-DefaultMusicDir -Root $script:Config.Root)
+        $script:Config.MusicDir | Should Be (Get-DefaultMusicDir -AppHome $script:Config.AppHome)
         $script:Config.DailyDir | Should Be (Join-Path $script:Config.MusicDir 'DailyMix')
     }
 
@@ -64,7 +64,7 @@ Describe 'Configurable music library' {
         Set-AppSettingDb -Key 'music_library_path' -Value $custom
         Apply-ConfiguredMusicDir -Config $script:Config | Out-Null
         (Initialize-MusicServerLibrary -Config $script:Config) | Should Be $false
-        (Test-Path -LiteralPath (Get-DefaultMusicDir -Root $script:Config.Root)) | Should Be $false
+        (Test-Path -LiteralPath (Get-DefaultMusicDir -AppHome $script:Config.AppHome)) | Should Be $false
         $script:Config.MusicDir | Should Be ([IO.Path]::GetFullPath($custom))
     }
 
@@ -77,7 +77,7 @@ Describe 'Configurable music library' {
     }
 
     It 'changing the effective path does not move or delete existing music' {
-        $default = Get-DefaultMusicDir -Root $script:Config.Root
+        $default = Get-DefaultMusicDir -AppHome $script:Config.AppHome
         New-Item -ItemType Directory -Force -Path $default | Out-Null
         $song = Join-Path $default 'keep-me.mp3'
         Set-Content -LiteralPath $song -Value 'audio' -Encoding Ascii

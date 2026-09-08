@@ -1,6 +1,6 @@
 # MusicServer Dependency Audit Report
 
-> **Audit date:** 2026-09-06
+> **Audit date:** 2026-09-06; APP_HOME separation follow-up: 2026-09-08
 > **Scope:** Full project dependency analysis, file classification, dead code detection, directory structure recommendation.
 > **Method:** Static analysis of all `.ps1`, `.psm1`, `.rs`, `.toml`, `.json`, `.yml`, `.cjs` files; cross-reference of Import-Module, dot-source, function call chains, CI workflows, Tauri runtime staging, and NSIS packaging.
 
@@ -48,12 +48,13 @@ External Services:
   yt-dlp + ffmpeg/ffprobe                ← used by Providers for downloads
   Netease Music API                      ← used by daily_recommend, wanted_worker
 
-Data Directories (NOT source code):
-  Music/              ← local music library (user data)
-  DailyMix_data/      ← state + legacy CSV data (user/runtime data)
-  Navidrome/          ← Navidrome server + its database
-  logs/               ← runtime logs (generated)
-  cookies.txt         ← authentication cookies (user data)
+Persistent Data (outside the repository, under APP_HOME unless MusicDir is external):
+  <APP_HOME>\Music\                  ← default local music library
+  <APP_HOME>\DailyMix_data\          ← state + legacy CSV compatibility data
+  <APP_HOME>\Navidrome\Data\         ← Navidrome persistent database/cache
+  <APP_HOME>\logs\                   ← runtime logs
+  <APP_HOME>\backups\                ← migration/runtime backups
+  <APP_HOME>\secrets\cookies.txt     ← authentication cookies
 ```
 
 ---
@@ -151,18 +152,18 @@ Data Directories (NOT source code):
 | `README.md` | DEV_INFRA | KEEP |
 | `.editorconfig` | DEV_INFRA | KEEP |
 | `.gitignore` | DEV_INFRA | KEEP |
-| `cookies.txt` | USER_DATA | DO_NOT_TOUCH (gitignored) |
-| `lyrics_report.csv` | GENERATED | DO_NOT_TOUCH (gitignored) |
+| `<APP_HOME>\secrets\cookies.txt` | USER_DATA | DO_NOT_TOUCH (outside repository) |
+| `<APP_HOME>\output\lyrics_report.csv` | GENERATED | DO_NOT_TOUCH (outside repository) |
 | `*.lnk.before-*` | HISTORICAL | DELETE_AFTER_VERIFICATION |
 
 ### Data/Generated Directories
 
 | Path | Category | Recommendation |
 |------|----------|----------------|
-| `Music/` | USER_DATA | DO_NOT_TOUCH (gitignored) |
-| `DailyMix_data/` | USER_DATA | DO_NOT_TOUCH (gitignored) |
-| `Navidrome/` | USER_DATA | DO_NOT_TOUCH (gitignored) |
-| `logs/` | GENERATED | DO_NOT_TOUCH (gitignored) |
+| `<APP_HOME>\Music\` / configured `MusicDir` | USER_DATA | DO_NOT_TOUCH (outside repository) |
+| `<APP_HOME>\DailyMix_data\` | USER_DATA | DO_NOT_TOUCH (outside repository) |
+| `<APP_HOME>\Navidrome\Data\` | USER_DATA | DO_NOT_TOUCH (outside repository) |
+| `<APP_HOME>\logs\` | GENERATED | DO_NOT_TOUCH (outside repository) |
 | `artifacts/` | GENERATED | DO_NOT_TOUCH (gitignored) |
 | `backups/` | GENERATED | DO_NOT_TOUCH (gitignored) |
 | `output/` | GENERATED | DO_NOT_TOUCH (gitignored) |
@@ -398,12 +399,12 @@ MusicServer/
 ├── README.md
 ├── .editorconfig
 ├── .gitignore
-└── cookies.txt                        # (gitignored, user data)
+└── Navidrome\navidrome.toml.template # portable source template only
 ```
 
 **Why NOT move core modules to `src/powershell/`:**
 - All 4 inter-module imports use `Import-Module (Join-Path $PSScriptRoot ...)` — moving breaks every one.
-- `MusicServer.Core.psm1` defaults `$Root = $PSScriptRoot` for path resolution — moving silently corrupts all data directory paths.
+- `MusicServer.Core.psm1` keeps `$Root = $PSScriptRoot` for source/runtime imports, while APP_HOME is resolved independently and is never inferred from the checkout.
 - 20+ consumer scripts (5 production + 12 tests + 4 modules) hard-code project-root-relative import paths.
 - `src-tauri/resources/runtime/` has parallel copies that must stay in sync.
 - Risk/benefit ratio does not justify the move.
@@ -507,7 +508,7 @@ Any actual cleanup PR must satisfy ALL of:
 [ ] API reachable (/health → ok)
 [ ] SQLite state initializes
 [ ] APP shutdown cleans owned services
-[ ] local music/user data untouched (Music/, DailyMix_data/, Navidrome/, cookies.txt, *.db)
+[ ] local music/user data untouched (APP_HOME and configured MusicDir are outside the checkout)
 ```
 
 ---
@@ -550,4 +551,4 @@ The **9 PowerShell scripts/modules** staged by `prepare_tauri_runtime.ps1` (4 sc
 - `web/` directory
 - `src-tauri/` directory structure
 - `MusicServer.Migration.psm1` (deprecated but still needed by 4 test files)
-- Any `Music/`, `DailyMix_data/`, `Navidrome/`, `cookies.txt`, `*.db`, `logs/` content
+- Any user data under APP_HOME or configured MusicDir; repository copies of these names are disposable leftovers

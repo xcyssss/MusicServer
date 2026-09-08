@@ -54,9 +54,6 @@ if (-not $SqliteExe -or -not (Test-Path -LiteralPath $SqliteExe)) {
     else {
         $cmd = Get-Command sqlite3 -ErrorAction SilentlyContinue
         if ($cmd) { $SqliteExe = $cmd.Source }
-        elseif (Test-Path -LiteralPath 'C:\Users\dell\anaconda3\Library\bin\sqlite3.exe') {
-            $SqliteExe = 'C:\Users\dell\anaconda3\Library\bin\sqlite3.exe'
-        }
     }
 }
 if (-not (Test-Path -LiteralPath $SqliteExe) -and -not (Get-Command $SqliteExe -ErrorAction SilentlyContinue)) {
@@ -893,7 +890,7 @@ while ($true) {
         }
         elseif ($method -eq 'GET' -and $path -eq '/api/settings/music-library') {
             $currentPath = $Config.MusicDir
-            $defaultPath = Get-DefaultMusicDir -Root $Config.Root
+            $defaultPath = Get-DefaultMusicDir -AppHome $Config.AppHome
             $isDefault = ($currentPath -eq $defaultPath)
             $available = (Test-Path -LiteralPath $currentPath -PathType Container)
             $source = if ($env:MUSICSERVER_MUSIC_DIR) { 'environment' } elseif (-not $isDefault) { 'database' } else { 'default' }
@@ -947,7 +944,7 @@ while ($true) {
         }
         elseif ($method -eq 'DELETE' -and $path -eq '/api/settings/music-library') {
             $previousPath = $Config.MusicDir
-            $defaultPath = Get-DefaultMusicDir -Root $Config.Root
+            $defaultPath = Get-DefaultMusicDir -AppHome $Config.AppHome
             Remove-AppSettingDb -Key 'music_library_path'
             Apply-ConfiguredMusicDir -Config $Config
             try { Sync-NavidromeMusicFolder -NdConfigPath $Config.NdConfig -NewMusicFolder $Config.MusicDir | Out-Null } catch {}

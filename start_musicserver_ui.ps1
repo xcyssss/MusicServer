@@ -21,15 +21,15 @@ $Root = $PSScriptRoot
 $WebRoot = Join-Path $Root 'web'
 $ApiScript = Join-Path $Root 'music_api.ps1'
 $WorkerScript = Join-Path $Root 'wanted_worker.ps1'
-$LogRoot = Join-Path $Root 'logs'
-$LyricsReportPath = Join-Path $Root 'lyrics_report.csv'
-$UiLog = Join-Path $LogRoot 'musicserver-ui.log'
-$ApiOutLog = Join-Path $LogRoot 'musicserver-api.stdout.log'
-$ApiErrLog = Join-Path $LogRoot 'musicserver-api.stderr.log'
-$WorkerOutLog = Join-Path $LogRoot 'musicserver-worker.stdout.log'
-$WorkerErrLog = Join-Path $LogRoot 'musicserver-worker.stderr.log'
-$UiHeartbeatFile = Join-Path $LogRoot 'musicserver-ui.heartbeat'
-$WatchdogLog = Join-Path $LogRoot 'musicserver-ui.watchdog.log'
+$LogRoot = $null
+$LyricsReportPath = $null
+$UiLog = $null
+$ApiOutLog = $null
+$ApiErrLog = $null
+$WorkerOutLog = $null
+$WorkerErrLog = $null
+$UiHeartbeatFile = $null
+$WatchdogLog = $null
 $ApiProcess = $null
 $StartedApi = $false
 $WorkerProcess = $null
@@ -49,10 +49,6 @@ $script:CurrentRequest = ''
 $script:UiLibraryCache = $null
 $script:UiLibraryCacheAt = [DateTime]::MinValue
 $script:NextHeartbeatAt = [DateTime]::MinValue
-
-if (-not (Test-Path -LiteralPath $LogRoot)) {
-    New-Item -ItemType Directory -Force -Path $LogRoot | Out-Null
-}
 
 function Write-UiLog {
     param([string]$Message)
@@ -136,7 +132,9 @@ function Test-WorkerReady {
         if (-not (Test-Path -LiteralPath $stateDb -PathType Leaf)) { return $false }
         # The queue mutex is per-named-mutex, not per-process: an existing healthy
         # worker holds 'MusicServer_WantedWorker', so we probe that instead of a port.
-        $mutex = [Threading.Mutex]::new($false, 'MusicServer_WantedWorker')
+        $workerMutexName = [Environment]::GetEnvironmentVariable('MUSICSERVER_WORKER_MUTEX_NAME', 'Process')
+        if ([string]::IsNullOrWhiteSpace($workerMutexName)) { $workerMutexName = 'MusicServer_WantedWorker' }
+        $mutex = [Threading.Mutex]::new($false, $workerMutexName)
         try {
             $owned = $mutex.WaitOne(0)
             if ($owned) { $mutex.ReleaseMutex() }
@@ -173,6 +171,19 @@ Import-Module (Join-Path $Root 'MusicServer.Http.psm1') -Force
 Import-Module (Join-Path $Root 'MusicServer.Identity.psm1') -Force
 $script:BuildMarker = Get-MusicServerBuildIdentity -Root $Root
 $Config = New-MusicServerConfig -Root $Root
+$LogRoot = $Config.LogDir
+$LyricsReportPath = $Config.LyricsReport
+$UiLog = Join-Path $LogRoot 'musicserver-ui.log'
+$ApiOutLog = Join-Path $LogRoot 'musicserver-api.stdout.log'
+$ApiErrLog = Join-Path $LogRoot 'musicserver-api.stderr.log'
+$WorkerOutLog = Join-Path $LogRoot 'musicserver-worker.stdout.log'
+$WorkerErrLog = Join-Path $LogRoot 'musicserver-worker.stderr.log'
+$UiHeartbeatFile = Join-Path $LogRoot 'musicserver-ui.heartbeat'
+$WatchdogLog = Join-Path $LogRoot 'musicserver-ui.watchdog.log'
+Initialize-MusicServerState -Config $Config -SkipLibrary
+if (-not (Test-Path -LiteralPath $LogRoot -PathType Container)) {
+    New-Item -ItemType Directory -Force -Path $LogRoot | Out-Null
+}
 # Resolve configured music dir from SQLite if available (DB may already exist from a prior run)
 try {
     $uiDbPath = Join-Path $Config.StateDir 'musicserver.db'
@@ -309,7 +320,7 @@ function Get-UiLibrary {
             if (-not [System.IO.Path]::IsPathRooted($file)) {
                 $musicRoot = @($Config.MusicDir | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Container) } | Select-Object -First 1)
                 if ($musicRoot.Count -gt 0) { $file = Join-Path ([string]$musicRoot[0]) $file }
-                else { $file = Join-Path $Root $file }
+                else { continue }
             }
             $file = [System.IO.Path]::GetFullPath($file)
         } catch { continue }

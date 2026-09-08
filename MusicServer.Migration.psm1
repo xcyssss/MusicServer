@@ -448,7 +448,7 @@ function Invoke-MusicServerMigration {
         (Join-Path $Config.DataDir 'accepted.csv'),
         (Join-Path $Config.DataDir 'rejected.csv'),
         (Join-Path $Config.DataDir 'history.csv'),
-        (Join-Path $Config.Root 'lyrics_report.csv')
+        $Config.LyricsReport
     )
     $hasLegacySource = $false
     foreach ($sourcePath in $legacySources) {
@@ -479,7 +479,7 @@ function Invoke-MusicServerMigration {
     $acceptedRows = @(Read-LegacyCsvSafe -Path (Join-Path $Config.DataDir 'accepted.csv') -Label 'accepted.csv' -Report $report)
     $rejectedRows = @(Read-LegacyCsvSafe -Path (Join-Path $Config.DataDir 'rejected.csv') -Label 'rejected.csv' -Report $report)
     $historyCsvRows = @(Read-LegacyCsvSafe -Path (Join-Path $Config.DataDir 'history.csv') -Label 'history.csv' -Report $report)
-    $lyricsRows = @(Read-LegacyCsvSafe -Path (Join-Path $Config.Root 'lyrics_report.csv') -Label 'lyrics_report.csv' -Report $report)
+    $lyricsRows = @(Read-LegacyCsvSafe -Path $Config.LyricsReport -Label 'lyrics_report.csv' -Report $report)
     $report.source_counts = @{
         tracks = $jsonTracks.Count; recommendations = $jsonRecs.Count; history = $jsonHistory.Count; wanted = $jsonWanted.Count; providers = $jsonProviders.Count; events = $legacyEvents.Count
         accepted = $acceptedRows.Count; rejected = $rejectedRows.Count; history_csv = $historyCsvRows.Count; lyrics_fallback = $lyricsRows.Count
@@ -591,7 +591,7 @@ function Invoke-MusicServerMigration {
         (Join-Path $Config.StateDir 'recommendation_history.json'), (Join-Path $Config.StateDir 'wanted.json'),
         (Join-Path $Config.StateDir 'providers.json'), (Join-Path $Config.StateDir 'events.jsonl'),
         (Join-Path $Config.DataDir 'accepted.csv'), (Join-Path $Config.DataDir 'rejected.csv'), (Join-Path $Config.DataDir 'history.csv'),
-        (Join-Path $Config.Root 'lyrics_report.csv')
+        $Config.LyricsReport
     )) {
         if (Test-Path -LiteralPath $src) { Copy-Item -LiteralPath $src -Destination (Join-Path $backupDir ([IO.Path]::GetFileName($src))) -Force }
     }

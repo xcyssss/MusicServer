@@ -15,7 +15,9 @@ Describe 'Installed APP shutdown outcome' {
         Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
         $process = [pscustomobject]@{ Id = 123; HasExited = $false }
         $process | Add-Member ScriptMethod WaitForExit { param($milliseconds) return $false }
-        { Stop-MusicServerSmokeDesktop -Process $process } | Should Throw
+        $threw = $false
+        try { Stop-MusicServerSmokeDesktop -Process $process } catch { $threw = $true }
+        $threw | Should Be $true
     }
 
     It 'does not target an already exited APP PID' {
@@ -53,7 +55,7 @@ Describe 'MusicServer Tauri desktop shell' {
         $smoke | Should Match 'ServicesStopped'
         $tauriConf = Get-Content -LiteralPath (Join-Path $ProjectRoot 'src-tauri\tauri.conf.json') -Raw
         $tauriConf | Should Match '"withGlobalTauri"\s*:\s*true'
-        $web | Should Match 'window\.__TAURI__\?\.dialog'
+        $main | Should Match 'app\.dialog\(\)'
         $web | Should Match 'window\.__TAURI__\?\.core'
 
         # Production navigates the Tauri WebView to the local PowerShell HTTP UI,
@@ -78,6 +80,7 @@ Describe 'MusicServer Tauri desktop shell' {
         @($config.bundle.resources) -join ' ' | Should Match 'resources/runtime'
         $main | Should Not Match 'CARGO_MANIFEST_DIR'
         $main | Should Match 'LOCALAPPDATA'
+        $main | Should Not Match 'find_development_checkout|historical checkout|executable ancestry'
         $main | Should Match 'stage_runtime'
         $main | Should Match 'MUSICSERVER_SQLITE'
         $prepare | Should Match 'start_musicserver_ui\.ps1'

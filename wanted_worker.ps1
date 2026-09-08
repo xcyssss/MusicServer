@@ -33,7 +33,9 @@ Initialize-MusicServerDatabase -DbPath (Join-Path $Config.StateDir 'musicserver.
 Initialize-MusicServerSchema
 Apply-ConfiguredMusicDir -Config $Config
 Initialize-MusicServerLibrary -Config $Config | Out-Null
-$WorkerMutex = [Threading.Mutex]::new($false, 'MusicServer_WantedWorker')
+$workerMutexName = [Environment]::GetEnvironmentVariable('MUSICSERVER_WORKER_MUTEX_NAME', 'Process')
+if ([string]::IsNullOrWhiteSpace($workerMutexName)) { $workerMutexName = 'MusicServer_WantedWorker' }
+$WorkerMutex = [Threading.Mutex]::new($false, $workerMutexName)
 $OwnsWorkerMutex = $false
 try {
     $OwnsWorkerMutex = $WorkerMutex.WaitOne(0)

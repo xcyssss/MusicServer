@@ -14,7 +14,7 @@ Import-Module (Join-Path $ProjectRoot 'MusicServer.Migration.psm1') -Force
 
 function New-LegacyRetirementScratch {
     $root = Join-Path ([IO.Path]::GetTempPath()) ('musicserver_legacy_retirement_' + [guid]::NewGuid().ToString('N'))
-    $config = New-MusicServerConfig -Root $root
+    $config = New-MusicServerConfig -Root $ProjectRoot -AppHome $root
     Initialize-MusicServerState -Config $config
     $db = Join-Path $config.StateDir 'musicserver.db'
     Initialize-MusicServerDatabase -DbPath $db -SqliteExe $config.Sqlite
@@ -31,8 +31,17 @@ function Invoke-LegacyRetirementWorker {
     if ($DryRun) { $args += '-DryRun' }
     $args += @('-Root',$Root)
     $shell = if ($PSVersionTable.PSEdition -eq 'Core') { Get-Command pwsh -ErrorAction Stop } else { Get-Command powershell.exe -ErrorAction Stop }
-    $process = Start-Process -FilePath $shell.Source `
-        -ArgumentList $args -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput $output -RedirectStandardError $error
+    $oldAppHome = [Environment]::GetEnvironmentVariable('MUSICSERVER_APP_HOME', 'Process')
+    $oldWorkerMutexName = [Environment]::GetEnvironmentVariable('MUSICSERVER_WORKER_MUTEX_NAME', 'Process')
+    [Environment]::SetEnvironmentVariable('MUSICSERVER_APP_HOME', $Root, 'Process')
+    [Environment]::SetEnvironmentVariable('MUSICSERVER_WORKER_MUTEX_NAME', ('MusicServer_WantedWorker_Test_' + (Split-Path -Leaf $Root)), 'Process')
+    try {
+        $process = Start-Process -FilePath $shell.Source `
+            -ArgumentList $args -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput $output -RedirectStandardError $error
+    } finally {
+        [Environment]::SetEnvironmentVariable('MUSICSERVER_APP_HOME', $oldAppHome, 'Process')
+        [Environment]::SetEnvironmentVariable('MUSICSERVER_WORKER_MUTEX_NAME', $oldWorkerMutexName, 'Process')
+    }
     $stdout = if (Test-Path -LiteralPath $output) { Get-Content -LiteralPath $output -Raw -Encoding UTF8 } else { '' }
     $stderr = if (Test-Path -LiteralPath $error) { Get-Content -LiteralPath $error -Raw -Encoding UTF8 } else { '' }
     return [pscustomobject]@{ ExitCode = $process.ExitCode; Stdout = $stdout; Stderr = $stderr }

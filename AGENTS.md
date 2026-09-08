@@ -77,7 +77,7 @@ Installed builds default to:
 for the writable runtime/data home. `MUSICSERVER_APP_HOME` can override it.
 The music library is independently configurable. Runtime resolution order is `MUSICSERVER_MUSIC_DIR` -> SQLite `app_settings.music_library_path` -> `<APP_HOME>\Music`. All runtime entry points must use the same resolved `Config.MusicDir`, and `Config.DailyDir` must always be `<MusicDir>\DailyMix`. A missing configured custom path is an unavailable library, not a signal to fall back to or create the default library. Never move/copy/delete user music when changing this setting. Adjacent `Song.lrc` remains the lyric contract for `Song.mp3`.
 
-A release EXE built and launched from inside a source checkout may detect that checkout from its own executable ancestry and continue using the existing checkout data. This runtime discovery is allowed because it embeds no compile-time absolute path. **Do not reintroduce `CARGO_MANIFEST_DIR` as runtime state/location.**
+An EXE launched from a source checkout must not detect that checkout and use it as persistent state. APP_HOME is resolved only from `MUSICSERVER_APP_HOME` or the platform default `%LOCALAPPDATA%\com.musicserver.desktop`; repository contents must never change that result. **Do not reintroduce `CARGO_MANIFEST_DIR` as runtime state/location.**
 
 ## Repository layout
 
@@ -220,7 +220,8 @@ After completing a meaningful task, update this `AGENTS.md` checkpoint when the 
 
 - P0 closed: `music_api.ps1` is PS5.1/BOM-safe and provider direct-candidate fallback no longer leaks into unwanted Bilibili search.
 - P1-A closed: CI has a real `desktop-build` gate on a clean Windows runner.
-- P1-B closed: release runtime is bundled, SQLite and the UI watchdog are included, `CARGO_MANIFEST_DIR` runtime dependency is removed, installed runtime uses a writable APP home, and local checkout builds preserve existing checkout data via runtime path discovery.
+- P1-B closed: release runtime is bundled, SQLite and the UI watchdog are included, `CARGO_MANIFEST_DIR` runtime dependency is removed, installed runtime uses a writable APP home, and checkout builds no longer use repository contents as persistent state.
+- Persistent paths now resolve through `MUSICSERVER_APP_HOME` (or the platform default); configurable `MusicDir` remains independent, and generated Navidrome config lives in APP_HOME. `scripts/migrate_to_app_home.ps1` is fail-closed: Navidrome must be stopped, destinations must be absent, copied files are hash-verified before legacy sources are removed, and repository `Music` is never implicitly moved.
 - `desktop-build` produces an NSIS setup executable and uploads `musicserver-windows-installer`.
 - CI performs an installed-app portability smoke with the checkout runtime disabled; it verifies packaged runtime staging, current UI/API markers, SQLite state creation and owned-service shutdown.
 - GitHub Actions run #74 passed `state`, `api`, and `desktop-build`, including the source-independent installed-APP smoke and installer artifact upload.

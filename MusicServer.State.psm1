@@ -1789,7 +1789,7 @@ function Resolve-ConfiguredMusicDir {
     } catch {}
 
     # Priority 3: Default. Config.MusicDir is mutable after Apply-ConfiguredMusicDir.
-    return (Get-DefaultMusicDir -Root $Config.Root)
+    return (Get-DefaultMusicDir -AppHome $Config.AppHome)
 }
 
 function Apply-ConfiguredMusicDir {
@@ -1803,12 +1803,13 @@ function Apply-ConfiguredMusicDir {
     $resolved = Resolve-ConfiguredMusicDir -Config $Config
     $Config.MusicDir = $resolved
     $Config.DailyDir = Join-Path $resolved 'DailyMix'
+    try { Sync-NavidromeMusicFolder -NdConfigPath $Config.NdConfig -NewMusicFolder $resolved | Out-Null } catch {}
     return $resolved
 }
 
 function Get-DefaultMusicDirForConfig {
     param([Parameter(Mandatory)][psobject]$Config)
-    return Get-DefaultMusicDir -Root $Config.Root
+    return Get-DefaultMusicDir -AppHome $Config.AppHome
 }
 
 function Test-MusicLibraryPath {

@@ -6,7 +6,7 @@ Describe 'MusicServer canonical state and queue' {
         New-Item -ItemType Directory -Path $TestRoot -Force | Out-Null
         Import-Module (Join-Path $ProjectRoot 'MusicServer.Core.psm1') -Force
         Import-Module (Join-Path $ProjectRoot 'MusicServer.Providers.psm1') -Force
-        $Config = New-MusicServerConfig -Root $TestRoot
+        $Config = New-MusicServerConfig -Root $ProjectRoot -AppHome $TestRoot
         Initialize-MusicServerState -Config $Config
     }
 
@@ -201,7 +201,7 @@ Describe 'MusicServer canonical state and queue' {
         New-Item -ItemType File -Path $fake -Force | Out-Null
         [Environment]::SetEnvironmentVariable('MUSICSERVER_YTDLP', $fake)
 
-        $customConfig = New-MusicServerConfig -Root $TestRoot
+        $customConfig = New-MusicServerConfig -Root $ProjectRoot -AppHome $TestRoot
         $customConfig.YtDlp | Should Be ([IO.Path]::GetFullPath($fake))
     }
 

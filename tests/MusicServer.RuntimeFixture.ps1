@@ -13,12 +13,14 @@ function New-MusicServerRuntimeFixture {
     Import-Module (Join-Path $ProjectRoot 'MusicServer.Core.psm1') -Force
     Import-Module (Join-Path $ProjectRoot 'MusicServer.Database.psm1') -Force
     Import-Module (Join-Path $ProjectRoot 'MusicServer.State.psm1') -Force
-    $config = New-MusicServerConfig -Root $fixtureRoot
+    $config = New-MusicServerConfig -Root $ProjectRoot -AppHome $fixtureRoot
+    $oldAppHome = [Environment]::GetEnvironmentVariable('MUSICSERVER_APP_HOME', 'Process')
+    [Environment]::SetEnvironmentVariable('MUSICSERVER_APP_HOME', $fixtureRoot)
     Initialize-MusicServerState -Config $config
     $database = Join-Path $config.StateDir 'musicserver.db'
     Initialize-MusicServerDatabase -DbPath $database -SqliteExe $config.Sqlite
     Initialize-MusicServerSchema
-    return [pscustomobject]@{ Root = $fixtureRoot; Parent = $parentRoot; Database = $database; Config = $config; Processes = @(); ApiPort = 0; UiPort = 0; StartupMs = 0 }
+    return [pscustomobject]@{ Root = $fixtureRoot; Parent = $parentRoot; Database = $database; Config = $config; OldAppHome = $oldAppHome; Processes = @(); ApiPort = 0; UiPort = 0; StartupMs = 0 }
 }
 
 function Get-MusicServerFixturePort {
@@ -80,6 +82,7 @@ function Stop-MusicServerFixtureServices {
 function Remove-MusicServerRuntimeFixture {
     param([Parameter(Mandatory)]$Fixture)
     Stop-MusicServerFixtureServices -Fixture $Fixture
+    [Environment]::SetEnvironmentVariable('MUSICSERVER_APP_HOME', $Fixture.OldAppHome)
     $resolved = [IO.Path]::GetFullPath($Fixture.Root)
     if ((Split-Path -Parent $resolved) -ne $Fixture.Parent) { throw "Fixture escaped its parent directory: $resolved" }
     if ((Split-Path -Leaf $resolved) -notmatch '^musicserver_fixture_[0-9a-f]{32}$') { throw "Refusing to remove a non-fixture directory: $resolved" }

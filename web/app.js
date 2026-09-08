@@ -1,7 +1,7 @@
 // Tauri startup uses this marker to reject a stale 8790 UI process after an
 // upgrade. Keep it in the served bundle so the desktop shell can verify that
 // the WebView is loading the same source revision as the backend.
-const MUSICSERVER_BUILD_MARKER = 'musicserver-backend-b-v4';
+const MUSICSERVER_BUILD_MARKER = 'musicserver-development';
 
 const storedLibraryOrder = (() => {
   try {
@@ -66,7 +66,8 @@ async function fetchJson(url, options = {}) {
     let payload;
     try {
       payload = await response.json();
-    } catch {
+    } catch (error) {
+      if (controller.signal.aborted || error?.name === 'AbortError') throw error;
       throw new Error(`服务返回非 JSON 响应 (${response.status})`);
     }
     if (!response.ok) throw new Error(payload?.message || `请求失败 (${response.status})`);
