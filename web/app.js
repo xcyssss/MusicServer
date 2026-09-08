@@ -63,7 +63,12 @@ async function fetchJson(url, options = {}) {
   const timer = setTimeout(cancel, 12000);
   try {
     const response = await fetch(url, { ...options, cache: 'no-store', signal: controller.signal });
-    const payload = await response.json();
+    let payload;
+    try {
+      payload = await response.json();
+    } catch {
+      throw new Error(`服务返回非 JSON 响应 (${response.status})`);
+    }
     if (!response.ok) throw new Error(payload?.message || `请求失败 (${response.status})`);
     return payload;
   } finally {
