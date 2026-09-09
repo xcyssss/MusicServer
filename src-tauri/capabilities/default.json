@@ -13,6 +13,8 @@
   "permissions": [
     "core:default",
     "shell:allow-open",
-    "dialog:allow-open"
+    "dialog:allow-open",
+    "allow-pick-folder",
+    "allow-open-folder"
   ]
 }
