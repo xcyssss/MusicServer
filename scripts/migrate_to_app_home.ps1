@@ -98,6 +98,13 @@ foreach ($item in $items) {
     $targetParent = Split-Path -Parent $item.Target
     New-Item -ItemType Directory -Force -Path $targetParent | Out-Null
     if ($sourceItem.PSIsContainer) {
+        # Initialize-MusicServerState above creates empty scaffolding targets,
+        # so Copy-Item would nest the source as "target\DailyMix_data\..." and
+        # fail verification. Remove the scaffolded empty directory first to
+        # keep the copied tree at the item root.
+        if (Test-Path -LiteralPath $item.Target) {
+            Remove-Item -LiteralPath $item.Target -Recurse -Force
+        }
         Copy-Item -LiteralPath $item.Source -Destination $item.Target -Recurse -Force
     } else {
         Copy-Item -LiteralPath $item.Source -Destination $item.Target -Force
