@@ -86,8 +86,49 @@ Describe 'MusicServer Tauri desktop shell' {
         $prepare | Should Match 'start_musicserver_ui\.ps1'
         $prepare | Should Match 'music_api\.ps1'
         $prepare | Should Match 'wanted_worker\.ps1'
+        $prepare | Should Match 'daily_recommend\.ps1'
         $prepare | Should Match 'sqlite3\.exe'
         $prepare | Should Not Match 'cookies\.txt'
+    }
+
+    It 'ships the daily recommendation generator and its installer-time task registrar' {
+        $registrarPath = Join-Path $ProjectRoot 'register_daily_recommend.ps1'
+        (Test-Path -LiteralPath $registrarPath -PathType Leaf) | Should Be $true
+        $registrar = Get-Content -LiteralPath $registrarPath -Raw -Encoding UTF8
+        $registrar | Should Match 'MusicServer_DailyRecommend'
+        $registrar | Should Match 'daily_recommend\.ps1'
+        $registrar | Should Match 'Unregister'
+        $registrar | Should Match 'New-ScheduledTaskTrigger'
+        $registrar | Should Match '-AppHome'
+
+        $generator = Get-Content -LiteralPath (Join-Path $ProjectRoot 'daily_recommend.ps1') -Raw -Encoding UTF8
+        $generator | Should Match '\$AppHome'
+        $generator | Should Match 'New-MusicServerConfig -Root \$Root -AppHome \$AppHome'
+
+        $identity = Get-Content -LiteralPath (Join-Path $ProjectRoot 'MusicServer.Identity.psm1') -Raw -Encoding UTF8
+        $identity | Should Match 'daily_recommend\.ps1'
+        $identity | Should Match 'MusicServer\.Migration\.psm1'
+
+        foreach ($scriptPath in @($registrarPath, (Join-Path $ProjectRoot 'daily_recommend.ps1'))) {
+            $errors = $null
+            $null = [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$null, [ref]$errors)
+            @($errors).Count | Should Be 0
+        }
+    }
+
+    It 'registers the daily recommendation task from the launcher without blocking startup' {
+        $launcherPath = Join-Path $ProjectRoot 'start_musicserver_ui.ps1'
+        $launcher = Get-Content -LiteralPath $launcherPath -Raw -Encoding UTF8
+        $launcher | Should Match 'Initialize-MusicServerScheduledTasks'
+        $launcher | Should Match 'MUSICSERVER_DISABLE_SCHEDULED_TASKS'
+        $launcher | Should Match 'register_daily_recommend\.ps1'
+        $launcher | Should Match 'Start-ScheduledTask'
+        # A source checkout must not register machine state.
+        $launcher | Should Match '\$Root ''\.git'''
+
+        $errors = $null
+        $null = [System.Management.Automation.Language.Parser]::ParseFile($launcherPath, [ref]$null, [ref]$errors)
+        @($errors).Count | Should Be 0
     }
 
     It 'uses the shared content identity in services, build and smoke checks' {
@@ -114,6 +155,9 @@ Describe 'MusicServer Tauri desktop shell' {
                 (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() | Should Be $entry.sha256
             }
             ($manifest.runtime_files -contains 'MusicServer.Http.psm1') | Should Be $true
+            ($manifest.runtime_files -contains 'daily_recommend.ps1') | Should Be $true
+            ($manifest.runtime_files -contains 'register_daily_recommend.ps1') | Should Be $true
+            ($manifest.runtime_files -contains 'MusicServer.Migration.psm1') | Should Be $true
             foreach ($relative in $manifest.runtime_files) { (Test-Path -LiteralPath (Join-Path $packageRoot $relative) -PathType Leaf) | Should Be $true }
             Import-Module (Join-Path $packageRoot 'MusicServer.Http.psm1') -Force
             $stream = New-Object IO.MemoryStream(,[Text.Encoding]::UTF8.GetBytes('{}'))
