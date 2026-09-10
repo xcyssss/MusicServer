@@ -189,7 +189,15 @@ Describe 'MusicServer web UI safeguards' {
         $launcher = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\start_musicserver_ui.ps1') -Raw -Encoding UTF8
         $launcher | Should Match 'function Invoke-NavidromeSqliteJson'
         $launcher | Should Match '& \$sqlite.*-readonly.*-json.*\$Config\.NdDb.*\$Sql'
-        $launcher | Should Match 'FROM media_file WHERE missing = 0'
+        # Navidrome's `missing` flag is only refreshed by a scan, and the packaged
+        # runtime ships no Navidrome, so filtering on it hid every row and left the
+        # folder-name fallback to invent an artist for the whole library.
+        $launcher | Should Not Match 'WHERE missing = 0'
+        $launcher | Should Match '\[IO\.File\]::Exists'
+        $launcher | Should Match 'Get-LibraryFolderArtist'
+        $api = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\music_api.ps1') -Raw -Encoding UTF8
+        $api | Should Not Match 'WHERE missing = 0'
+        $api | Should Match 'Get-LibraryFolderArtist'
         $launcher | Should Match 'track_number AS track'
         $launcher | Should Match 'created_at AS addedto'
         $launcher | Should Not Match 'FROM songs'
@@ -238,5 +246,86 @@ Describe 'MusicServer web UI safeguards' {
         $interval = [regex]::Match($js, 'setInterval\(\(\) => \{(?<body>[^}]*)\}, 15000\)')
         $interval.Success | Should Be $true
         $interval.Groups['body'].Value | Should Not Match 'loadListening'
+    }
+
+    It 'keeps an indexed track whose file exists and never invents an artist from the library root' {
+        $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+        Import-Module (Join-Path $projectRoot 'MusicServer.Core.psm1') -Force -WarningAction SilentlyContinue
+        Import-Module (Join-Path $projectRoot 'MusicServer.Database.psm1') -Force -WarningAction SilentlyContinue
+        Import-Module (Join-Path $projectRoot 'MusicServer.Identity.psm1') -Force -WarningAction SilentlyContinue
+
+        $appHome = Join-Path ([IO.Path]::GetTempPath()) ('musicserver_web_library_' + [guid]::NewGuid().ToString('N'))
+        $config = New-MusicServerConfig -Root $projectRoot -AppHome $appHome
+        $null = New-Item -ItemType Directory -Path $config.MusicDir -Force
+        $null = New-Item -ItemType Directory -Path (Split-Path -Parent $config.NdDb) -Force
+        # Files sitting directly in the library root: the root's own name is not an artist.
+        [IO.File]::WriteAllBytes((Join-Path $config.MusicDir 'Kept.mp3'), (New-Object byte[] 4))
+        [IO.File]::WriteAllBytes((Join-Path $config.MusicDir 'Loose.mp3'), (New-Object byte[] 4))
+        $artistDir = Join-Path $config.MusicDir 'Some Artist'
+        $null = New-Item -ItemType Directory -Path $artistDir -Force
+        [IO.File]::WriteAllBytes((Join-Path $artistDir 'Nested.mp3'), (New-Object byte[] 4))
+        [IO.File]::WriteAllBytes((Join-Path $artistDir 'Orphan.mp3'), (New-Object byte[] 4))
+
+        # Every row carries the stale flag Navidrome leaves behind when nothing ever
+        # rescans, and one row has no file at all.
+        $sql = @"
+CREATE TABLE media_file (
+    id TEXT PRIMARY KEY,
+    path TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    album TEXT NOT NULL DEFAULT '',
+    artist TEXT NOT NULL DEFAULT '',
+    duration REAL NOT NULL DEFAULT 0,
+    track_number INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT,
+    updated_at TEXT,
+    missing BOOLEAN NOT NULL DEFAULT 0
+);
+INSERT INTO media_file VALUES ('mf-kept','Kept.mp3','Kept','Uploader Album','Uploader One',210,1,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',1);
+INSERT INTO media_file VALUES ('mf-nested','Some Artist/Nested.mp3','Nested','Uploader Album','Uploader Three',190,3,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',1);
+INSERT INTO media_file VALUES ('mf-gone','Gone.mp3','Gone','Uploader Album','Uploader Two',200,2,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',1);
+"@
+        & $config.Sqlite $config.NdDb $sql 2>&1 | Out-Null
+
+        $script:Config = $config
+        $script:UiLibraryCache = $null
+        $script:UiLibraryCacheAt = [DateTime]::MinValue
+        $script:UiLibraryJsonCache = $null
+        $script:LibraryFiles = @{}
+        function Write-UiLog { param([string]$Message) }
+
+        $launcher = Get-Content -LiteralPath (Join-Path $projectRoot 'start_musicserver_ui.ps1') -Raw -Encoding UTF8
+        foreach ($name in @('Invoke-NavidromeSqliteJson', 'Get-LrcPath', 'Get-LocalLibraryId', 'Get-LibraryFolderArtist', 'Get-UiLibrary')) {
+            $source = [regex]::Match($launcher, "(?s)function $name \{.*?\n\}").Value
+            $source | Should Not BeNullOrEmpty
+            . ([scriptblock]::Create($source))
+        }
+
+        try {
+            $items = @(Get-UiLibrary)
+
+            # The index is authoritative for metadata; its stale flag must not hide
+            # a file that is still on disk.
+            $kept = $items | Where-Object { $_.title -eq 'Kept' } | Select-Object -First 1
+            $kept | Should Not BeNullOrEmpty
+            $kept.artist | Should Be 'Uploader One'
+            $kept.album | Should Be 'Uploader Album'
+            [int]$kept.duration | Should Be 210
+
+            # A row whose file is gone must not be served.
+            @($items | Where-Object { $_.title -eq 'Gone' }).Count | Should Be 0
+
+            # A track directly in the library root must not adopt the root's name.
+            $loose = $items | Where-Object { $_.title -eq 'Loose' } | Select-Object -First 1
+            $loose | Should Not BeNullOrEmpty
+            $loose.artist | Should Be ''
+            $loose.artist | Should Not Be (Split-Path -Leaf $config.MusicDir)
+
+            # A folder-per-artist layout still works.
+            $orphan = $items | Where-Object { $_.title -eq 'Orphan' } | Select-Object -First 1
+            $orphan.artist | Should Be 'Some Artist'
+        } finally {
+            Remove-Item -LiteralPath $appHome -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 }

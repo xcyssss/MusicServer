@@ -8,6 +8,37 @@ Import-Module (Join-Path $PSScriptRoot 'MusicServer.Database.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Core.psm1') -Force
 
 $script:SchemaVersion = 6
+
+# Local files carry uploader tags rather than the singer, so the real artist is
+# resolved once and cached here. Rows are keyed by normalized file path because
+# that is the fact that survives re-indexing; a NOT_FOUND row records that the
+# lookup ran so the next start does not repeat the same network search. Kept as
+# one definition because the launcher bootstraps this table on its own: it
+# connects to an existing database without running the full schema script.
+$script:LocalTrackArtistDdl = @"
+CREATE TABLE IF NOT EXISTS local_track_artists (
+    path_key TEXT PRIMARY KEY,
+    artist TEXT NOT NULL DEFAULT '',
+    album TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_local_track_artists_status ON local_track_artists(status);
+"@
+
+function Initialize-LocalTrackArtistSchema {
+    <#
+    .SYNOPSIS
+      Creates the resolved-artist cache table when it is absent.
+
+      Initialize-MusicServerSchema creates the whole schema, but the launcher
+      binds an existing database with Connect-MusicServerDatabase, which by design
+      changes nothing. The artist backfill runs in the launcher, so it ensures its
+      own table instead of depending on the API process having started first.
+    #>
+    Invoke-MusicServerSqlNonQuery -Query $script:LocalTrackArtistDdl
+}
 $script:LeaseMinutes = 30
 
 # ================================================================
@@ -177,6 +208,19 @@ CREATE TABLE IF NOT EXISTS app_settings (
     value TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL DEFAULT ''
 );
+-- Local files carry uploader tags rather than the singer, so the real artist is
+-- resolved once and cached here. Rows are keyed by normalized file path because
+-- that is the fact that survives re-indexing; a NOT_FOUND row records that the
+-- lookup ran so the next start does not repeat the same network search.
+CREATE TABLE IF NOT EXISTS local_track_artists (
+    path_key TEXT PRIMARY KEY,
+    artist TEXT NOT NULL DEFAULT '',
+    album TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_local_track_artists_status ON local_track_artists(status);
 CREATE INDEX IF NOT EXISTS idx_wanted_state ON wanted_queue(state);
 CREATE INDEX IF NOT EXISTS idx_wanted_lease ON wanted_queue(lease_expires_at);
 CREATE INDEX IF NOT EXISTS idx_wanted_lease_epoch ON wanted_queue(lease_expires_epoch);
@@ -212,6 +256,59 @@ function Get-CanonicalLocalTrackMapDb {
         if ($localSongId) { $map[$localSongId] = $row }
     }
     return $map
+}
+
+# ================================================================
+# Local track artists
+# ================================================================
+
+function Get-LocalTrackArtistMapDb {
+    <#
+    .SYNOPSIS
+      Cached resolved artists keyed by normalized file path.
+    #>
+    $map = @{}
+    foreach ($row in @(Invoke-MusicServerSqlJson -Query 'SELECT path_key, artist, album, status, source, updated_at FROM local_track_artists;')) {
+        $key = [string]$row.path_key
+        if ($key) { $map[$key] = $row }
+    }
+    return $map
+}
+
+function Get-LocalTrackArtistDb {
+    param([Parameter(Mandatory)][string]$PathKey)
+    $rows = @(Invoke-MusicServerParamSql -Template 'SELECT path_key, artist, album, status, source, updated_at FROM local_track_artists WHERE path_key = @path_key LIMIT 1;' -Params @{ path_key = $PathKey })
+    if ($rows.Count -eq 0) { return $null }
+    return $rows[0]
+}
+
+function Save-LocalTrackArtistDb {
+    <#
+    .SYNOPSIS
+      Records the outcome of one artist lookup, including a negative result, so a
+      library that cannot be resolved is not re-queried on every start.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$PathKey,
+        [AllowEmptyString()][string]$Artist = '',
+        [AllowEmptyString()][string]$Album = '',
+        [Parameter(Mandatory)][string]$Status,
+        [AllowEmptyString()][string]$Source = ''
+    )
+    # The template expands parameters as SQL literals, so the timestamp has to be
+    # evaluated here; passing the command name would store it verbatim.
+    $now = Get-NowIso
+    $affected = Invoke-MusicServerParamNonQuery -Template @"
+INSERT INTO local_track_artists (path_key, artist, album, status, source, updated_at)
+VALUES (@path_key, @artist, @album, @status, @source, @updated_at)
+ON CONFLICT(path_key) DO UPDATE SET
+    artist = excluded.artist, album = excluded.album, status = excluded.status,
+    source = excluded.source, updated_at = excluded.updated_at;
+"@ -Params @{
+        path_key = $PathKey; artist = $Artist; album = $Album
+        status = $Status; source = $Source; updated_at = $now
+    }
+    return [int]$affected
 }
 
 function Save-CanonicalTrackDb {

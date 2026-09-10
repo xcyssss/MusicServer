@@ -489,6 +489,226 @@ function Search-NeteaseCandidate {
     return $match
 }
 
+function Get-TitleDeclaredArtist {
+    <#
+    .SYNOPSIS
+      Reads the artist the uploader declared in the file name.
+
+      Local files downloaded from Bilibili are titled the way the uploader wrote
+      them, and "<artist>《<song>》" is the dominant convention. That label is more
+      trustworthy than a folder name and is used when the online lookup cannot
+      confirm a match.
+    #>
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Title)
+
+    if ([string]::IsNullOrWhiteSpace($Title)) { return '' }
+    $pairs = @(@('《', '》'), @('「', '」'), @('『', '』'))
+    foreach ($pair in $pairs) {
+        $open = [string]$pair[0]; $close = [string]$pair[1]
+        $from = 0
+        while ($true) {
+            $start = $Title.IndexOf($open, $from)
+            if ($start -lt 0) { break }
+            $end = $Title.IndexOf($close, $start + 1)
+            if ($end -lt 0) { break }
+            $before = $Title.Substring(0, $start).Trim()
+            # Drop a quoted lyric sitting in front of the artist.
+            $before = [regex]::Replace($before, '^[\u201c"''][^\u201d"'']{0,80}[\u201d"'']\s*', '').Trim()
+            # "artist - song" in front of the bracket: keep the artist side.
+            if ([regex]::IsMatch($before, '\s+-\s+')) {
+                $before = [string](@([regex]::Split($before, '\s+-\s+') | Where-Object { $_ })[0])
+            } elseif ($before.Contains('-') -and [regex]::IsMatch($before, '[\u3400-\u9fff]')) {
+                # CJK titles often glue it as "artist-song-series" with no spaces,
+                # e.g. "小树-不安的前方-动漫"; the first segment is the singer.
+                $before = [string](@($before.Split('-') | Where-Object { $_ })[0])
+            }
+            $before = [regex]::Replace($before, '[\s\-–—－|｜·、,，。!！?？:：+~～*"' + [char]0x201c + [char]0x201d + [char]0x2018 + [char]0x2019 + ']+$', '').Trim()
+            # A lyric, a sentence, or another bracketed block is not an artist.
+            $isSentence = [regex]::IsMatch($before, '[，。！？、丨｜\u201c\u201d\u2018\u2019]')
+            $isBracketed = [regex]::IsMatch($before, '[《》「」『』【】]')
+            if (-not $isSentence -and -not $isBracketed -and $before.Length -gt 0 -and $before.Length -le 40) {
+                return $before
+            }
+            $from = $end + 1
+        }
+    }
+
+    # The other common upload shape is "Song - Artist" with no bracketed block at
+    # all, which the online lookup cannot resolve: searching an artist name never
+    # yields a song name that matches, so the file-name gate rejects every hit.
+    # Both orders occur in the wild, so the tail is only trusted when neither side
+    # carries marketing or series noise. Getting this wrong displays a song name
+    # as an artist, which is worse than showing none.
+    $head = ''
+    $tail = ''
+    if ([regex]::IsMatch($Title, '\s+-\s+')) {
+        $parts = @([regex]::Split($Title, '\s+-\s+') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        if ($parts.Count -ge 2) {
+            $head = [string]$parts[0]
+            $tail = [string]$parts[$parts.Count - 1]
+        }
+    }
+    if ($tail) {
+        $cleanHead = -not [regex]::IsMatch($head, '[《》「」『』【】，。！？]')
+        $cleanTail = -not [regex]::IsMatch($tail, '[《》「」『』【】（）()，。！？、丨｜|]|Hi-?Res|无损|音质')
+        if ($cleanHead -and $cleanTail -and $tail.Length -le 40) { return $tail }
+    }
+    return ''
+}
+
+function Get-TitleSearchKeywords {
+    <#
+    .SYNOPSIS
+      Search keywords for a song title, most precise first.
+
+      Uploader titles wrap the real song name in 《》/「」/『』 and pad it with
+      channel branding, so the bracketed block is tried alongside the cleaned
+      name. Every keyword is only a search hint: the caller still requires the
+      returned artist to appear in the original file name.
+    #>
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Title)
+
+    $keywords = New-Object System.Collections.ArrayList
+    $add = {
+        param([string]$Value)
+        $value = [regex]::Replace([string]$Value, '\s+', ' ').Trim()
+        if ($value.Length -ge 2 -and $value.Length -le 60 -and -not $keywords.Contains($value)) { [void]$keywords.Add($value) }
+    }
+
+    foreach ($pair in @(@('《', '》'), @('「', '」'), @('『', '』'))) {
+        $open = [string]$pair[0]; $close = [string]$pair[1]
+        $m = [regex]::Match($Title, [regex]::Escape($open) + '([^' + [regex]::Escape($open) + [regex]::Escape($close) + ']{2,40})' + [regex]::Escape($close))
+        if ($m.Success) { & $add $m.Groups[1].Value }
+    }
+
+    $stripped = $Title
+    foreach ($noise in @('【[^【】]{0,40}】', '\[[^\[\]]{0,40}\]', '（[^（）]{0,40}）', '\([^()]{0,40}\)')) {
+        $stripped = [regex]::Replace($stripped, $noise, ' ')
+    }
+    # The parent folder of a flat library is the library itself, so only an
+    # explicit "song - artist" split is useful here.
+    foreach ($part in @($stripped -split '\s+[-\u2013\u2014]\s+|\s*[|｜]\s*')) {
+        & $add ([regex]::Replace([string]$part, '[《》「」『』]', ' '))
+    }
+    & $add $stripped
+
+    return @($keywords | Select-Object -First 3)
+}
+
+function Test-FileVouchesForArtist {
+    <#
+    .SYNOPSIS
+      Whether the file name itself confirms a candidate artist.
+
+      This is the precision gate for online artist lookup. Searching NetEase by
+      song name alone happily returns a different recording of the same song --
+      "EXO-M - MAMA" for a file named "EXO-K《mama》", or "XG - RUDE!" for
+      "Hearts2Hearts《RUDE!》" -- so a candidate is only accepted when the file
+      name already contains every artist it credits.
+    #>
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Artist,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Title
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Artist)) { return $false }
+    $fileKey = ConvertTo-MusicServerKey -Value $Title
+    $names = @($Artist -split '[,，、/&;；]|\s+feat\.?\s+|\s+ft\.?\s+' | ForEach-Object { $_.Trim() } | Where-Object { $_.Length -ge 2 })
+    if ($names.Count -eq 0) { return $false }
+    foreach ($name in $names) {
+        if (-not $fileKey.Contains((ConvertTo-MusicServerKey -Value $name))) { return $false }
+    }
+    return $true
+}
+
+function ConvertTo-MusicServerKey {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Value)
+    return ([regex]::Replace($Value.ToLowerInvariant(), '[\s\-_·、,，。.!！?？:：;；''"\u201c\u201d\u2018\u2019()（）\[\]【】《》「」『』|｜/\\~～+*&]', ''))
+}
+
+function Select-NeteaseArtistForTitle {
+    <#
+    .SYNOPSIS
+      Best NetEase artist for one search response.
+
+      Duration is a tie-breaker only. Bilibili uploads prepend narration or pad
+      the tail and sometimes carry a whole single as one file, so a duration gate
+      rejects correct matches; the file-name gate is what keeps precision.
+    #>
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Title,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Keyword,
+        [int]$DurationSeconds = 0,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Songs = @()
+    )
+
+    $want = ConvertTo-MusicServerKey -Value $Keyword
+    if ($want.Length -lt 2) { return $null }
+    $best = $null; $bestDelta = [int]::MaxValue
+    foreach ($song in @($Songs)) {
+        if (-not $song) { continue }
+        $got = ConvertTo-MusicServerKey -Value ([string](Get-OptionalProperty $song 'name' ''))
+        if ($got.Length -lt 2) { continue }
+        if (-not ($got -eq $want -or $got.Contains($want) -or $want.Contains($got))) { continue }
+        $artist = (@(@(Get-OptionalProperty $song 'artists' @()) | ForEach-Object { [string](Get-OptionalProperty $_ 'name' '') } | Where-Object { $_ }) -join ',')
+        if (-not (Test-FileVouchesForArtist -Artist $artist -Title $Title)) { continue }
+        $seconds = [int][Math]::Round(([double](Get-OptionalProperty $song 'duration' 0)) / 1000)
+        $delta = if ($DurationSeconds -gt 0 -and $seconds -gt 0) { [Math]::Abs($seconds - $DurationSeconds) } else { 0 }
+        if (-not $best -or $delta -lt $bestDelta) {
+            $best = [pscustomobject]@{
+                artist = $artist
+                album = [string](Get-OptionalProperty (Get-OptionalProperty $song 'album' $null) 'name' '')
+                song = [string](Get-OptionalProperty $song 'name' '')
+            }
+            $bestDelta = $delta
+        }
+    }
+    return $best
+}
+
+function Resolve-NeteaseTrackArtist {
+    <#
+    .SYNOPSIS
+      Resolves the singer for one local file, bounded and circuit-aware.
+
+      Uses at most three NetEase searches, each charged against the existing
+      `netease` provider circuit, and stops as soon as the circuit refuses. Set
+      MUSICSERVER_DISABLE_NETEASE_SEARCH=1 to disable (hermetic tests).
+    #>
+    param(
+        [Parameter(Mandatory)][psobject]$Config,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Title,
+        [int]$DurationSeconds = 0
+    )
+
+    if ($env:MUSICSERVER_DISABLE_NETEASE_SEARCH -eq '1') { return $null }
+    if ([string]::IsNullOrWhiteSpace($Title)) { return $null }
+
+    $headers = @{
+        'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36'
+        'Referer'    = 'https://music.163.com/'
+    }
+    foreach ($keyword in @(Get-TitleSearchKeywords -Title $Title)) {
+        if (-not (Test-ProviderRequestAvailable -Config $Config -Provider 'netease')) { return $null }
+        if (-not (Claim-ProviderRequest -Config $Config -Provider 'netease')) { return $null }
+        $started = [Diagnostics.Stopwatch]::StartNew()
+        try {
+            $url = "https://music.163.com/api/search/get?s=$([uri]::EscapeDataString($keyword))&type=1&limit=10"
+            $response = Invoke-RestMethod -Uri $url -Headers $headers -TimeoutSec 20
+        } catch {
+            Record-ProviderFailure -Config $Config -Provider 'netease' -ErrorType 'SEARCH_FAILED' -Message $_.Exception.Message | Out-Null
+            return $null
+        }
+        $started.Stop()
+        $songs = @()
+        try { if ($response.result.songs) { $songs = @($response.result.songs) } } catch { $songs = @() }
+        $match = Select-NeteaseArtistForTitle -Title $Title -Keyword $keyword -DurationSeconds $DurationSeconds -Songs $songs
+        Record-ProviderSuccess -Config $Config -Provider 'netease' -LatencyMs $started.Elapsed.TotalMilliseconds
+        if ($match) { return $match }
+    }
+    return $null
+}
+
 function Invoke-NeteaseDownload {
     <#
     .SYNOPSIS

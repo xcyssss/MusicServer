@@ -214,6 +214,18 @@ function Set-OptionalProperty {
     else { $Object | Add-Member -NotePropertyName $Name -NotePropertyValue $Value -Force }
 }
 
+function Get-MusicServerPathKey {
+    <#
+    .SYNOPSIS
+      Stable cache key for a track file: the absolute path, lowercased for
+      Windows' case-insensitive filesystem.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return '' }
+    try { return ([IO.Path]::GetFullPath($Path)).ToLowerInvariant() }
+    catch { return $Path.ToLowerInvariant() }
+}
+
 function Convert-ToUtcDateTime {
     param([AllowNull()]$Value)
     if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)) { return $null }

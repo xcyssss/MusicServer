@@ -296,6 +296,7 @@ Import-Module (Join-Path $Root 'MusicServer.Core.psm1') -Force
 Import-Module (Join-Path $Root 'MusicServer.Database.psm1') -Force
 Import-Module (Join-Path $Root 'MusicServer.State.psm1') -Force
 Import-Module (Join-Path $Root 'MusicServer.Http.psm1') -Force
+Import-Module (Join-Path $Root 'MusicServer.Providers.psm1') -Force
 Import-Module (Join-Path $Root 'MusicServer.Identity.psm1') -Force
 $script:BuildMarker = Get-MusicServerBuildIdentity -Root $Root
 $Config = New-MusicServerConfig -Root $Root
@@ -318,6 +319,9 @@ try {
     if (Test-Path -LiteralPath $uiDbPath -PathType Leaf) {
         Connect-MusicServerDatabase -DbPath $uiDbPath -SqliteExe $Config.Sqlite
         Apply-ConfiguredMusicDir -Config $Config
+        # The artist cache is read while assembling every library response, so
+        # create it here rather than waiting for the API process or the backfill.
+        Initialize-LocalTrackArtistSchema
     }
 } catch {}
 try { Initialize-MusicServerLibrary -Config $Config | Out-Null } catch {}
@@ -424,6 +428,22 @@ function Get-NetEaseLyricsById {
     return ''
 }
 
+# A flat library keeps every file directly in MusicDir. The library root's own
+# name is not an artist, and reporting it as one is why every row used to show
+# the same placeholder ("Music") instead of a name.
+function Get-LibraryFolderArtist {
+    param([Parameter(Mandatory)][string]$File)
+    $parent = Split-Path -Parent $File
+    if (-not $parent) { return '' }
+    $root = [string]$Config.MusicDir
+    if (-not [string]::IsNullOrWhiteSpace($root)) {
+        try {
+            if ([IO.Path]::GetFullPath($parent).TrimEnd('\') -ieq [IO.Path]::GetFullPath($root).TrimEnd('\')) { return '' }
+        } catch { }
+    }
+    return [string](Split-Path -Leaf $parent)
+}
+
 function Get-UiLibrary {
     # The single-threaded UI is hammered by browser polls (every open tab polls
     # /api/library every 15s). Each call used to re-scan the whole Music folder
@@ -440,7 +460,12 @@ function Get-UiLibrary {
 
     # Navidrome 0.63.x stores songs in media_file. Keep the UI response aliases
     # stable so the frontend does not depend on Navidrome's internal column names.
-    $sql = 'SELECT id, title AS name, artist, album, path, duration, track_number AS track, created_at AS addedto, updated_at AS collectionat FROM media_file WHERE missing = 0;'
+    # `missing` is Navidrome's own bookkeeping and only a scan refreshes it; the
+    # packaged runtime does not ship Navidrome, so on a machine without it every
+    # row stays flagged missing and filtering on the flag hid the whole library,
+    # leaving the folder-name fallback below to invent an artist for every row.
+    # The file-existence check further down is the fact that matters.
+    $sql = 'SELECT id, title AS name, artist, album, path, duration, track_number AS track, created_at AS addedto, updated_at AS collectionat FROM media_file;'
     foreach ($row in @(Invoke-NavidromeSqliteJson -Sql $sql)) {
         $file = [string]$row.path
         if ([string]::IsNullOrWhiteSpace($file)) { continue }
@@ -480,7 +505,7 @@ function Get-UiLibrary {
             $id = Get-LocalLibraryId -File $file
             $script:LibraryFiles[$id] = $file
             $title = [System.IO.Path]::GetFileNameWithoutExtension($file)
-            $artist = [string](Split-Path -Leaf (Split-Path -Parent $file))
+            $artist = Get-LibraryFolderArtist -File $file
             $lrcPath = Get-LrcPath -File $file
             $addedAt = ''
             try { $addedAt = (Get-Item -LiteralPath $file).LastWriteTime.ToString('o') } catch {}
@@ -492,6 +517,32 @@ function Get-UiLibrary {
                 stream_url = "/api/library/$id/stream"
                 lyrics_url = if ($lrcPath) { "/api/library/$id/lyrics" } else { '' }
             })
+        }
+    }
+
+    # Bilibili downloads tag the uploader rather than the singer and sit directly
+    # in the library root, so neither the index nor the folder names the artist.
+    # Apply the cached resolution; when the online lookup has not run yet, fall
+    # back to the uploader's own "<artist>《<song>》" label instead of a placeholder.
+    # Fail-soft: this also runs inside media runspaces that hold no state DB.
+    $resolved = @{}
+    try { $resolved = Get-LocalTrackArtistMapDb } catch { $resolved = @{} }
+    foreach ($item in $items) {
+        $key = Get-MusicServerPathKey -Path ([string]$item.file)
+        $row = if ($key -and $resolved.ContainsKey($key)) { $resolved[$key] } else { $null }
+        if ($row -and [string]$row.artist) {
+            $item.artist = [string]$row.artist
+            if ([string]$row.album) { $item.album = [string]$row.album }
+            $item | Add-Member -NotePropertyName 'artist_source' -NotePropertyValue ([string]$row.source) -Force
+            continue
+        }
+        if (-not [string]$item.artist) {
+            $declared = ''
+            try { $declared = Get-TitleDeclaredArtist -Title ([string]$item.title) } catch { $declared = '' }
+            if ($declared) {
+                $item.artist = $declared
+                $item | Add-Member -NotePropertyName 'artist_source' -NotePropertyValue 'title' -Force
+            }
         }
     }
 
@@ -510,7 +561,7 @@ function Resolve-UiLibraryFile {
     }
     if ($Id.StartsWith('library-')) {
         $navId = $Id.Substring(8).Replace("'", "''")
-        $rows = @(Invoke-NavidromeSqliteJson -Sql "SELECT path FROM media_file WHERE missing = 0 AND id = '$navId' LIMIT 1;")
+        $rows = @(Invoke-NavidromeSqliteJson -Sql "SELECT path FROM media_file WHERE id = '$navId' LIMIT 1;")
         if ($rows.Count -gt 0) {
             $file = [string]$rows[0].path
             if ($file) {
@@ -1041,6 +1092,9 @@ function Handle-Request {
 function Initialize-MediaPool {
     $initial = [Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
     $initial.ImportPSModule(@((Join-Path $Root 'MusicServer.Core.psm1')))
+    # Get-UiLibrary is only used here to fill this runspace's file map, so the
+    # artist overlay it applies needs neither the state DB nor the providers; its
+    # lookups fail soft in this runspace and the map is unaffected.
     foreach ($name in @('Write-UiLog','Invoke-NavidromeSqliteJson','Get-LocalLibraryId','Get-LrcPath','Get-LyricQuality','Get-NeteaseIdForTrack','Get-NetEaseLyricsById','Get-UiLibrary','Resolve-UiLibraryFile','Send-ResponseBytes','Send-Json','ConvertTo-JsonStringValue','Send-LyricsJson','Send-JsonRaw','Send-LibraryStream','Send-LibraryLyrics','Send-TrackLyrics')) {
         $definition = (Get-Command $name -CommandType Function).Definition
         $initial.Commands.Add([Management.Automation.Runspaces.SessionStateFunctionEntry]::new($name, $definition))
@@ -1067,6 +1121,136 @@ function Complete-MediaJobs {
             [void]$job.PowerShell.BeginStop($null, $null)
         }
     }
+}
+
+# A real singer means up to three online lookups per file, so resolution runs in
+# its own single runspace and never on the request path. Every outcome is cached
+# in state: a fresh install fills its whole library on the first start, and later
+# starts only look at files that are not resolved yet.
+function Initialize-ArtistBackfillPool {
+    $initial = [Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+    $initial.ImportPSModule(@(
+        (Join-Path $Root 'MusicServer.Core.psm1'),
+        (Join-Path $Root 'MusicServer.Database.psm1'),
+        (Join-Path $Root 'MusicServer.State.psm1'),
+        (Join-Path $Root 'MusicServer.Providers.psm1')
+    ))
+    foreach ($name in @('Write-UiLog','Get-UiLibrary','Get-LibraryFolderArtist','Invoke-NavidromeSqliteJson','Get-LocalLibraryId','Get-LrcPath')) {
+        $definition = (Get-Command $name -CommandType Function).Definition
+        $initial.Commands.Add([Management.Automation.Runspaces.SessionStateFunctionEntry]::new($name, $definition))
+    }
+    foreach ($name in @('Root','Config','UiLog')) {
+        $initial.Variables.Add([Management.Automation.Runspaces.SessionStateVariableEntry]::new($name, (Get-Variable $name -ValueOnly), 'Artist backfill configuration'))
+    }
+    $script:ArtistPool = [RunspaceFactory]::CreateRunspacePool(1, 1, $initial, $Host)
+    $script:ArtistPool.Open()
+}
+
+function Start-ArtistBackfill {
+    if ($env:MUSICSERVER_DISABLE_ARTIST_BACKFILL -eq '1') { return }
+    # Bounded so a huge library cannot sit on the network for hours; the rest is
+    # picked up on the next start, since every outcome is persisted.
+    $limit = 400
+    if ($env:MUSICSERVER_ARTIST_BACKFILL_LIMIT) {
+        $parsed = 0
+        if ([int]::TryParse([string]$env:MUSICSERVER_ARTIST_BACKFILL_LIMIT, [ref]$parsed)) { $limit = $parsed }
+    }
+    if ($limit -le 0) { return }
+    $dbPath = Join-Path $Config.StateDir 'musicserver.db'
+    if (-not (Test-Path -LiteralPath $dbPath -PathType Leaf)) { return }
+    # A slow or hostile network must not keep a pass alive indefinitely; whatever
+    # is left is retried on the next start because every outcome is persisted.
+    $budgetMinutes = 20
+    if ($env:MUSICSERVER_ARTIST_BACKFILL_MINUTES) {
+        $parsedBudget = 0
+        if ([int]::TryParse([string]$env:MUSICSERVER_ARTIST_BACKFILL_MINUTES, [ref]$parsedBudget)) { $budgetMinutes = $parsedBudget }
+    }
+    $ps = [PowerShell]::Create()
+    $ps.RunspacePool = $script:ArtistPool
+    [void]$ps.AddScript({
+        param($limit, $dbPath, $sqliteExe, $budgetMinutes)
+        $ErrorActionPreference = 'Continue'
+        $ProgressPreference = 'SilentlyContinue'
+        $resolved = 0; $missed = 0; $failed = 0
+        $deadline = [DateTime]::UtcNow.AddMinutes($budgetMinutes)
+        try {
+            Connect-MusicServerDatabase -DbPath $dbPath -SqliteExe $sqliteExe
+            Initialize-LocalTrackArtistSchema
+            $script:UiLibraryCache = $null
+            $script:UiLibraryCacheAt = [DateTime]::MinValue
+            $script:LibraryFiles = @{}
+            $cached = Get-LocalTrackArtistMapDb
+            $pending = New-Object System.Collections.ArrayList
+            $cutoff = [DateTime]::UtcNow.AddDays(-30)
+            foreach ($item in @(Get-UiLibrary)) {
+                $file = [string]$item.file
+                if (-not $file) { continue }
+                $key = Get-MusicServerPathKey -Path $file
+                if (-not $key) { continue }
+                if ($cached.ContainsKey($key)) {
+                    $row = $cached[$key]
+                    # A resolved row stays; a miss is retried only after a while,
+                    # so new releases get a chance without re-querying every start.
+                    if ([string]$row.status -eq 'RESOLVED' -and [string]$row.artist) { continue }
+                    $checked = Convert-ToUtcDateTime ([string]$row.updated_at)
+                    if ($checked -and $checked -gt $cutoff) { continue }
+                }
+                [void]$pending.Add($item)
+                if ($pending.Count -ge $limit) { break }
+            }
+            if ($pending.Count -eq 0) { return }
+            Write-UiLog "ARTIST backfill started: $($pending.Count) file(s) pending"
+            foreach ($item in $pending) {
+                if ([DateTime]::UtcNow -gt $deadline) {
+                    Write-UiLog "ARTIST backfill stopped at its time budget with $($pending.Count) file(s) left"
+                    break
+                }
+                $key = Get-MusicServerPathKey -Path ([string]$item.file)
+                try {
+                    $match = Resolve-NeteaseTrackArtist -Config $Config -Title ([string]$item.title) -DurationSeconds ([int]$item.duration)
+                    if ($match -and $match.artist) {
+                        Save-LocalTrackArtistDb -PathKey $key -Artist ([string]$match.artist) -Album ([string]$match.album) -Status 'RESOLVED' -Source 'netease' | Out-Null
+                        $resolved += 1
+                    } else {
+                        # No online match: keep the uploader's own labelling when the
+                        # file name declares one, and remember the miss either way.
+                        $declared = Get-TitleDeclaredArtist -Title ([string]$item.title)
+                        if ($declared) {
+                            Save-LocalTrackArtistDb -PathKey $key -Artist $declared -Status 'RESOLVED' -Source 'title' | Out-Null
+                            $resolved += 1
+                        } else {
+                            Save-LocalTrackArtistDb -PathKey $key -Status 'NOT_FOUND' -Source 'none' | Out-Null
+                            $missed += 1
+                        }
+                    }
+                } catch {
+                    $failed += 1
+                }
+                Start-Sleep -Milliseconds 350
+            }
+            Write-UiLog "ARTIST backfill finished: resolved=$resolved notFound=$missed failed=$failed"
+        } catch {
+            Write-UiLog "ARTIST backfill failed: $($_.Exception.Message)"
+        } finally {
+            if ($script:UiLibraryCache) { $script:UiLibraryCache = $null }
+        }
+    }).AddArgument($limit).AddArgument($dbPath).AddArgument([string]$Config.Sqlite).AddArgument($budgetMinutes)
+    $async = $ps.BeginInvoke()
+    $script:ArtistJob = [pscustomobject]@{ PowerShell = $ps; Async = $async; Started = [DateTime]::UtcNow }
+    Write-UiLog "ARTIST backfill queued (limit=$limit)"
+}
+
+function Complete-ArtistBackfill {
+    if (-not $script:ArtistJob) { return }
+    if (-not $script:ArtistJob.Async.IsCompleted) { return }
+    try { $script:ArtistJob.PowerShell.EndInvoke($script:ArtistJob.Async) | Out-Null } catch {}
+    foreach ($errorRecord in $script:ArtistJob.PowerShell.Streams.Error) { Write-UiLog "ARTIST backfill error: $errorRecord" }
+    $script:ArtistJob.PowerShell.Dispose()
+    $script:ArtistJob = $null
+    # The list was assembled before the new artists landed.
+    $script:UiLibraryCache = $null
+    $script:UiLibraryCacheAt = [DateTime]::MinValue
+    $script:UiLibraryJsonCache = $null
 }
 
 function Start-MediaRequest {
@@ -1143,6 +1327,8 @@ try {
     }
     Write-UiLog "UI started at $UiPrefix pid=$PID"
     Initialize-MediaPool
+    Initialize-ArtistBackfillPool
+    Start-ArtistBackfill
 
     # External watchdog: watches the heartbeat file this loop writes and
     # restarts the UI if a wedged handler freezes the single-threaded listener.
@@ -1164,6 +1350,7 @@ try {
     $pending = $script:Listener.BeginGetContext($null, $null)
     while ($script:Listener.IsListening) {
         Complete-MediaJobs
+        Complete-ArtistBackfill
         if ($pending.AsyncWaitHandle.WaitOne(100)) {
             $context = $script:Listener.EndGetContext($pending)
             if ($script:Listener.IsListening) { $pending = $script:Listener.BeginGetContext($null, $null) }

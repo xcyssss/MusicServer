@@ -213,10 +213,15 @@ function Invoke-SqliteJson {
 
 function Read-NavidromeLibrary {
     param([AllowEmptyString()][string]$WhereSql = '', [AllowEmptyString()][string[]]$Params = @())
+    # `missing` is Navidrome's own bookkeeping and only a scan refreshes it. The
+    # packaged runtime does not ship Navidrome, so on a machine without it every
+    # row stays flagged missing for ever and filtering on the flag hid the whole
+    # library. Callers verify the file on disk instead, which is the fact that
+    # actually matters.
     if ($WhereSql) {
-        $sql = "SELECT id, title AS name, artist, album, path, duration, track_number AS track, created_at AS addedto, updated_at AS collectionat FROM media_file WHERE missing = 0 AND $WhereSql;"
+        $sql = "SELECT id, title AS name, artist, album, path, duration, track_number AS track, created_at AS addedto, updated_at AS collectionat FROM media_file WHERE $WhereSql;"
     } else {
-        $sql = 'SELECT id, title AS name, artist, album, path, duration, track_number AS track, created_at AS addedto, updated_at AS collectionat FROM media_file WHERE missing = 0;'
+        $sql = 'SELECT id, title AS name, artist, album, path, duration, track_number AS track, created_at AS addedto, updated_at AS collectionat FROM media_file;'
     }
     return @(Invoke-SqliteJson -DbPath $Config.NdDb -Sql $sql -Params $Params)
 }
@@ -305,6 +310,48 @@ function New-ListeningLibraryItem {
     }
 }
 
+# A flat library keeps every file directly in MusicDir. The library root's own
+# name is not an artist, and reporting it as one is why every row used to show
+# the same placeholder ("Music") instead of a name.
+function Get-LibraryFolderArtist {
+    param([Parameter(Mandatory)][string]$File)
+    $parent = Split-Path -Parent $File
+    if (-not $parent) { return '' }
+    $root = [string]$Config.MusicDir
+    if (-not [string]::IsNullOrWhiteSpace($root)) {
+        try {
+            if ([IO.Path]::GetFullPath($parent).TrimEnd('\') -ieq [IO.Path]::GetFullPath($root).TrimEnd('\')) { return '' }
+        } catch { }
+    }
+    return [string](Split-Path -Leaf $parent)
+}
+
+# The indexed artist of a Bilibili download is the uploader, not the singer. The
+# launcher resolves the real singer in the background and records it in state, so
+# every library surface reads that cache here. Fail-soft: a resolution that has
+# not run yet leaves the index value in place rather than blanking it.
+function Add-ResolvedArtist {
+    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Items)
+    if (@($Items).Count -eq 0) { return @() }
+    $resolved = @{}
+    try { $resolved = Get-LocalTrackArtistMapDb } catch { $resolved = @{} }
+    foreach ($item in @($Items)) {
+        $key = Get-MusicServerPathKey -Path ([string](Get-OptionalProperty $item 'file' ''))
+        $row = if ($key -and $resolved.ContainsKey($key)) { $resolved[$key] } else { $null }
+        if ($row -and [string]$row.artist) {
+            $item.artist = [string]$row.artist
+            if ([string]$row.album) { $item.album = [string]$row.album }
+            continue
+        }
+        if (-not [string](Get-OptionalProperty $item 'artist' '')) {
+            $declared = ''
+            try { $declared = Get-TitleDeclaredArtist -Title ([string](Get-OptionalProperty $item 'title' '')) } catch { $declared = '' }
+            if ($declared) { $item.artist = $declared }
+        }
+    }
+    return @($Items)
+}
+
 function Get-LocalListeningItems {
     $canonicalByLocalId = Get-LocalCanonicalTrackMap
     $items = New-Object System.Collections.ArrayList
@@ -333,7 +380,7 @@ function Get-LocalListeningItems {
             if ($seenFiles.ContainsKey($fileKey)) { continue }
             $seenFiles[$fileKey] = $true
             $title = [System.IO.Path]::GetFileNameWithoutExtension($file)
-            $artist = [string](Split-Path -Leaf (Split-Path -Parent $file))
+            $artist = Get-LibraryFolderArtist -File $file
             $addedAt = ''
             try { $addedAt = (Get-Item -LiteralPath $file).LastWriteTime.ToString('o') } catch {}
             $row = [pscustomobject]@{ id = ''; name = $title; artist = $artist; album = $artist; duration = 0; track = 0; addedto = $addedAt; collectionat = $addedAt }
@@ -341,7 +388,7 @@ function Get-LocalListeningItems {
             [void]$items.Add((New-ListeningLibraryItem -Row $row -File $file -Source 'local' -LocalId $localId -CanonicalByLocalId $canonicalByLocalId))
         }
     }
-    return @($items)
+    return @(Add-ResolvedArtist -Items @($items))
 }
 
 function Get-LocalListeningItem {
@@ -402,14 +449,19 @@ function Get-LibraryItemResponse {
             $file = [string]$row[0].path
             if (-not [System.IO.Path]::IsPathRooted($file)) { $file = Join-Path $Config.MusicDir $file }
             $file = [System.IO.Path]::GetFullPath($file)
-            return [pscustomobject]@{
-                id = $LocalId; source = 'navidrome'; provider = 'navidrome'
-                name = [string]$row.name; artist = [string]$row.artist; album = [string]$row.album
-                duration = [int]$row.duration; track = [int]$row.track
-                addedto = [string]$row.addedto; collectionat = [string]$row.collectionat
-                path = [string]$row.path; file = $file
-                stream_url = "/api/library/$LocalId/stream"
-                lyrics_url = "/api/library/$LocalId/lyrics"
+            # An index row can outlive its file, so only serve it while that file
+            # is still there.
+            if ([IO.File]::Exists($file)) {
+                $item = [pscustomobject]@{
+                    id = $LocalId; source = 'navidrome'; provider = 'navidrome'
+                    name = [string]$row.name; artist = [string]$row.artist; album = [string]$row.album
+                    duration = [int]$row.duration; track = [int]$row.track
+                    addedto = [string]$row.addedto; collectionat = [string]$row.collectionat
+                    path = [string]$row.path; file = $file
+                    stream_url = "/api/library/$LocalId/stream"
+                    lyrics_url = "/api/library/$LocalId/lyrics"
+                }
+                return @(Add-ResolvedArtist -Items @($item))[0]
             }
         }
     }
@@ -418,14 +470,15 @@ function Get-LibraryItemResponse {
         if ($found) {
             $lrcPath = Get-LrcPath -Path $found
             $name = [System.IO.Path]::GetFileNameWithoutExtension($found)
-            $artist = [string](Get-Item -LiteralPath (Split-Path -Parent $found)).Name
-            return [pscustomobject]@{
+            $artist = Get-LibraryFolderArtist -File $found
+            $item = [pscustomobject]@{
                 id = $LocalId; source = 'local'; provider = 'navidrome'
                 name = $name; artist = $artist; album = $artist; duration = 0; track = 0
                 addedto = ''; collectionat = ''; path = $found; file = $found
                 stream_url = "/api/library/$LocalId/stream"
                 lyrics_url = if ($lrcPath) { "/api/library/$LocalId/lyrics" } else { '' }
             }
+            return @(Add-ResolvedArtist -Items @($item))[0]
         }
     }
     # Fallback: track linked by today's DB recommendations.

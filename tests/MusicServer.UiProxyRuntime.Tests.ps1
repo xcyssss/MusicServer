@@ -9,6 +9,7 @@ Import-Module (Join-Path $ProjectRoot 'MusicServer.State.psm1') -Force
 $script:ProxyTest = [pscustomobject]@{
     Root = $null
     OldAppHome = $null
+    OldBackfill = $null
     Processes = @()
 }
 
@@ -99,6 +100,10 @@ Describe 'MusicServer live UI API proxy' {
         $script:ProxyTest.Root = $root
         $script:ProxyTest.OldAppHome = [Environment]::GetEnvironmentVariable('MUSICSERVER_APP_HOME', 'Process')
         [Environment]::SetEnvironmentVariable('MUSICSERVER_APP_HOME', $root)
+        # Hermetic fixture: the launcher's background artist resolution must not
+        # reach the network while these socket regressions run.
+        $script:ProxyTest.OldBackfill = [Environment]::GetEnvironmentVariable('MUSICSERVER_DISABLE_ARTIST_BACKFILL', 'Process')
+        [Environment]::SetEnvironmentVariable('MUSICSERVER_DISABLE_ARTIST_BACKFILL', '1', 'Process')
 
         # Run the gateway from the same isolated home as the API. Launching the
         # checkout gateway would read the user's library and start its worker.
@@ -117,6 +122,7 @@ Describe 'MusicServer live UI API proxy' {
     AfterEach {
         Stop-ProxyTestProcesses
         [Environment]::SetEnvironmentVariable('MUSICSERVER_APP_HOME', $script:ProxyTest.OldAppHome)
+        [Environment]::SetEnvironmentVariable('MUSICSERVER_DISABLE_ARTIST_BACKFILL', $script:ProxyTest.OldBackfill)
         if ($script:ProxyTest.Root) {
             try { Remove-Item -LiteralPath $script:ProxyTest.Root -Recurse -Force -ErrorAction SilentlyContinue } catch {}
         }
