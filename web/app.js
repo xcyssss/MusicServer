@@ -51,6 +51,95 @@ const itemStatus = (item) => item.wanted?.state || item.local_status || 'REMOTE'
 const statusClass = (status) => status === 'LOCAL' ? 'local' : ['DOWNLOADING', 'RESOLVING', 'VALIDATING'].includes(status) ? 'downloading' : ['RETRY_WAIT', 'CANCEL_REQUESTED'].includes(status) ? 'retry' : '';
 const normalizeLibraryItem = (item) => ({ ...item, title: item?.title || item?.name || '' });
 
+// --- Song name cleaning / formatting ---
+const NOISE_WORDS = [
+  '在百万豪装录音棚大声听', '百万豪装录音棚大声听', '百万级装备试听', '百万级装备',
+  'Hi-Res无损音质', 'Hi-Res无损臻享', 'Hi-Res无损', 'Hi-res无损', 'Hi-Res', 'Hi-res',
+  '无损音质', '无损臻享', '无损', '臻享', '臻品', '高音质',
+  '4K60fps', '4K60P', '4K', '黑胶', 'BD中字', '中字',
+  '单曲纯享', 'Official Music Video', 'OfficialMusicVideo', '官方MV', 'MV',
+  '附歌词中字', '附中日歌词', '附歌词', '动态歌词排版', '动态水印', 'FULL',
+  '百万豪装', '录音棚', '大声听', '试听', '完美', '静享版', '纯享版',
+  '中文字幕', '中英字幕', '直播',
+];
+const LIVE_RE = /\b(Live|LIVE|live)\b/g;
+const COVER_RE = /\b(Cover|翻唱)\b/g;
+
+function cleanSongName(raw) {
+  if (!raw) return '';
+  let s = String(raw);
+
+  // 1. 「」 bracket — prefer text after it if it looks like a real song title
+  const lBracket = s.match(/\u300C([^\u300D]{2,})\u300D(.+)/);
+  if (lBracket) {
+    const bracketContent = lBracket[1].trim();
+    let after = lBracket[2].replace(/\s*[-\u2013\u2014].*$/, '').trim();
+    // If after has punctuation (descriptive text) or is empty, use bracket content
+    if (!after || /[,，。！？]/.test(after) || after.length < 2) return bracketContent;
+    return after;
+  }
+
+  // 2. EP - Song pattern (e.g. 《明日方舟》EP - Follow Your Heart)
+  //    Must check before 《》 extraction — the bracket is the album, not the song.
+  const epMatch = s.match(/\bEP\b\s*[-\u2013\u2014]\s*(.+)/i);
+  if (epMatch) {
+    let songName = epMatch[1].replace(/\s*(温柔女声版|钢琴版|DJ版|片尾曲|主题曲).*$/i, '').trim();
+    if (songName.length >= 2) return songName;
+  }
+
+  // 3. 《》 bracket — handle nested brackets: take text before first inner ( or 《
+  const simpleBracket = s.match(/\u300A([^\u300A\u300B\uFF08\uFF09()]{2,})/);
+  if (simpleBracket) {
+    let title = simpleBracket[1].trim();
+    title = title.replace(/\s*(温柔女声版|钢琴版|DJ版|伴奏版|纯音乐版|片尾曲|主题曲|插曲).*$/, '').trim();
+    if (title.length >= 2) return title;
+  }
+  // Fallback: full bracket content with sub-titles stripped
+  const fullBracket = s.match(/\u300A([^\u300B]{2,})\u300B/);
+  if (fullBracket) {
+    let title = fullBracket[1].replace(/[\uFF08(][^\uFF09)]*[\uFF09)]/g, '').trim();
+    if (title.length >= 2) return title;
+  }
+
+  // 4. Strip noise
+  s = s.replace(/[\u3010][^\u3011]*[\u3011]/g, ' ').replace(/\[[^\]]*\]/g, ' ');
+  for (const w of NOISE_WORDS) { s = s.split(w).join(' '); }
+
+  // 5. Song - Artist
+  const dashMatch = s.match(/^(.+?)\s*[-\u2013\u2014]\s*(.+)$/);
+  if (dashMatch) { s = dashMatch[1].trim(); }
+
+  // 6. Clean residual
+  s = s.replace(/[\u300A\u300B\u300C\u300D\u300E\u300F\u201C\u201D\u2018\u2019\uFF08\uFF09\[\]()]/g, ' ').replace(/\s+/g, ' ').trim();
+  s = s.replace(/\s*(p\d{2}|ver\.?|version|温柔女声版|钢琴版|DJ版|片尾曲|主题曲).*$/i, '').trim();
+  return s || '\u672A\u547D\u540D\u6B4C\u66F2';
+}
+
+function cleanArtistName(raw, songTitle) {
+  if (!raw) return '';
+  let s = String(raw);
+  // Remove noise
+  for (const w of NOISE_WORDS) { s = s.replace(new RegExp(w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'), ' '); }
+  s = s.replace(/[《》「」『』""''【】\[\]]/g, ' ').replace(/\s+/g, ' ').trim();
+  // If artist contains the song title, it's probably not a real artist
+  if (songTitle && s.includes(songTitle)) return '';
+  return s;
+}
+
+function formatTrackDisplay(item) {
+  const rawTitle = item?.title || item?.name || '';
+  const rawArtist = item?.artist || '';
+  const cleaned = cleanSongName(rawTitle);
+  const artist = cleanArtistName(rawArtist, cleaned);
+  // Detect Live/Cover tags from the original title
+  const isLive = LIVE_RE.test(rawTitle);
+  const isCover = COVER_RE.test(rawTitle);
+  let displayTitle = cleaned;
+  if (isLive && !/\blive\b/i.test(displayTitle)) displayTitle += ' (Live)';
+  if (isCover && !/cover|翻唱/i.test(displayTitle)) displayTitle += ' (Cover)';
+  return { title: displayTitle, artist: artist || '未知艺术家' };
+}
+
 const PLAYBACK_MIN_SECONDS = 30;
 const PLAYBACK_MIN_RATIO = 0.25;
 
@@ -230,10 +319,11 @@ function renderLibrary() {
   list._dirty = false;
   replaceList(list, visible.map((item) => {
     const playing = state.currentKey === keyOf(item);
-    const meta = [item.artist || '未知艺术家', item.album || '未知专辑'].filter(Boolean).join(' · ');
+    const display = formatTrackDisplay(item);
+    const meta = [display.artist, item.album || ''].filter(Boolean).join(' · ');
     return `<article class="track-row library-row ${playing ? 'playing' : ''}" data-library-id="${escapeHtml(item.id)}">
-      <button class="play-button" data-action="play" aria-label="${playing && !$('#audio-player').paused ? '暂停' : '播放'} ${escapeHtml(item.title)}">${playing && !$('#audio-player').paused ? '❚❚' : '▶'}</button>
-      <div class="track-main"><div class="track-title">${escapeHtml(item.title || '未命名歌曲')}</div><div class="track-artist">${escapeHtml(meta)}</div></div>
+      <button class="play-button" data-action="play" aria-label="${playing && !$('#audio-player').paused ? '暂停' : '播放'} ${escapeHtml(display.title)}">${playing && !$('#audio-player').paused ? '❚❚' : '▶'}</button>
+      <div class="track-main"><div class="track-title">${escapeHtml(display.title)}</div><div class="track-artist">${escapeHtml(meta)}</div></div>
       <span class="library-mark">${item.starred ? '♥' : (item.source === 'DailyMix' ? '今日' : '')}</span>
       <span class="track-duration">${duration(item.duration)}</span>
       <button class="lyrics-button" data-action="lyrics" aria-label="查看歌词">词</button>
@@ -286,9 +376,11 @@ function renderRecommendations() {
   list._dirty = false;
   replaceList(list, state.items.map((item) => {
     const status = itemStatus(item); const playing = state.currentKey === keyOf(item);
+    const display = formatTrackDisplay(item);
+    const meta = [display.artist, item.reason || '为你推荐'].filter(Boolean).join(' · ');
     return `<article class="track-row ${playing ? 'playing' : ''}" data-track-id="${escapeHtml(item.track_id)}">
-      <button class="play-button" data-action="play" aria-label="${playing && !$('#audio-player').paused ? '暂停' : '播放'} ${escapeHtml(item.title)}">${playing && !$('#audio-player').paused ? '❚❚' : '▶'}</button>
-      <div class="track-main"><div class="track-title">${escapeHtml(item.title)}</div><div class="track-artist">${escapeHtml(item.artist || '未知艺术家')}</div><div class="track-reason">${escapeHtml(item.reason || '为你推荐')}</div></div>
+      <button class="play-button" data-action="play" aria-label="${playing && !$('#audio-player').paused ? '暂停' : '播放'} ${escapeHtml(display.title)}">${playing && !$('#audio-player').paused ? '❚❚' : '▶'}</button>
+      <div class="track-main"><div class="track-title">${escapeHtml(display.title)}</div><div class="track-artist">${escapeHtml(meta)}</div></div>
       <span class="status-badge ${statusClass(status)}">${escapeHtml(labels[status] || status)}</span>
       <span class="track-duration">${duration(item.duration)}</span>
       <button class="heart-button ${item.liked ? 'liked' : ''}" data-action="like" ${pendingLikes.has(item.track_id) ? 'disabled' : ''} aria-label="${item.liked ? '取消喜欢' : '喜欢'}" aria-pressed="${item.liked}">${item.liked ? '♥' : '♡'}</button>
@@ -306,21 +398,27 @@ function renderListening() {
   const rediscover = (state.listening.rediscover || []).filter((item) => !activeLocalId || localIdOf(item) !== activeLocalId);
 
   mostList.innerHTML = most.length
-    ? most.map((item, index) => `<article class="listening-row" data-listening-id="${escapeHtml(item.id || item.library_id || item.identity)}">
-        <span class="listening-rank">${String(index + 1).padStart(2, '0')}</span>
-        <button class="listening-play" data-action="play" type="button" aria-label="播放 ${escapeHtml(item.title)}">▶</button>
-        <div class="listening-main"><div class="listening-title">${escapeHtml(item.title || '未命名歌曲')}</div><div class="listening-artist">${escapeHtml(item.artist || '未知艺术家')}</div></div>
-        <span class="listening-count">${Number(item.play_count || 0)} 次</span>
-      </article>`).join('')
+    ? most.map((item, index) => {
+        const d = formatTrackDisplay(item);
+        return `<article class="listening-row" data-listening-id="${escapeHtml(item.id || item.library_id || item.identity)}">
+          <span class="listening-rank">${String(index + 1).padStart(2, '0')}</span>
+          <button class="listening-play" data-action="play" type="button" aria-label="播放 ${escapeHtml(d.title)}">▶</button>
+          <div class="listening-main"><div class="listening-title">${escapeHtml(d.title)}</div><div class="listening-artist">${escapeHtml(d.artist)}</div></div>
+          <span class="listening-count">${Number(item.play_count || 0)} 次</span>
+        </article>`;
+      }).join('')
     : '<div class="listening-empty">播放满 30 秒后，这里会留下你的常听。</div>';
 
   rediscoverList.innerHTML = rediscover.length
-    ? rediscover.map((item) => `<article class="listening-row rediscover-row" data-listening-id="${escapeHtml(item.id || item.library_id || item.identity)}">
-        <span class="rediscover-mark">✦</span>
-        <button class="listening-play" data-action="play" type="button" aria-label="播放 ${escapeHtml(item.title)}">▶</button>
-        <div class="listening-main"><div class="listening-title">${escapeHtml(item.title || '未命名歌曲')}</div><div class="listening-artist">${escapeHtml(item.artist || '未知艺术家')}</div></div>
-        <span class="listening-count">${Number(item.play_count || 0) ? `${Number(item.play_count)} 次` : '未播放'}</span>
-      </article>`).join('')
+    ? rediscover.map((item) => {
+        const d = formatTrackDisplay(item);
+        return `<article class="listening-row rediscover-row" data-listening-id="${escapeHtml(item.id || item.library_id || item.identity)}">
+          <span class="rediscover-mark">✦</span>
+          <button class="listening-play" data-action="play" type="button" aria-label="播放 ${escapeHtml(d.title)}">▶</button>
+          <div class="listening-main"><div class="listening-title">${escapeHtml(d.title)}</div><div class="listening-artist">${escapeHtml(d.artist)}</div></div>
+          <span class="listening-count">${Number(item.play_count || 0) ? `${Number(item.play_count)} 次` : '未播放'}</span>
+        </article>`;
+      }).join('')
     : '<div class="listening-empty">曲库里的歌都在等你重新发现。</div>';
 }
 
@@ -353,8 +451,9 @@ function renderMode() {
 
 function updatePlayer(item) {
   if (!item) return;
-  $('#player-title').textContent = item.title || '未命名歌曲';
-  $('#player-artist').textContent = item.artist || '未知艺术家';
+  const display = formatTrackDisplay(item);
+  $('#player-title').textContent = display.title;
+  $('#player-artist').textContent = display.artist;
   $('#player-art').textContent = item.local_status === 'LOCAL' || item.stream_url ? '♫' : '♪';
 }
 
