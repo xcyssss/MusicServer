@@ -191,10 +191,17 @@ function Get-DailyRecommendTaskPreferences {
     if (-not $Task) { return $preferences }
     $trigger = @($Task.Triggers) | Select-Object -First 1
     if ($trigger -and $trigger.StartBoundary) {
-        try {
-            $start = [datetime]::Parse([string]$trigger.StartBoundary, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
-            $preferences.Time = $start.ToString('HH:mm')
-        } catch { }
+        # A daily trigger stores the wall-clock time the user picked. Read the
+        # time as written: converting the offset to local time would shift the
+        # schedule whenever the reading machine sits in another time zone.
+        $match = [regex]::Match([string]$trigger.StartBoundary, '[T ](\d{2}):(\d{2})')
+        if ($match.Success) {
+            $preferences.Time = '{0}:{1}' -f $match.Groups[1].Value, $match.Groups[2].Value
+        } else {
+            try {
+                $preferences.Time = ([datetime]$trigger.StartBoundary).ToString('HH:mm')
+            } catch { }
+        }
     }
     $action = @($Task.Actions) | Select-Object -First 1
     if ($action) {
