@@ -159,6 +159,32 @@ Describe 'MusicServer web UI safeguards' {
         $launcher | Should Match 'Stop-Process -Id \$ApiProcess\.Id'
     }
 
+    It 'writes bounded runtime logs for every runtime component' {
+        $root = Join-Path $PSScriptRoot '..'
+        $launcher = Get-Content -LiteralPath (Join-Path $root 'start_musicserver_ui.ps1') -Raw -Encoding UTF8
+        $launcher | Should Match 'Write-MusicServerLog'
+        $launcher | Should Match 'RedirectStandardOutput'
+        (Get-Content -LiteralPath (Join-Path $root 'watchdog_ui.ps1') -Raw -Encoding UTF8) | Should Match 'Write-MusicServerLog'
+        (Get-Content -LiteralPath (Join-Path $root 'MusicServer.Core.psm1') -Raw -Encoding UTF8) | Should Match 'function Write-MusicServerLog'
+
+        $api = Get-Content -LiteralPath (Join-Path $root 'music_api.ps1') -Raw -Encoding UTF8
+        $api | Should Match 'musicserver-api\.log'
+        $api | Should Match 'Write-ApiLog'
+        $api | Should Match 'API listening on'
+
+        $worker = Get-Content -LiteralPath (Join-Path $root 'wanted_worker.ps1') -Raw -Encoding UTF8
+        $worker | Should Match 'musicserver-worker\.log'
+        $worker | Should Match 'Write-WorkerLog'
+        $worker | Should Match '\[done\]'
+
+        foreach ($file in @('start_musicserver_ui.ps1', 'watchdog_ui.ps1', 'music_api.ps1', 'wanted_worker.ps1')) {
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile((Join-Path $root $file), [ref]$tokens, [ref]$errors)
+            @($errors).Count | Should Be 0
+        }
+    }
+
     It 'serves the local library through the current Navidrome media_file schema' {
         $launcher = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\start_musicserver_ui.ps1') -Raw -Encoding UTF8
         $launcher | Should Match 'function Invoke-NavidromeSqliteJson'

@@ -55,11 +55,22 @@ if (-not $OwnsWatchdogMutex) {
 function Write-WatchLog {
     param([string]$Message)
     if (-not $LogFile) { return }
+    if (Get-Command Write-MusicServerLog -ErrorAction SilentlyContinue) {
+        Write-MusicServerLog -Path $LogFile -Message $Message
+        return
+    }
+    # The watchdog must keep working even if the runtime modules are unavailable.
     try {
         $line = '[{0}] {1}' -f ([DateTime]::Now.ToString('yyyy-MM-dd HH:mm:ss')), $Message
         Add-Content -LiteralPath $LogFile -Value $line -Encoding UTF8
     } catch {}
 }
+
+# Reuse the shared bounded logger when Core is present next to the launcher.
+try {
+    $WatchdogCore = Join-Path (Split-Path -Parent $RestartScript) 'MusicServer.Core.psm1'
+    if (Test-Path -LiteralPath $WatchdogCore -PathType Leaf) { Import-Module $WatchdogCore -Force -WarningAction SilentlyContinue }
+} catch {}
 
 # Give the UI a grace period to start writing heartbeats.
 Start-Sleep -Seconds 10

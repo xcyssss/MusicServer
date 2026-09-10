@@ -125,6 +125,39 @@ function New-MusicServerConfig {
     }
 }
 
+function Write-MusicServerLog {
+    <#
+    .SYNOPSIS
+      Append one timestamped line to a runtime log and rotate it when it grows
+      past the size cap. Every runtime component logs through this helper so the
+      files under APP_HOME\logs stay bounded and uniformly formatted.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Message,
+        [int]$MaxBytes = 4194304,
+        [int]$KeepFiles = 2
+    )
+
+    try {
+        $directory = Split-Path -Parent $Path
+        if ($directory -and -not (Test-Path -LiteralPath $directory -PathType Container)) {
+            New-Item -ItemType Directory -Force -Path $directory | Out-Null
+        }
+        if ((Test-Path -LiteralPath $Path -PathType Leaf) -and ((Get-Item -LiteralPath $Path).Length -ge $MaxBytes)) {
+            $oldest = "$Path.$KeepFiles"
+            if (Test-Path -LiteralPath $oldest -PathType Leaf) { Remove-Item -LiteralPath $oldest -Force }
+            for ($index = $KeepFiles - 1; $index -ge 1; $index--) {
+                $source = "$Path.$index"
+                if (Test-Path -LiteralPath $source -PathType Leaf) { Move-Item -LiteralPath $source -Destination "$Path.$($index + 1)" -Force }
+            }
+            Move-Item -LiteralPath $Path -Destination "$Path.1" -Force
+        }
+        $line = '[{0}] {1}' -f ([DateTime]::Now.ToString('yyyy-MM-dd HH:mm:ss')), $Message
+        Add-Content -LiteralPath $Path -Value $line -Encoding UTF8
+    } catch {}
+}
+
 function Initialize-MusicServerState {
     param(
         [Parameter(Mandatory)][psobject]$Config,

@@ -52,10 +52,7 @@ $script:NextHeartbeatAt = [DateTime]::MinValue
 
 function Write-UiLog {
     param([string]$Message)
-    try {
-        $line = '[{0}] {1}' -f ([DateTime]::Now.ToString('yyyy-MM-dd HH:mm:ss')), $Message
-        Add-Content -LiteralPath $UiLog -Value $line -Encoding UTF8
-    } catch {}
+    Write-MusicServerLog -Path $UiLog -Message $Message
 }
 
 function Test-ApiReady {

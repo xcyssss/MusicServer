@@ -46,6 +46,13 @@ Import-Module (Join-Path $PSScriptRoot 'MusicServer.Http.psm1') -Force
 
 $Config = New-MusicServerConfig -Root $Root
 Initialize-MusicServerState -Config $Config -SkipLibrary
+# The API is spawned with redirected stdio, so Write-Host output is discarded.
+# Runtime diagnostics must therefore go to a file under APP_HOME\logs.
+$ApiLog = Join-Path $Config.LogDir 'musicserver-api.log'
+function Write-ApiLog {
+    param([string]$Message)
+    Write-MusicServerLog -Path $ApiLog -Message $Message
+}
 $DbPath = Join-Path $Config.StateDir 'musicserver.db'
 $SqliteExe = [string]$Config.Sqlite
 if (-not $SqliteExe -or -not (Test-Path -LiteralPath $SqliteExe)) {
@@ -64,6 +71,7 @@ Initialize-MusicServerSchema
 Apply-ConfiguredMusicDir -Config $Config
 Initialize-MusicServerLibrary -Config $Config | Out-Null
 Write-Host ("API v2 ready | db={0} | music_dir={1} | migration=NOT_REQUESTED" -f $DbPath, $Config.MusicDir) -ForegroundColor Green
+Write-ApiLog ("API v2 ready | db={0} | music_dir={1}" -f $DbPath, $Config.MusicDir)
 
 function Send-Json([psobject]$Context) {
     $body = $Context.Body
@@ -617,16 +625,18 @@ function Resolve-RouteLikeTransaction {
     return @{ Result = $result; Wanted = $wanted }
 }
 
+$script:requestCount = 0
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Identity.psm1') -Force
+$script:BuildMarker = Get-MusicServerBuildIdentity -Root $PSScriptRoot
+
 $listener = [System.Net.HttpListener]::new()
 $prefix = $Prefix
 if (-not $prefix.EndsWith('/')) { $prefix += '/' }
 $listener.Prefixes.Add($prefix)
 $listener.Start()
-Write-Host "API listening on $($listener.Prefixes[0])" -ForegroundColor Cyan
+Write-Host "API listening on $prefix" -ForegroundColor Cyan
+Write-ApiLog ("API listening on {0} | marker={1}" -f $prefix, $script:BuildMarker)
 
-$script:requestCount = 0
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.Identity.psm1') -Force
-$script:BuildMarker = Get-MusicServerBuildIdentity -Root $PSScriptRoot
 # /api/today is recomputed per request and costs ~5s (each DB read spawns a
 # sqlite3 subprocess; 20 tracks x several reads). The UI polls it every 15s,
 # and because the UI proxies on a single thread, a slow /api/today blocks
@@ -647,6 +657,7 @@ while ($true) {
     $script:requestCount++
     $script:RequestSqliteStart = Get-MusicServerSqliteInvocationCount
     Write-Host ("[{0}] {1} {2}  (req #{3})" -f [DateTime]::Now.ToString('HH:mm:ss'), $method, $path, $script:requestCount) -ForegroundColor Gray
+    Write-ApiLog ("{0} {1} (req #{2})" -f $method, $path, $script:requestCount)
     $startTime = [DateTime]::UtcNow
     try {
         $bodyText = (Read-MusicServerJsonRequest -Request $request).Text
@@ -982,6 +993,7 @@ while ($true) {
         elseif ($errMsg -match 'LIBRARY_NOT_FOUND') { $statusCode = 404 }
         elseif ($errMsg -match 'Sqlite|sqlite|NOT\s+NULL|constraint|no such table|database is locked') { $statusCode = 500 }
         Write-Host "  ERROR: $errMsg" -ForegroundColor Red
+        Write-ApiLog ("ERROR {0} {1} status={2} {3}" -f $method, $path, $statusCode, $errMsg)
         $errorCode = if ($inputError) { [string]$_.Exception.Data['ErrorCode'] } elseif ($statusCode -eq 404) { 'NOT_FOUND' } else { 'INTERNAL_ERROR' }
         try {
             if ($inputError) { $Context.Response.KeepAlive = $false }
@@ -991,6 +1003,7 @@ while ($true) {
     } finally {
         $elapsed = ([DateTime]::UtcNow - $startTime).TotalMilliseconds
         Write-Host ("  done in {0:N0} ms" -f $elapsed) -ForegroundColor DarkGray
+        if ($elapsed -ge 3000) { Write-ApiLog ("SLOW {0} {1} took {2:N0} ms" -f $method, $path, $elapsed) }
     }
     if ($Once) { break }
 }
