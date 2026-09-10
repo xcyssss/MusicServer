@@ -116,10 +116,11 @@ Persistent Data (outside the repository, under APP_HOME unless MusicDir is exter
 
 | Path | Category | Runtime | Build | Test | Imports | Recommendation |
 |------|----------|---------|-------|------|---------|----------------|
-| `daily_recommend.ps1` | MAINTENANCE_TOOL | — | — | YES (static analysis) | Core, Database, State, Migration | KEEP_IN_ROOT |
+| `daily_recommend.ps1` | MAINTENANCE_TOOL | BUNDLED (staged; run by `MusicServer_DailyRecommend`) | — | YES (static analysis) | Core, Database, State, Migration | KEEP_IN_ROOT |
 | `daily_cleanup.ps1` | MAINTENANCE_TOOL | — | — | YES (static analysis) | Core, Database, State, lib_playlist | KEEP_IN_ROOT |
 | `lib_playlist.ps1` | MAINTENANCE_TOOL | — | — | — | (none — IS a library) | KEEP_IN_ROOT |
 | `register_wanted_worker.ps1` | MAINTENANCE_TOOL | — | — | — | (none) | KEEP_IN_ROOT |
+| `register_daily_recommend.ps1` | MAINTENANCE_TOOL | BUNDLED (staged; launcher registers `MusicServer_DailyRecommend`) | — | — | (none) | KEEP_IN_ROOT |
 | `fetch_lyrics.ps1` | MAINTENANCE_TOOL | — | — | — | (none) | MOVE_TO_SCRIPTS |
 | `fix_one_lyric.ps1` | MAINTENANCE_TOOL | — | — | — | (none) | MOVE_TO_SCRIPTS |
 | `fix_tags.ps1` | MAINTENANCE_TOOL | — | — | — | (none) | MOVE_TO_SCRIPTS |
@@ -295,8 +296,8 @@ README.md
 
 | Evidence | Detail |
 |----------|--------|
-| Importers | 1 production (`daily_recommend.ps1:39`, gated behind `-MigrateLegacy`) + 4 test files |
-| Runtime | NOT in Tauri bundle, NOT in normal daily flow |
+| Importers | 1 production (`daily_recommend.ps1:39`) + 4 test files |
+| Runtime | Staged in the Tauri bundle as a dependency of `daily_recommend.ps1`; not used by the normal API/UI flow |
 | Purpose | One-time legacy JSON/CSV → SQLite migration |
 | Idempotent | YES — `migration_markers` table prevents re-execution |
 | Test impact | 4 test files import it: V2, Recommendation, LegacyRetirement, ApiTransaction |

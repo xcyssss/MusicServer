@@ -62,7 +62,9 @@ The packaged runtime contains only what the desktop APP needs to boot its own UI
 - `watchdog_ui.ps1`
 - `music_api.ps1`
 - `wanted_worker.ps1`
-- Core/Database/Http/State/Providers/Identity modules
+- `daily_recommend.ps1`
+- `register_daily_recommend.ps1`
+- Core/Database/Http/State/Providers/Identity/Migration modules
 - `web/`
 - a real `sqlite3.exe`
 
@@ -112,6 +114,7 @@ MusicServer/
 ├─ daily_cleanup.ps1              # operational maintenance tool
 ├─ lib_playlist.ps1               # shared utility (dot-sourced by daily_cleanup)
 ├─ register_wanted_worker.ps1     # operational setup
+├─ register_daily_recommend.ps1   # operational setup (daily recommendation task)
 └─ start_musicserver_ui.bat       # convenience launcher wrapper
 ```
 
@@ -193,7 +196,9 @@ Batch related steps as local commits; after a meaningful stage and local validat
 
 After completing a meaningful task, update this `AGENTS.md` checkpoint when the task changes architecture, release behavior, test gates, or important operating rules. Keep only current durable facts; do not accumulate transient debugging notes.
 
-## Current checkpoint — 2026-09-08
+## Current checkpoint — 2026-09-10
+
+- The desktop runtime ships `daily_recommend.ps1`, `register_daily_recommend.ps1` and their `MusicServer.Migration.psm1` dependency. All three are staged by `scripts/prepare_tauri_runtime.ps1`, listed in the Rust runtime `REQUIRED` allowlist and included in the content build identity; `daily_recommend.ps1` takes `-AppHome` so a scheduled run is independent of environment variables. The launcher registers `MusicServer_DailyRecommend` (daily 07:00, action bound to the packaged APP_HOME) idempotently and starts it once when the task has not run today, so a fresh install gets recommendations without manual setup. Registration is skipped for source checkouts (`.git` present) and disabled with `MUSICSERVER_DISABLE_SCHEDULED_TASKS=1`; failures are logged and never block startup. `MusicServer_DailyCleanup` is still a legacy manual task and is not auto-registered.
 
 - Installed smoke restart checks the actual APP process exit and then requires all service ports closed. A nonzero taskkill tree result is diagnostic only after confirmed APP exit; it must never bypass the process/port shutdown gates. PS5.1 Tauri tests cover this distinction.
 

@@ -180,6 +180,13 @@ MusicServer/
 .\scripts\maintenance\fix_one_lyric.ps1 -FilePattern "*歌曲名*" -Search "歌曲名"
 ```
 
+安装版桌面 APP 会自动注册每日推荐计划任务（`MusicServer_DailyRecommend`，每天 07:00，动作绑定 APP_HOME），并在启动时补跑当天尚未生成的推荐；如需自定义时间或移除：
+
+```powershell
+.\register_daily_recommend.ps1 -Time 08:30
+.\register_daily_recommend.ps1 -Unregister
+```
+
 ## CI 与发布门禁
 
 `.github/workflows/core-tests.yml` 在 `windows-latest` 上运行三个独立 gate：

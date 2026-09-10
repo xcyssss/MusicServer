@@ -357,6 +357,16 @@ Windows Scheduled Task 的注册入口为：
 .\register_wanted_worker.ps1
 ```
 
+每日推荐的计划任务入口为：
+
+```powershell
+.\register_daily_recommend.ps1              # 注册 MusicServer_DailyRecommend（每天 07:00）
+.\register_daily_recommend.ps1 -Time 08:30  # 自定义触发时间
+.\register_daily_recommend.ps1 -Unregister  # 移除
+```
+
+安装版桌面 APP 会在启动时自动完成这一步：任务动作绑定当前 APP_HOME（传递 `-AppHome`，不依赖环境变量），并在当天尚未生成推荐时立即触发一次，因此新安装无需手工配置即可得到当日推荐。设置 `MUSICSERVER_DISABLE_SCHEDULED_TASKS=1` 可关闭自动注册与补跑；从源码检出运行时不会注册任务。
+
 ---
 
 ## 8. 常用维护命令
