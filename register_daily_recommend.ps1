@@ -33,7 +33,13 @@ $startAt = [datetime]::ParseExact($Time, 'HH:mm', [Globalization.CultureInfo]::I
 $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" -Count $Count -AppHome `"$AppHome`""
 $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arguments -WorkingDirectory $PSScriptRoot
 $trigger = New-ScheduledTaskTrigger -Daily -At $startAt
-Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger `
+# Register-ScheduledTask's defaults would silently disable this task for many
+# users: a laptop on battery never starts it, a 07:00 start missed because the
+# PC was off is never caught up, and unplugging mid-run kills it. The daily
+# recommendation must not depend on the machine being plugged in and awake.
+$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+    -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 1) -MultipleInstances IgnoreNew
+Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings `
     -Description 'Generate the daily MusicServer recommendation metadata.' -Force | Out-Null
 Write-Host "已注册计划任务：$taskName（每天 $Time）" -ForegroundColor Green
 Write-Host "如需移除：.\register_daily_recommend.ps1 -Unregister" -ForegroundColor DarkGray

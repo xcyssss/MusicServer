@@ -100,10 +100,22 @@ Describe 'MusicServer Tauri desktop shell' {
         $registrar | Should Match 'Unregister'
         $registrar | Should Match 'New-ScheduledTaskTrigger'
         $registrar | Should Match '-AppHome'
+        # A plain Register-ScheduledTask refuses to run on battery and never
+        # catches up a missed 07:00 start, which silently disables the task for
+        # anyone on a laptop.
+        $registrar | Should Match 'New-ScheduledTaskSettingsSet'
+        $registrar | Should Match '-AllowStartIfOnBatteries'
+        $registrar | Should Match '-DontStopIfGoingOnBatteries'
+        $registrar | Should Match '-StartWhenAvailable'
+        $registrar | Should Match '-Settings \$settings'
 
         $generator = Get-Content -LiteralPath (Join-Path $ProjectRoot 'daily_recommend.ps1') -Raw -Encoding UTF8
         $generator | Should Match '\$AppHome'
         $generator | Should Match 'New-MusicServerConfig -Root \$Root -AppHome \$AppHome'
+        # A fresh install has no likes or stars, so the local library must be able
+        # to seed the generator.
+        $generator | Should Match 'Get-LibrarySeedRows'
+        $generator | Should Match '-LibraryFallback'
 
         $identity = Get-Content -LiteralPath (Join-Path $ProjectRoot 'MusicServer.Identity.psm1') -Raw -Encoding UTF8
         $identity | Should Match 'daily_recommend\.ps1'
@@ -123,12 +135,91 @@ Describe 'MusicServer Tauri desktop shell' {
         $launcher | Should Match 'MUSICSERVER_DISABLE_SCHEDULED_TASKS'
         $launcher | Should Match 'register_daily_recommend\.ps1'
         $launcher | Should Match 'Start-ScheduledTask'
+        # An existing task registered with the old defaults must be repaired, and
+        # a day that still has no rows must be retried rather than skipped.
+        $launcher | Should Match 'Test-DailyRecommendTaskCurrent'
+        $launcher | Should Match 'Test-DailyRecommendGeneratedToday'
+        $launcher | Should Match 'daily_recommendations'
+        $launcher | Should Match 'StartWhenAvailable'
+        # The health check must read the home the task is pinned to, not the
+        # environment-resolved APP_HOME, or the two can disagree.
+        $launcher | Should Match 'New-MusicServerConfig -Root \$Root -AppHome \$Root'
+        # A repair must carry the user's own schedule instead of resetting it.
+        $launcher | Should Match 'Get-DailyRecommendTaskPreferences'
+        $launcher | Should Match '& \$registrar @registerArgs'
+        # The generator must follow the configured library rather than a path
+        # frozen at registration time.
+        $generatorText = Get-Content -LiteralPath (Join-Path $ProjectRoot 'daily_recommend.ps1') -Raw -Encoding UTF8
+        $generatorText | Should Match 'Apply-ConfiguredMusicDir'
+        $generatorText | Should Match '\$Config\.MusicDir'
         # A source checkout must not register machine state.
         $launcher | Should Match '\$Root ''\.git'''
 
         $errors = $null
         $null = [System.Management.Automation.Language.Parser]::ParseFile($launcherPath, [ref]$null, [ref]$errors)
         @($errors).Count | Should Be 0
+    }
+
+    It 'treats a daily recommendation task that cannot run on battery as stale' {
+        $launcherPath = Join-Path $ProjectRoot 'start_musicserver_ui.ps1'
+        $text = Get-Content -LiteralPath $launcherPath -Raw -Encoding UTF8
+        $source = [regex]::Match($text, '(?s)function Test-DailyRecommendTaskCurrent \{.*?\n\}').Value
+        $source | Should Not BeNullOrEmpty
+        . ([scriptblock]::Create($source))
+
+        $generator = Join-Path $ProjectRoot 'daily_recommend.ps1'
+        function New-ProbeTask {
+            param([string]$Arguments, [bool]$StartWhenAvailable, [bool]$DisallowBattery, [bool]$StopOnBattery)
+            return [pscustomobject]@{
+                Actions = @([pscustomobject]@{ Arguments = $Arguments })
+                Settings = [pscustomobject]@{
+                    StartWhenAvailable = $StartWhenAvailable
+                    DisallowStartIfOnBatteries = $DisallowBattery
+                    StopIfGoingOnBatteries = $StopOnBattery
+                }
+            }
+        }
+        $healthy = New-ProbeTask -Arguments "-File `"$generator`"" -StartWhenAvailable $true -DisallowBattery $false -StopOnBattery $false
+        (Test-DailyRecommendTaskCurrent -Task $healthy -Generator $generator) | Should Be $true
+
+        $batteryBlocked = New-ProbeTask -Arguments "-File `"$generator`"" -StartWhenAvailable $false -DisallowBattery $true -StopOnBattery $true
+        (Test-DailyRecommendTaskCurrent -Task $batteryBlocked -Generator $generator) | Should Be $false
+
+        $wrongScript = New-ProbeTask -Arguments '-File "C:\other\daily_recommend.ps1"' -StartWhenAvailable $true -DisallowBattery $false -StopOnBattery $false
+        (Test-DailyRecommendTaskCurrent -Task $wrongScript -Generator $generator) | Should Be $false
+        (Test-DailyRecommendTaskCurrent -Task $null -Generator $generator) | Should Be $false
+    }
+
+    It 'keeps a user-customised daily recommendation schedule across a repair' {
+        $launcherPath = Join-Path $ProjectRoot 'start_musicserver_ui.ps1'
+        $text = Get-Content -LiteralPath $launcherPath -Raw -Encoding UTF8
+        $source = [regex]::Match($text, '(?s)function Get-DailyRecommendTaskPreferences \{.*?\n\}').Value
+        $source | Should Not BeNullOrEmpty
+        . ([scriptblock]::Create($source))
+
+        function New-PreferenceTask {
+            param([string]$Arguments, [string]$StartBoundary)
+            return [pscustomobject]@{
+                Actions = @([pscustomobject]@{ Arguments = $Arguments })
+                Triggers = @([pscustomobject]@{ StartBoundary = $StartBoundary })
+            }
+        }
+
+        # The install directory moved, so the arguments point at the old path.
+        $moved = New-PreferenceTask -Arguments '-NoProfile -ExecutionPolicy Bypass -File "D:\old\daily_recommend.ps1" -Count 35 -AppHome "D:\old"' -StartBoundary '2026-09-10T08:30:00+08:00'
+        $preferences = Get-DailyRecommendTaskPreferences -Task $moved
+        $preferences.Time | Should Be '08:30'
+        $preferences.Count | Should Be 35
+
+        $defaults = New-PreferenceTask -Arguments '-File "C:\x\daily_recommend.ps1" -Count 20 -AppHome "C:\x"' -StartBoundary '2026-09-10T07:00:00+08:00'
+        $plain = Get-DailyRecommendTaskPreferences -Task $defaults
+        $plain.Time | Should Be '07:00'
+        $plain.Count | Should Be 20
+
+        # A first install has no prior task and must fall back to the defaults.
+        $empty = Get-DailyRecommendTaskPreferences -Task $null
+        $empty.Time | Should Be ''
+        $empty.Count | Should Be 0
     }
 
     It 'uses the shared content identity in services, build and smoke checks' {

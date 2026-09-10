@@ -546,6 +546,7 @@ function Get-RecommendationSeedCandidatesDb {
     param(
         [int]$SeedCount = 25,
         [AllowEmptyCollection()][object[]]$NavidromeStars = @(),
+        [AllowEmptyCollection()][object[]]$LibraryFallback = @(),
         [int]$RandomSeed = -1
     )
 
@@ -627,6 +628,30 @@ function Get-RecommendationSeedCandidatesDb {
         if (-not $trackId) { $trackId = Get-CanonicalTrackId -Title $title -Artist $artist }
         $key = "text:$(Normalize-MusicText $title)|$(Normalize-MusicText $artist)"
         $signals[$key] = [pscustomobject]@{ TrackId = $trackId; Title = $title; Artist = $artist; Weight = 5; Source = 'navidrome_star' }
+    }
+
+    # A fresh install has no likes, no stars and no legacy import, so the
+    # preference-only pool is empty and the daily generator would save zero
+    # recommendations every day. The local library is the weakest signal and is
+    # only consulted when nothing stronger exists, so it cannot dilute a pool
+    # that already reflects the user's taste.
+    if ($signals.Count -eq 0) {
+        foreach ($fallback in @($LibraryFallback)) {
+            $title = ''; $artist = ''; $trackId = ''
+            if ($fallback -is [string]) {
+                $parts = [string]$fallback -split ' - ', 2
+                $title = [string]$parts[0]; if ($parts.Count -gt 1) { $artist = [string]$parts[1] }
+            } else {
+                $title = [string](Get-OptionalProperty $fallback 'Title' (Get-OptionalProperty $fallback 'title'))
+                $artist = [string](Get-OptionalProperty $fallback 'Artist' (Get-OptionalProperty $fallback 'artist'))
+                $trackId = [string](Get-OptionalProperty $fallback 'TrackId' (Get-OptionalProperty $fallback 'track_id'))
+            }
+            if (-not $title) { continue }
+            if (-not $trackId) { $trackId = Get-CanonicalTrackId -Title $title -Artist $artist }
+            $key = "text:$(Normalize-MusicText $title)|$(Normalize-MusicText $artist)"
+            if ($signals.ContainsKey($key)) { continue }
+            $signals[$key] = [pscustomobject]@{ TrackId = $trackId; Title = $title; Artist = $artist; Weight = 1; Source = 'library_fallback' }
+        }
     }
 
     $expanded = foreach ($seed in @($signals.Values)) {

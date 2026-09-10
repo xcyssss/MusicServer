@@ -241,6 +241,22 @@ Describe 'MusicServer Hardening v2 - Recommendation State' {
         $seed.Weight | Should Be 1
     }
 
+    It 'seeds a fresh install from the local library when no preference exists' {
+        $seed = @(Get-RecommendationSeedCandidatesDb -SeedCount 25 -LibraryFallback @('霜雪千年 - 双笙&封茗囧菌') -RandomSeed 7) | Select-Object -First 1
+        $seed.Source | Should Be 'library_fallback'
+        $seed.Weight | Should Be 1
+        $seed.Title | Should Be '霜雪千年'
+        $seed.Artist | Should Be '双笙&封茗囧菌'
+    }
+
+    It 'keeps the local library fallback out of a pool that already has taste signals' {
+        $track = New-RecommendationTestTrack -Title 'Explicit Seed'
+        Save-CanonicalTrackDb -Track $track | Out-Null
+        Add-FeedbackValue -TrackId $track.id -Type 'LIKE' -Value 'true' -Source 'music_api'
+        $seeds = @(Get-RecommendationSeedCandidatesDb -SeedCount 25 -LibraryFallback @('霜雪千年 - 双笙&封茗囧菌') -RandomSeed 7)
+        @($seeds | Where-Object { $_.Source -eq 'library_fallback' }).Count | Should Be 0
+    }
+
     It 'does not parse the string False as a positive LIKE' {
         $track = New-RecommendationTestTrack -Title 'False Like'
         Save-CanonicalTrackDb -Track $track | Out-Null

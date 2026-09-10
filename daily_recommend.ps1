@@ -111,12 +111,45 @@ function Get-StarredTitles {
 }
 
 function Get-SeedPool {
+    param([AllowEmptyCollection()][object[]]$LibraryFallback = @())
     $starred = @(Get-StarredTitles)
-    return @(Get-RecommendationSeedCandidatesDb -SeedCount $SeedCount -NavidromeStars $starred -RandomSeed $RandomSeed)
+    return @(Get-RecommendationSeedCandidatesDb -SeedCount $SeedCount -NavidromeStars $starred -LibraryFallback $LibraryFallback -RandomSeed $RandomSeed)
+}
+
+# A fresh install has no likes, no Navidrome stars and no legacy import, so the
+# preference-only pool is empty and the day silently saved zero recommendations.
+# Fall back to the local library, which is what the weak LIBRARY_FALLBACK seed
+# source has always meant.
+function Get-LibrarySeedRows {
+    $rows = @()
+    if (Test-Path -LiteralPath $Config.NdDb -PathType Leaf) {
+        $tmp = Join-Path ([IO.Path]::GetTempPath()) "musicserver_seedlib_$([guid]::NewGuid().ToString('N')).db"
+        try {
+            Copy-Item -LiteralPath $Config.NdDb -Destination $tmp -Force
+            foreach ($ext in @('-wal','-shm')) {
+                $sidecar = "$($Config.NdDb)$ext"
+                if (Test-Path -LiteralPath $sidecar) { Copy-Item -LiteralPath $sidecar -Destination "$tmp$ext" -Force -ErrorAction SilentlyContinue }
+            }
+            $query = "select mf.title || ' - ' || coalesce(mf.artist,'') from media_file mf where mf.missing = 0 and mf.title is not null and mf.title <> '' limit 500;"
+            $rows = @(& $Config.Sqlite $tmp $query 2>$null | Where-Object { $_ } | ForEach-Object { [string]$_ })
+        } catch { $rows = @() }
+        finally { Remove-Item -LiteralPath "$tmp*" -Force -ErrorAction SilentlyContinue }
+    }
+    if (@($rows).Count -eq 0) {
+        $rows = @(Get-ChildItem -LiteralPath $Config.MusicDir -Filter '*.mp3' -File -Recurse -ErrorAction SilentlyContinue | ForEach-Object { [string]$_.BaseName })
+    }
+    return @($rows)
 }
 
 Write-Step '收集 SQLite 种子歌曲'
 $picked = @(Get-SeedPool)
+if ($picked.Count -eq 0) {
+    $librarySeeds = @(Get-LibrarySeedRows)
+    if ($librarySeeds.Count -gt 0) {
+        Write-Host "  未发现偏好种子，改用本地库种子：$($librarySeeds.Count)" -ForegroundColor Yellow
+        $picked = @(Get-SeedPool -LibraryFallback $librarySeeds)
+    }
+}
 Write-Host "  本次选用种子：$($picked.Count)" -ForegroundColor Yellow
 foreach ($seed in $picked) { Write-Host "    - $($seed.Title) - $($seed.Artist) [$($seed.Source), weight=$($seed.Weight)]" -ForegroundColor DarkGray }
 
