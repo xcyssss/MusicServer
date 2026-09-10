@@ -12,6 +12,7 @@ const storedLibraryOrder = (() => {
 
 const state = {
   items: [],
+  wanted: [],
   library: [],
   librarySequence: [],
   listening: { mostPlayed: [], rediscover: [], loaded: false },
@@ -241,6 +242,26 @@ function renderLibrary() {
   }).join(''));
 }
 
+// The download panel reflects the whole wanted queue, not just today's
+// recommendations: a failed or waiting download must stay visible even after
+// the daily list is regenerated (the queue entry itself is never dropped).
+function wantedQueueEntries() {
+  const byId = new Map();
+  for (const entry of (Array.isArray(state.wanted) ? state.wanted : [])) {
+    const id = String(entry?.track_id || entry?.id || '');
+    if (!id || !entry?.state || entry.state === 'LOCAL') continue;
+    byId.set(id, entry);
+  }
+  for (const item of state.items) {
+    const id = String(item?.track_id || '');
+    if (!id || !item?.wanted?.state || item.wanted.state === 'LOCAL') continue;
+    const existing = byId.get(id);
+    if (!existing) byId.set(id, { ...item.wanted, track_id: id, title: item.title, artist: item.artist });
+    else if (!existing.title) { existing.title = item.title; existing.artist = existing.artist || item.artist; }
+  }
+  return [...byId.values()];
+}
+
 function renderRecommendations() {
   const list = $('#recommendation-list');
   $('#recommendation-count').textContent = state.items.length;
@@ -248,10 +269,16 @@ function renderRecommendations() {
   $('#play-first').disabled = !state.items.length;
   $('#liked-count').textContent = state.items.filter((item) => item.liked).length;
   $('#local-count').textContent = state.library.length;
-  $('#wanted-count').textContent = state.items.filter((item) => item.wanted?.state && item.wanted.state !== 'LOCAL').length;
-  $('#queue-count').textContent = state.items.filter((item) => item.wanted?.state && item.wanted.state !== 'LOCAL').length;
-  const wanted = state.items.filter((item) => item.wanted?.state && item.wanted.state !== 'LOCAL');
-  $('#wanted-list').innerHTML = wanted.length ? wanted.map((item) => `<div class="wanted-row"><span>${escapeHtml(item.title)}</span><span class="status-badge ${statusClass(itemStatus(item))}">${escapeHtml(labels[itemStatus(item)] || itemStatus(item))}</span></div>`).join('') : '当前推荐没有待下载歌曲。';
+  const wanted = wantedQueueEntries();
+  $('#wanted-count').textContent = wanted.length;
+  $('#queue-count').textContent = wanted.length;
+  $('#wanted-list').innerHTML = wanted.length ? wanted.map((entry) => {
+    const retryable = entry.state === 'UNAVAILABLE' || entry.state === 'RETRY_WAIT';
+    const label = escapeHtml([entry.title, entry.artist].filter(Boolean).join(' · ') || entry.track_id || '未知曲目');
+    const badge = `<span class="status-badge ${statusClass(entry.state)}">${escapeHtml(labels[entry.state] || entry.state)}</span>`;
+    const retry = retryable ? `<button class="text-button wanted-retry" type="button" data-action="wanted-retry" data-track-id="${escapeHtml(entry.track_id || '')}">重试</button>` : '';
+    return `<div class="wanted-row"><span>${label}</span>${badge}${retry}</div>`;
+  }).join('') : '当前没有待下载或等待重试的歌曲。';
   if (!state.items.length) { list._sig = null; list.innerHTML = '<div class="empty-state">今天的推荐还在准备中。<br />先从音乐库选一首，或稍后刷新。</div>'; return; }
   const signature = JSON.stringify(state.items.map((item) => [item.track_id, item.liked, itemStatus(item), state.currentKey === keyOf(item), $('#audio-player').paused, item.title, item.artist, item.reason, item.duration, pendingLikes.has(item.track_id)]));
   if (list._sig === signature && !list._dirty) return;
@@ -617,6 +644,7 @@ async function toggleLike(item) {
     }
     item.liked = typeof result?.liked === 'boolean' ? result.liked : next;
     item.wanted = result?.wanted || null;
+    if (!item.wanted) state.wanted = (Array.isArray(state.wanted) ? state.wanted : []).filter((entry) => String(entry?.track_id || entry?.id || '') !== String(item.track_id));
     render();
   } catch (error) {
     item.liked = !next;
@@ -658,6 +686,18 @@ async function loadRecommendations(silent = false) {
     $('#error-banner').hidden = true; renderRecommendations(); updateNavigationButtons();
     if (!silent && state.items.length) $('#play-first').disabled = false;
   } catch { $('#error-banner').textContent = '推荐暂时同步失败。可以继续播放已有音乐，点击右上角刷新重试。'; $('#error-banner').hidden = false; if (!silent) renderRecommendations(); }
+  });
+}
+
+async function loadWanted(silent = false) {
+  return refreshOnce('wanted', async () => {
+    try {
+      const payload = await fetchJson('/api/wanted');
+      if (!Array.isArray(payload.items)) throw new Error('Invalid wanted response');
+      state.wanted = payload.items;
+      renderRecommendations();
+      updateNavigationButtons();
+    } catch { if (!silent) showToast('下载动态同步失败，请稍后刷新'); }
   });
 }
 
@@ -800,10 +840,33 @@ $('#shuffle-button').addEventListener('click', reshuffleLibrary);
 $('#refresh-button').addEventListener('click', async () => {
   $('#refresh-button').disabled = true;
   $('#refresh-button').setAttribute('aria-busy', 'true');
-  try { await Promise.all([loadLibrary(), loadRecommendations(), loadListening(), loadProviderStatus()]); }
+  try { await Promise.all([loadLibrary(), loadRecommendations(), loadWanted(), loadListening(), loadProviderStatus()]); }
   finally { $('#refresh-button').disabled = false; $('#refresh-button').setAttribute('aria-busy', 'false'); }
 });
 $('#rediscover-button').addEventListener('click', () => loadListening());
+
+// A failed or retried download stays in the queue until the user acts; give them
+// an explicit way back in instead of making them unlike/re-like the track.
+$('#wanted-list').addEventListener('click', async (event) => {
+  const action = event.target?.getAttribute?.('data-action');
+  if (action !== 'wanted-retry') return;
+  const trackId = event.target.getAttribute('data-track-id');
+  if (!trackId) return;
+  event.target.disabled = true;
+  try {
+    const response = await fetch(`/api/wanted/${encodeURIComponent(trackId)}/retry`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json; charset=utf-8' },
+      body: '{}',
+    });
+    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    showToast('已重新加入下载队列');
+    await loadWanted();
+  } catch (error) {
+    event.target.disabled = false;
+    showToast(`重试失败：${String(error?.message || '未知错误')}`);
+  }
+});
 $('#random-listening-button').addEventListener('click', playRandomListening);
 
 // Listening sidebar collapse / expand.
@@ -944,9 +1007,9 @@ $('#audio-player').addEventListener('waiting', () => setPlaybackStatus('正在�
 $('#audio-player').addEventListener('playing', () => setPlaybackStatus('正在播放'));
 $('#audio-player').addEventListener('error', () => { if (state.currentKey) setPlaybackStatus('播放失败 · 点击播放重试'); });
 
-renderMode(); loadLibrary(); loadRecommendations(); loadListening(); loadProviderStatus();
-setInterval(() => { if (document.hidden) return; loadLibrary(true); loadRecommendations(true); loadProviderStatus(); }, 15000);
-document.addEventListener('visibilitychange', () => { if (!document.hidden) { loadLibrary(true); loadRecommendations(true); loadProviderStatus(); } });
+renderMode(); loadLibrary(); loadRecommendations(); loadWanted(); loadListening(); loadProviderStatus();
+setInterval(() => { if (document.hidden) return; loadLibrary(true); loadRecommendations(true); loadWanted(true); loadProviderStatus(); }, 15000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { loadLibrary(true); loadRecommendations(true); loadWanted(true); loadProviderStatus(); } });
 $('#library-sort').value = state.librarySort;
 
 // Restore listening sidebar collapse preference.

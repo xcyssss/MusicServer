@@ -109,6 +109,37 @@ test('like writes serialize per track and stale recommendations cannot undo the 
   assert.match(a.get('wanted-list').innerHTML, /One/);
 });
 
+test('a queued download stays visible after the daily list no longer contains it', async () => {
+  const a = await app();
+  a.run("state.items = []; state.wanted = [{ track_id: 'zeal', state: 'RETRY_WAIT', attempt_count: 4, max_attempts: 5, title: 'ZEAL of proud', artist: 'Roselia' }]; renderRecommendations();");
+  assert.match(a.get('wanted-list').innerHTML, /ZEAL of proud/);
+  assert.match(a.get('wanted-list').innerHTML, /等待重试/);
+  assert.equal(a.get('queue-count').textContent, 1);
+  assert.equal(a.get('wanted-count').textContent, 1);
+
+  a.run("state.wanted = []; state.items = [{ track_id: 'zeal', title: 'ZEAL of proud', liked: false }]; renderRecommendations();");
+  assert.doesNotMatch(a.get('wanted-list').innerHTML, /ZEAL of proud/);
+  assert.equal(a.get('queue-count').textContent, 0);
+});
+
+test('a failed queue entry offers a retry that reposts it to the queue', async () => {
+  const a = await app();
+  a.run("state.items = []; state.wanted = [{ track_id: 'zeal', state: 'UNAVAILABLE', title: 'ZEAL of proud', artist: 'Roselia' }]; renderRecommendations();");
+  assert.match(a.get('wanted-list').innerHTML, /data-action="wanted-retry"/);
+  assert.match(a.get('wanted-list').innerHTML, /暂不可用/);
+
+  a.run("state.wanted = [{ track_id: 'zeal', state: 'DOWNLOADING', title: 'ZEAL of proud', artist: 'Roselia' }]; renderRecommendations();");
+  assert.doesNotMatch(a.get('wanted-list').innerHTML, /data-action="wanted-retry"/);
+
+  a.run("state.wanted = [{ track_id: 'zeal', state: 'UNAVAILABLE', title: 'ZEAL of proud', artist: 'Roselia' }]; renderRecommendations();");
+  const button = { disabled: false, getAttribute: name => (name === 'data-action' ? 'wanted-retry' : 'zeal') };
+  await a.get('wanted-list').emit('click', { target: button });
+  const retry = a.requests.find(r => r.url === '/api/wanted/zeal/retry');
+  assert.ok(retry, 'retry request was issued');
+  assert.equal(retry.options.method, 'POST');
+  assert.ok(a.requests.some(r => r.url === '/api/wanted'), 'queue refreshed after retry');
+});
+
 test('switching tracks ignores slow hydration and audio does not wait for lyrics', async () => {
   const a = await app(); const hydration = deferred(); const lyrics = deferred();
   a.context.fetchHandler = url => url === '/api/tracks/slow' ? hydration.promise : lyrics.promise;
@@ -133,7 +164,8 @@ test('obsolete lyrics requests are aborted and cannot replace newer lyrics', asy
 test('hidden windows skip data polling and resume without polling listening statistics', async () => {
   const a = await app(); a.context.document.hidden = true; a.intervals[0](); await settle(); assert.equal(a.requests.length, 0);
   a.context.document.hidden = false; a.events.get('visibilitychange')(); await settle();
-  assert.equal(a.requests.length, 3); assert.equal(a.requests.some(r => r.url.includes('/listening/')), false);
+  assert.equal(a.requests.length, 4); assert.equal(a.requests.some(r => r.url.includes('/listening/')), false);
+  assert.equal(a.requests.some(r => r.url === '/api/wanted'), true);
 });
 
 test('JSON deadline aborts a stalled response body', async () => {

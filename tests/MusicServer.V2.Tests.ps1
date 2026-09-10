@@ -1,4 +1,6 @@
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
+Import-Module (Join-Path $ProjectRoot 'MusicServer.Core.psm1') -Force
+Import-Module (Join-Path $ProjectRoot 'MusicServer.Providers.psm1') -Force
 
 Describe 'MusicServer Hardening v2 - SQLite State Layer' {
     BeforeEach {
@@ -108,6 +110,17 @@ Describe 'MusicServer Hardening v2 - SQLite State Layer' {
         $wanted.state | Should Be 'WANTED'
         $all = @(Get-WantedTracksDb)
         @($all | Where-Object { $_.track_id -eq $track.id }).Count | Should Be 1
+    }
+
+    It 'exposes canonical metadata for queued items so the queue survives a daily reshuffle' {
+        $track = New-CanonicalTrack -Title 'ZEAL of proud' -Artist 'Roselia' -Duration 240
+        Save-CanonicalTrackDb -Track $track | Out-Null
+        Add-WantedItemDb -TrackId $track.id | Out-Null
+        $entry = @(Get-WantedTracksDb | Where-Object { $_.track_id -eq $track.id })[0]
+        $entry.state | Should Be 'WANTED'
+        $entry.title | Should Be 'ZEAL of proud'
+        $entry.artist | Should Be 'Roselia'
+        $entry.duration | Should Be 240
     }
 
     It 'keeps repeated like idempotent' {
@@ -291,6 +304,87 @@ UPDATE wanted_queue SET lease_expires_epoch = @exp WHERE track_id = @tid;
         $loaded = Get-ProviderHealthDb -Provider 'bilibili_search'
         $loaded.state | Should Be 'OPEN'
         $loaded.consecutive_412 | Should Be 1
+    }
+
+    It 'permits one probe after the half-open cooldown instead of deadlocking the circuit' {
+        $health = Get-ProviderHealthDb -Provider 'bilibili_search'
+        $health.state = 'HALF_OPEN'
+        $health.half_open_probe_claimed = 0
+        $health.blocked_until = $null
+        Save-ProviderHealthDb -Health $health | Out-Null
+
+        (Test-ProviderRequestAvailable -Config $Config -Provider 'bilibili_search') | Should Be $true
+        (Claim-ProviderRequest -Config $Config -Provider 'bilibili_search') | Should Be $true
+        (Claim-ProviderRequest -Config $Config -Provider 'bilibili_search') | Should Be $false
+    }
+
+    It 'selects a NetEase search match only when title, artist and duration agree' {
+        $track = New-CanonicalTrack -Title 'ZEAL of proud' -Artist 'Roselia' -Duration 240
+        $songs = @(
+            [pscustomobject]@{ id = 111; name = 'ZEAL of proud'; duration = 240000; artists = @([pscustomobject]@{ name = 'Roselia' }) },
+            [pscustomobject]@{ id = 222; name = 'ZEAL of proud'; duration = 240000; artists = @([pscustomobject]@{ name = 'Someone Else' }) },
+            [pscustomobject]@{ id = 333; name = 'ZEAL of proud'; duration = 90000; artists = @([pscustomobject]@{ name = 'Roselia' }) }
+        )
+
+        $match = Select-NeteaseSearchMatch -Track $track -Songs $songs
+
+        $match | Should Not Be $null
+        $match.provider | Should Be 'netease'
+        $match.url | Should Be 'netease:111'
+        $match.metadata.netease_id | Should Be '111'
+    }
+
+    It 'ignores NetEase search results that do not match the track' {
+        $track = New-CanonicalTrack -Title 'ZEAL of proud' -Artist 'Roselia' -Duration 240
+        $songs = @([pscustomobject]@{ id = 999; name = 'A Different Song'; duration = 240000; artists = @([pscustomobject]@{ name = 'Roselia' }) })
+
+        ($null -eq (Select-NeteaseSearchMatch -Track $track -Songs $songs)) | Should Be $true
+    }
+
+    It 'never searches NetEase when disabled, already identified, or the circuit is blocked' {
+        $plain = New-CanonicalTrack -Title 'ZEAL of proud' -Artist 'Roselia' -Duration 240
+        $old = [Environment]::GetEnvironmentVariable('MUSICSERVER_DISABLE_NETEASE_SEARCH', 'Process')
+        try {
+            [Environment]::SetEnvironmentVariable('MUSICSERVER_DISABLE_NETEASE_SEARCH', '1', 'Process')
+            ($null -eq (Search-NeteaseCandidate -Config $Config -Track $plain)) | Should Be $true
+        } finally {
+            [Environment]::SetEnvironmentVariable('MUSICSERVER_DISABLE_NETEASE_SEARCH', $old, 'Process')
+        }
+
+        $known = New-CanonicalTrack -Title 'ZEAL of proud' -Artist 'Roselia' -Duration 240 `
+            -Identifiers @([pscustomobject]@{ type = 'netease'; value = '1234' })
+        ($null -eq (Search-NeteaseCandidate -Config $Config -Track $known)) | Should Be $true
+
+        $health = Get-ProviderHealthDb -Provider 'netease'
+        $health.state = 'OPEN'
+        $health.blocked_until = ([DateTime]::UtcNow.AddMinutes(30)).ToString('o')
+        Save-ProviderHealthDb -Health $health | Out-Null
+        ($null -eq (Search-NeteaseCandidate -Config $Config -Track $plain)) | Should Be $true
+    }
+
+    It 'persists a discovered identifier once and stays idempotent' {
+        $track = New-CanonicalTrack -Title 'IdSaver' -Artist 'A' -Duration 200
+        Save-CanonicalTrackDb -Track $track | Out-Null
+
+        (Add-CanonicalTrackIdentifierDb -TrackId $track.id -Type 'netease' -Value '999') | Should Be $true
+        (Add-CanonicalTrackIdentifierDb -TrackId $track.id -Type 'netease' -Value '999') | Should Be $false
+
+        $stored = Get-CanonicalTrackDb -TrackId $track.id
+        $identifiers = @($stored.identifiers)
+        $identifiers.Count | Should Be 1
+        $identifiers[0].type | Should Be 'netease'
+        $identifiers[0].value | Should Be '999'
+    }
+
+    It 'recognizes identifiers stored through the PowerShell 5.1 list wrapper shape' {
+        $track = New-CanonicalTrack -Title 'NestedIds' -Artist 'A' -Duration 200
+        Save-CanonicalTrackDb -Track $track | Out-Null
+        # Module-scope ConvertFrom-Json under PS 5.1 can round-trip a list wrapper.
+        $wrapper = '[{"value":[{"type":"netease","value":"777"}],"Count":1}]'
+        Invoke-MusicServerParamNonQuery -Template 'UPDATE canonical_tracks SET identifiers_json = @j WHERE id = @id;' -Params @{ j = $wrapper; id = $track.id } | Out-Null
+
+        (Add-CanonicalTrackIdentifierDb -TrackId $track.id -Type 'netease' -Value '777') | Should Be $false
+        @((Get-CanonicalTrackDb -TrackId $track.id).identifiers).Count | Should Be 1
     }
 
     # === Crash Recovery Tests ===

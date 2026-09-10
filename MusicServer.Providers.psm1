@@ -55,7 +55,12 @@ function Test-ProviderRequestAvailable {
     $health = Get-ProviderHealth -Config $Config -Provider $Provider
     $state = [string]$health.state
     if ($state -eq 'CLOSED') { return $true }
-    if ($state -eq 'HALF_OPEN') { return [bool]$health.probe_pending }
+    # HALF_OPEN means the cooldown elapsed and one probe is permitted. Exclusivity
+    # is enforced by Claim-ProviderRequest -> Claim-HalfOpenProbeDb, so reporting
+    # availability here is what lets the probe actually happen. Returning
+    # probe_pending instead deadlocked the circuit: nobody claims the probe that
+    # would set it.
+    if ($state -eq 'HALF_OPEN') { return $true }
     if ($state -ne 'OPEN') { return $true }
     if (-not $health.blocked_until) { return $true }
     $blocked = Convert-ToUtcDateTime $health.blocked_until
@@ -323,8 +328,12 @@ function Resolve-DownloadCandidates {
         if (Test-ProviderRequestAvailable -Config $Config -Provider 'bilibili_search') {
             $search = Search-BilibiliCandidates -Config $Config -Track $Track
             if (-not $search.Blocked) { $candidates += $search.Candidates }
-        } elseif (-not $neteaseCandidate) {
-            return @()
+        }
+        # Only reach for NetEase discovery when the healthy path has nothing to
+        # offer yet; a track that already carries a NetEase id never searches.
+        if ($candidates.Count -eq 0) {
+            $discovered = Search-NeteaseCandidate -Config $Config -Track $Track
+            if ($discovered) { $candidates += $discovered; $neteaseCandidate = $discovered }
         }
     }
 
@@ -408,6 +417,76 @@ function Get-NeteaseCandidate {
     $neteaseId = Get-NeteaseIdFromTrack -Track $Track
     if (-not $neteaseId) { return $null }
     return New-DownloadCandidate -Provider 'netease' -Url "netease:$neteaseId" -Title $Track.title -Artist $Track.artist -Duration ([int]$Track.duration) -Priority 60 -RequiresSearch $false -Metadata ([pscustomobject]@{ netease_id = $neteaseId })
+}
+
+function Select-NeteaseSearchMatch {
+    <#
+    .SYNOPSIS
+      Picks the best NetEase search result for a track, or $null when nothing
+      passes the shared identity checks. Pure (no HTTP) so it can be tested
+      deterministically.
+    #>
+    param([Parameter(Mandatory)][psobject]$Track, [psobject]$Songs)
+
+    $match = $null
+    $matchScore = [int]::MinValue
+    foreach ($song in @($Songs)) {
+        if (-not $song) { continue }
+        $songId = [string](Get-OptionalProperty $song 'id' '')
+        if (-not $songId) { continue }
+        $artistNames = @(@(Get-OptionalProperty $song 'artists' @()) | ForEach-Object { [string](Get-OptionalProperty $_ 'name' '') } | Where-Object { $_ })
+        $durationSeconds = [int][Math]::Round(([double](Get-OptionalProperty $song 'duration' 0)) / 1000)
+        $candidate = New-DownloadCandidate -Provider 'netease' -Url "netease:$songId" -Title ([string](Get-OptionalProperty $song 'name' '')) `
+            -Artist ($artistNames -join ',') -Duration $durationSeconds -Priority 50 -RequiresSearch $true `
+            -Metadata ([pscustomobject]@{ netease_id = $songId })
+        if (-not (Test-DownloadCandidateIdentity -Track $Track -Candidate $candidate)) { continue }
+        $score = [int](Get-CandidateScore -Track $Track -Candidate $candidate).score
+        if (-not $match -or $score -gt $matchScore) { $match = $candidate; $matchScore = $score }
+    }
+    return $match
+}
+
+function Search-NeteaseCandidate {
+    <#
+    .SYNOPSIS
+      Bounded NetEase discovery for a track that carries no NetEase id.
+
+      Bilibili search is subject to HTTP 412 risk control, so tracks seeded from
+      the local library or Navidrome stars could end up with zero candidates and
+      were eventually parked as UNAVAILABLE. This helper performs at most ONE
+      NetEase search request per call, charged against the existing `netease`
+      provider circuit, and returns a normal download candidate when the best
+      match passes the same identity checks used everywhere else. Set
+      MUSICSERVER_DISABLE_NETEASE_SEARCH=1 to disable it (hermetic tests).
+    #>
+    param([Parameter(Mandatory)][psobject]$Config, [Parameter(Mandatory)][psobject]$Track)
+
+    if ($env:MUSICSERVER_DISABLE_NETEASE_SEARCH -eq '1') { return $null }
+    if (Get-NeteaseIdFromTrack -Track $Track) { return $null }
+    $keyword = "$($Track.title) $(($Track.artist -split '[,，、/&]')[0])".Trim()
+    if (-not $keyword) { return $null }
+    if (-not (Test-ProviderRequestAvailable -Config $Config -Provider 'netease')) { return $null }
+    if (-not (Claim-ProviderRequest -Config $Config -Provider 'netease')) { return $null }
+
+    $headers = @{
+        'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36'
+        'Referer'    = 'https://music.163.com/'
+    }
+    $started = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        $url = "https://music.163.com/api/search/get?s=$([uri]::EscapeDataString($keyword))&type=1&limit=5"
+        $response = Invoke-RestMethod -Uri $url -Headers $headers -TimeoutSec 20
+    } catch {
+        Record-ProviderFailure -Config $Config -Provider 'netease' -ErrorType 'SEARCH_FAILED' -Message $_.Exception.Message | Out-Null
+        return $null
+    }
+    $started.Stop()
+
+    $songs = @()
+    try { if ($response.result.songs) { $songs = @($response.result.songs) } } catch { $songs = @() }
+    $match = Select-NeteaseSearchMatch -Track $Track -Songs $songs
+    Record-ProviderSuccess -Config $Config -Provider 'netease' -LatencyMs $started.Elapsed.TotalMilliseconds
+    return $match
 }
 
 function Invoke-NeteaseDownload {

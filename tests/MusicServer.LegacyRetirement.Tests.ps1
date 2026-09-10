@@ -33,14 +33,19 @@ function Invoke-LegacyRetirementWorker {
     $shell = if ($PSVersionTable.PSEdition -eq 'Core') { Get-Command pwsh -ErrorAction Stop } else { Get-Command powershell.exe -ErrorAction Stop }
     $oldAppHome = [Environment]::GetEnvironmentVariable('MUSICSERVER_APP_HOME', 'Process')
     $oldWorkerMutexName = [Environment]::GetEnvironmentVariable('MUSICSERVER_WORKER_MUTEX_NAME', 'Process')
+    $oldNeteaseSearch = [Environment]::GetEnvironmentVariable('MUSICSERVER_DISABLE_NETEASE_SEARCH', 'Process')
     [Environment]::SetEnvironmentVariable('MUSICSERVER_APP_HOME', $Root, 'Process')
     [Environment]::SetEnvironmentVariable('MUSICSERVER_WORKER_MUTEX_NAME', ('MusicServer_WantedWorker_Test_' + (Split-Path -Leaf $Root)), 'Process')
+    # Keep the worker hermetic: NetEase discovery would otherwise perform a real
+    # network search when the Bilibili circuit is open.
+    [Environment]::SetEnvironmentVariable('MUSICSERVER_DISABLE_NETEASE_SEARCH', '1', 'Process')
     try {
         $process = Start-Process -FilePath $shell.Source `
             -ArgumentList $args -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput $output -RedirectStandardError $error
     } finally {
         [Environment]::SetEnvironmentVariable('MUSICSERVER_APP_HOME', $oldAppHome, 'Process')
         [Environment]::SetEnvironmentVariable('MUSICSERVER_WORKER_MUTEX_NAME', $oldWorkerMutexName, 'Process')
+        [Environment]::SetEnvironmentVariable('MUSICSERVER_DISABLE_NETEASE_SEARCH', $oldNeteaseSearch, 'Process')
     }
     $stdout = if (Test-Path -LiteralPath $output) { Get-Content -LiteralPath $output -Raw -Encoding UTF8 } else { '' }
     $stderr = if (Test-Path -LiteralPath $error) { Get-Content -LiteralPath $error -Raw -Encoding UTF8 } else { '' }

@@ -315,6 +315,55 @@ function Reset-CanonicalTrackToRemoteDb {
     return (Get-CanonicalTrackDb -TrackId $TrackId)
 }
 
+function Add-CanonicalTrackIdentifierDb {
+    # Persist a discovered identifier (e.g. a NetEase id found by provider search)
+    # so later download attempts, lyrics and recommendation assembly reuse it
+    # instead of searching again. Idempotent per (type, value).
+    param(
+        [Parameter(Mandatory)][string]$TrackId,
+        [Parameter(Mandatory)][string]$Type,
+        [Parameter(Mandatory)][string]$Value
+    )
+    if (-not $Type -or -not $Value) { return $false }
+    $rows = @(Invoke-MusicServerParamSql -Template 'SELECT identifiers_json FROM canonical_tracks WHERE id = @id LIMIT 1;' -Params @{ id = $TrackId })
+    if ($rows.Count -eq 0) { return $false }
+    # Windows PowerShell 5.1 can hand back a nested array from ConvertFrom-Json
+    # inside a module scope, so flatten defensively instead of trusting the shape.
+    $identifiers = New-Object System.Collections.ArrayList
+    $parsed = $null
+    try { if ($rows[0].identifiers_json) { $parsed = ConvertFrom-Json -InputObject ([string]$rows[0].identifiers_json) } } catch { $parsed = $null }
+    $pending = New-Object System.Collections.Queue
+    foreach ($entry in @($parsed)) { $pending.Enqueue($entry) }
+    while ($pending.Count -gt 0) {
+        $entry = $pending.Dequeue()
+        if ($null -eq $entry) { continue }
+        # PS 5.1 can hand back Object[], ArrayList or List wrappers here, so treat
+        # any non-string enumerable as a container and keep flattening.
+        if (($entry -is [System.Collections.IEnumerable]) -and -not ($entry -is [string])) {
+            foreach ($inner in $entry) { $pending.Enqueue($inner) }
+            continue
+        }
+        # ConvertTo-Json renders a list wrapper as {value:[...],Count:n}; unwrap it
+        # so an already corrupted row still reports its real identifiers.
+        if (-not (Get-OptionalProperty $entry 'type' '') -and $entry.PSObject.Properties['value'] -and ($entry.value -is [System.Collections.IEnumerable]) -and -not ($entry.value -is [string])) {
+            foreach ($inner in $entry.value) { $pending.Enqueue($inner) }
+            continue
+        }
+        [void]$identifiers.Add($entry)
+    }
+    foreach ($existing in $identifiers) {
+        if ([string](Get-OptionalProperty $existing 'type' '') -eq $Type -and [string](Get-OptionalProperty $existing 'value' '') -eq $Value) { return $false }
+    }
+    [void]$identifiers.Add([pscustomobject]@{ type = $Type; value = $Value })
+    $json = ConvertTo-Json -InputObject @($identifiers.ToArray()) -Compress -Depth 10
+    $affected = Invoke-MusicServerParamNonQuery -Template @"
+UPDATE canonical_tracks
+SET identifiers_json = @ident, updated_at = @now, revision = revision + 1
+WHERE id = @id;
+"@ -Params @{ ident = $json; now = (Get-NowIso); id = $TrackId } -ReturnChanges
+    return ([int]$affected -gt 0)
+}
+
 function Set-CanonicalTrackStatusForWantedDb {
     param(
         [Parameter(Mandatory)][string]$TrackId,
@@ -863,6 +912,9 @@ function Convert-DbWantedRow {
         lease_expires_epoch = if ($null -eq $Row.lease_expires_epoch) { $null } else { [long]$Row.lease_expires_epoch }
         revision = [int]$Row.revision
         created_at = [string]$Row.created_at; updated_at = [string]$Row.updated_at
+        title = if ($Row.PSObject.Properties['track_title']) { [string]$Row.track_title } else { '' }
+        artist = if ($Row.PSObject.Properties['track_artist']) { [string]$Row.track_artist } else { '' }
+        duration = if ($Row.PSObject.Properties['track_duration']) { [int]$Row.track_duration } else { 0 }
     }
 }
 
@@ -895,7 +947,9 @@ VALUES (@tid, @wid, 'WANTED', 0, @ma, 1, @now, @now);
 function Get-WantedTracksDb {
     param([switch]$EligibleOnly)
     if (-not $EligibleOnly) {
-        $rows = @(Invoke-MusicServerSqlJson -Query 'SELECT * FROM wanted_queue ORDER BY created_at;')
+        # Join the canonical row so the UI can render queue entries that are no
+        # longer part of today's recommendation list.
+        $rows = @(Invoke-MusicServerSqlJson -Query 'SELECT w.*, c.title AS track_title, c.artist AS track_artist, c.duration AS track_duration, c.status AS track_status FROM wanted_queue w LEFT JOIN canonical_tracks c ON c.id = w.track_id ORDER BY w.created_at;')
         return @($rows | ForEach-Object { Convert-DbWantedRow -Row $_ })
     }
     $now = (Get-NowIso)
