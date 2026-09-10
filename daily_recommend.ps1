@@ -17,6 +17,8 @@
     使用的种子数量，默认 25。
 .PARAMETER Root
     项目根目录；默认当前脚本所在目录，主要用于测试和迁移。
+.PARAMETER AppHome
+    运行时/数据主目录；默认按环境变量或平台默认解析，计划任务用它锁定目标。
 .PARAMETER RandomSeed
     可选测试随机种子；默认使用正常随机行为。
 ##>
@@ -25,6 +27,7 @@ param(
     [switch]$DryRun,
     [int]$SeedCount = 25,
     [string]$Root = $PSScriptRoot,
+    [string]$AppHome = '',
     [int]$RandomSeed = -1,
     [switch]$MigrateLegacy
 )
@@ -38,7 +41,7 @@ Import-Module (Join-Path $PSScriptRoot 'MusicServer.Database.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.State.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Migration.psm1') -Force
 
-$Config = New-MusicServerConfig -Root $Root
+$Config = New-MusicServerConfig -Root $Root -AppHome $AppHome
 $dbPath = Join-Path $Config.StateDir 'musicserver.db'
 if ($DryRun) {
     if (-not (Test-Path -LiteralPath $dbPath -PathType Leaf)) {
