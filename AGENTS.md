@@ -158,8 +158,10 @@ Do not replace this with a static grep/Pester-only check.
 - Wanted worker uses its mutex/SQLite lease logic; do not introduce duplicate workers or bypass lease ownership.
 - `bilibili_direct` candidates must not trigger an unnecessary Bilibili search. Search is fallback when no usable local/direct candidate exists.
 - Bilibili 412/rate-limit handling must remain bounded and health-aware; do not add unbounded retry loops.
+- NetEase id discovery is a bounded fallback (one search per resolve, gated by the `netease` provider circuit, `MUSICSERVER_DISABLE_NETEASE_SEARCH=1` disables it). Never search a provider that is already blocked, and never turn `UNAVAILABLE` back into an automatic retry.
 - SQLite CLI calls use batch mode, enable foreign keys before caller SQL, and separate unquoted statement terminators onto lines so `.bail on` also stops same-line scripts on SQLite 3.53.4. Preserve SQL literals/comments and complete trigger bodies; connection-local settings must be applied per invocation. Keep the existing effective synchronous default unless a separate durability change is reviewed.
 - API/proxied JSON control bodies are limited to 64 KiB and a 5-second total read deadline. Empty bodies remain supported; nonempty bodies must be UTF-8 JSON objects. Reject unsupported chunked/compressed bodies before state writes or forwarding.
+- Runtime logs live under `APP_HOME\logs` and every component writes through `Write-MusicServerLog` (4 MB cap, keeps `.1`/`.2`). Spawned services have discarded stdio, so `Write-Host` alone is invisible in production; keep new logging bounded and avoid per-poll noise lines.
 
 ## Common local operations
 
@@ -197,6 +199,10 @@ Batch related steps as local commits; after a meaningful stage and local validat
 After completing a meaningful task, update this `AGENTS.md` checkpoint when the task changes architecture, release behavior, test gates, or important operating rules. Keep only current durable facts; do not accumulate transient debugging notes.
 
 ## Current checkpoint — 2026-09-10
+
+- Runtime logging: `Write-MusicServerLog` (bounded at 4 MB, keeps `.1`/`.2`) is the single sink under `APP_HOME\logs`. The launcher, the watchdog, the API (`musicserver-api.log`: startup, per-request line, `ERROR`, `SLOW` ≥ 3 s) and the worker (`musicserver-worker.log`: pass start, candidate choice, download/validation outcome, retry reasons) all log through it; per-poll keep-alive lines stay console-only. Previously only the launcher wrote a file, so API/worker diagnostics were silently discarded.
+
+- Download success rate: `Test-ProviderRequestAvailable` now reports `HALF_OPEN` as available so the single allowed probe is actually claimed (`Claim-ProviderRequest` -> `Claim-HalfOpenProbeDb` keeps exclusivity); the previous `probe_pending` check deadlocked the circuit. `Search-NeteaseCandidate` adds a bounded NetEase discovery fallback for tracks without a NetEase id: at most one search per resolve, charged to the `netease` provider circuit, only when no local/direct candidate exists, disabled with `MUSICSERVER_DISABLE_NETEASE_SEARCH=1`. A discovered id is persisted through `Add-CanonicalTrackIdentifierDb`. `UNAVAILABLE` stays terminal; the 下载动态 panel renders an explicit 重试 action for `UNAVAILABLE`/`RETRY_WAIT` rows.
 
 - The desktop runtime ships `daily_recommend.ps1`, `register_daily_recommend.ps1` and their `MusicServer.Migration.psm1` dependency. All three are staged by `scripts/prepare_tauri_runtime.ps1`, listed in the Rust runtime `REQUIRED` allowlist and included in the content build identity; `daily_recommend.ps1` takes `-AppHome` so a scheduled run is independent of environment variables. The launcher registers `MusicServer_DailyRecommend` (daily 07:00, action bound to the packaged APP_HOME) idempotently and starts it once when the task has not run today, so a fresh install gets recommendations without manual setup. Registration is skipped for source checkouts (`.git` present) and disabled with `MUSICSERVER_DISABLE_SCHEDULED_TASKS=1`; failures are logged and never block startup. `MusicServer_DailyCleanup` is still a legacy manual task and is not auto-registered.
 

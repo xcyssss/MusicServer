@@ -337,7 +337,11 @@ wanted_worker.ps1
 
 异步处理。
 
-Worker 会优先检查本地候选，再解析 provider 候选；需要 Bilibili 下载时会使用 provider health、lease、CAS 和有界重试机制，避免重复 worker、重复下载或无限重试。
+Worker 会优先检查本地候选，再解析 provider 候选；需要 Bilibili 下载时会使用 provider health、lease、CAS 和有界重试机制，避免重复 Worker、重复下载或无限重试。
+
+候选解析顺序：本地匹配 → 已知 NetEase id / `bilibili_direct` → Bilibili 搜索 → **NetEase 发现**。最后一步只针对没有 NetEase id 的曲目，每次解析最多发起一次搜索并计入 `netease` provider 熔断，因此 Bilibili 被 412 风控时仍有机会走 NetEase 通道；发现的 id 会写回 `canonical_tracks.identifiers_json` 供后续复用。设置 `MUSICSERVER_DISABLE_NETEASE_SEARCH=1` 可关闭该发现（测试与离线环境使用）。
+
+界面「下载动态」面板反映整个队列（不再只显示当日推荐里的曲目）：`等待重试`/`暂不可用` 的行带有「重试」按钮，点击后调用 `POST /api/wanted/{track_id}/retry` 重新入队。`UNAVAILABLE` 仍是终态，不会被自动重试，只能由该按钮或重新点红心触发。
 
 手工只执行一轮：
 
@@ -392,7 +396,30 @@ Windows Scheduled Task 的注册入口为：
 
 ---
 
-## 9. 常见问题
+## 9. 运行日志
+
+所有运行时组件都把日志写在 APP_HOME 的 `logs\` 目录下（默认 `%LOCALAPPDATA%\com.musicserver.desktop\logs\`，可用 `MUSICSERVER_APP_HOME` 覆盖）：
+
+| 文件 | 内容 |
+|---|---|
+| `musicserver-ui.log` | 启动器：服务启停、端口选择、计划任务注册、Navidrome 查询失败 |
+| `musicserver-api.log` | API：启动信息、每个请求、错误、慢请求（≥ 3 秒）|
+| `musicserver-worker.log` | 下载 Worker：队列轮次、候选选择、下载/校验结果、重试与失败原因 |
+| `musicserver-ui.watchdog.log` | 看门狗：UI 心跳停滞与重启 |
+| `musicserver-api.stdout.log` / `.stderr.log` | API 进程被重定向的原始输出（正常为空）|
+| `musicserver-worker.stdout.log` / `.stderr.log` | Worker 进程被重定向的原始输出（正常为空）|
+
+查看最近的下载日志：
+
+```powershell
+Get-Content "$env:LOCALAPPDATA\com.musicserver.desktop\logs\musicserver-worker.log" -Tail 40
+```
+
+日志按 4 MB 自动轮转，保留 `.1`、`.2` 两个历史文件，不会无限增长；写日志失败也不会影响服务启动。
+
+---
+
+## 10. 常见问题
 
 ### 下载突然大量失败或出现 412
 

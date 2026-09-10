@@ -46,7 +46,7 @@ Module Dependency Graph (bottom-up):
 External Services:
   Navidrome (navidrome.db, navidrome.exe) ← read by Core, Providers
   yt-dlp + ffmpeg/ffprobe                ← used by Providers for downloads
-  Netease Music API                      ← used by daily_recommend, wanted_worker
+  Netease Music API                      ← used by daily_recommend, wanted_worker, Providers (id discovery)
 
 Persistent Data (outside the repository, under APP_HOME unless MusicDir is external):
   <APP_HOME>\Music\                  ← default local music library
