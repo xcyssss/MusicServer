@@ -104,6 +104,65 @@ Describe 'MusicServer artist resolution' {
             Get-TitleDeclaredArtist -Title 'Some Song Without A Label' | Should Be ''
             Get-TitleDeclaredArtist -Title '' | Should Be ''
         }
+
+        It 'refuses an exclamation that proves the text is a comment, not a name' {
+            # The trailing punctuation has to be checked before it is stripped.
+            Get-TitleDeclaredArtist -Title '仙气空灵！『陨 焰』很喜欢的歌，翻唱了！' | Should Be ''
+        }
+
+        It 'refuses channel branding left in front of the artist' {
+            # Several words left over means branding or a series tag; guessing
+            # which word is the singer shows a descriptor as an artist.
+            Get-TitleDeclaredArtist -Title '在百万豪装录音棚大声听 黄诗扶&妖扬《吹梦到西洲》【Hi-res】' | Should Be ''
+            Get-TitleDeclaredArtist -Title '在百万豪装录音棚大声听 东宫ost 余昭源&叶里《初见》【Hi-res】' | Should Be ''
+            # Branding glued straight on with no space at all.
+            Get-TitleDeclaredArtist -Title '在百万豪装录音棚大声听米津玄师《Lemon》【Hi-res】' | Should Be ''
+        }
+
+        It 'still reads a Latin credit that legitimately contains spaces' {
+            Get-TitleDeclaredArtist -Title 'Alan Walker&Sabrina Carpenter&Farruko《On My Way》' | Should Be 'Alan Walker&Sabrina Carpenter&Farruko'
+        }
+    }
+
+    Context 'channel branding shared across the library' {
+
+        It 'detects a prefix repeated by several titles' {
+            $titles = @(
+                '在棚里听 周杰伦《晴天》',
+                '在棚里听 林俊杰《江南》',
+                '在棚里听 陈奕迅《十年》',
+                '在棚里听 王菲《暧昧》',
+                'A Track With No Shared Prefix'
+            )
+            $prefixes = @(Get-SharedTitlePrefixes -Titles $titles)
+            ($prefixes -contains '在棚里听 ') | Should Be $true
+        }
+
+        It 'does not treat a repeated artist name as branding' {
+            # "许嵩《...》" appears several times, but the prefix does not end on a
+            # boundary character, so stripping it would delete a real artist.
+            $titles = @('许嵩《洛阳纸》', '许嵩《雨幕》', '许嵩《惟爱你》', '许嵩《清明雨上》')
+            $prefixes = @(Get-SharedTitlePrefixes -Titles $titles)
+            ($prefixes -contains '许嵩') | Should Be $false
+            Get-TitleDeclaredArtist -Title '许嵩《洛阳纸》' -KnownPrefixes $prefixes | Should Be '许嵩'
+        }
+
+        It 'strips the branding and then reads the artist that follows it' {
+            $titles = @(
+                '百万录音棚 周杰伦《晴天》',
+                '百万录音棚 林俊杰《江南》',
+                '百万录音棚 陈奕迅《十年》',
+                '百万录音棚 王菲《暧昧》'
+            )
+            $prefixes = @(Get-SharedTitlePrefixes -Titles $titles)
+            ($prefixes -contains '百万录音棚 ') | Should Be $true
+            Get-TitleDeclaredArtist -Title '百万录音棚 周杰伦《晴天》' -KnownPrefixes $prefixes | Should Be '周杰伦'
+        }
+
+        It 'leaves a title untouched when nothing is shared' {
+            Remove-SharedTitlePrefix -Title 'Tokyo - Owl City' -Prefixes @('unrelated ') | Should Be 'Tokyo - Owl City'
+            Remove-SharedTitlePrefix -Title '' -Prefixes @('x ') | Should Be ''
+        }
     }
 
     Context 'online match precision' {
@@ -125,6 +184,49 @@ Describe 'MusicServer artist resolution' {
 
         It 'never accepts an empty artist' {
             Test-FileVouchesForArtist -Artist '' -Title 'Anything' | Should Be $false
+        }
+    }
+
+    Context 'display decision' {
+
+        It 'reuses a cached online match together with its album' {
+            $row = [pscustomobject]@{ artist = '许嵩'; album = '自定义'; source = 'netease' }
+            $got = Resolve-DisplayArtist -Title '许嵩《洛阳纸》百万豪装录音棚大声听' -Indexed 'uploader' -CachedRow $row
+            $got.artist | Should Be '许嵩'
+            $got.album | Should Be '自定义'
+            $got.source | Should Be 'netease'
+        }
+
+        It 'recomputes a title-derived value instead of trusting an older rule' {
+            # An earlier build stored a channel name for this row. The value costs
+            # no network call, so the current rules decide what is displayed.
+            $row = [pscustomobject]@{ artist = '百万录音棚'; album = ''; source = 'title' }
+            $got = Resolve-DisplayArtist -Title '百万录音棚 周杰伦《晴天》' -Indexed 'uploader' -CachedRow $row -KnownPrefixes @('百万录音棚 ')
+            $got.artist | Should Be '周杰伦'
+            $got.source | Should Be 'title'
+        }
+
+        It 'falls back to the indexed artist when the rules now refuse the title' {
+            $row = [pscustomobject]@{ artist = '仙气空灵！'; album = ''; source = 'title' }
+            $got = Resolve-DisplayArtist -Title '仙气空灵！『陨 焰』很喜欢的歌，翻唱了！' -Indexed '肥皂菌' -CachedRow $row
+            $got.artist | Should Be '肥皂菌'
+            $got.source | Should Be ''
+        }
+
+        It 'uses the title when nothing is cached yet' {
+            $got = Resolve-DisplayArtist -Title 'BEYOND《冷雨夜》百万豪装录音棚大声听' -Indexed 'JLRS-LeoFM'
+            $got.artist | Should Be 'BEYOND'
+            $got.source | Should Be 'title'
+        }
+
+        It 'keeps the indexed artist when there is no cache and no declared name' {
+            $got = Resolve-DisplayArtist -Title '《明日方舟》EP - All by My Design' -Indexed '明日方舟'
+            $got.artist | Should Be '明日方舟'
+            $got.source | Should Be ''
+        }
+
+        It 'returns nothing when neither a cache nor any name exists' {
+            (Resolve-DisplayArtist -Title '' -Indexed '') | Should BeNullOrEmpty
         }
     }
 

@@ -335,19 +335,17 @@ function Add-ResolvedArtist {
     if (@($Items).Count -eq 0) { return @() }
     $resolved = @{}
     try { $resolved = Get-LocalTrackArtistMapDb } catch { $resolved = @{} }
+    # Channel branding is a prefix shared by many titles, so it is only
+    # recognisable from the whole set; a single-item lookup gets no prefixes.
+    $prefixes = @()
+    try { $prefixes = @(Get-SharedTitlePrefixes -Titles @($Items | ForEach-Object { [string](Get-OptionalProperty $_ 'title' '') })) } catch { $prefixes = @() }
     foreach ($item in @($Items)) {
         $key = Get-MusicServerPathKey -Path ([string](Get-OptionalProperty $item 'file' ''))
         $row = if ($key -and $resolved.ContainsKey($key)) { $resolved[$key] } else { $null }
-        if ($row -and [string]$row.artist) {
-            $item.artist = [string]$row.artist
-            if ([string]$row.album) { $item.album = [string]$row.album }
-            continue
-        }
-        if (-not [string](Get-OptionalProperty $item 'artist' '')) {
-            $declared = ''
-            try { $declared = Get-TitleDeclaredArtist -Title ([string](Get-OptionalProperty $item 'title' '')) } catch { $declared = '' }
-            if ($declared) { $item.artist = $declared }
-        }
+        $decision = Resolve-DisplayArtist -Title ([string](Get-OptionalProperty $item 'title' '')) -Indexed ([string](Get-OptionalProperty $item 'artist' '')) -CachedRow $row -KnownPrefixes $prefixes
+        if (-not $decision) { continue }
+        if ($decision.artist) { $item.artist = $decision.artist }
+        if ($decision.album) { $item.album = $decision.album }
     }
     return @($Items)
 }

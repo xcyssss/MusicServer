@@ -489,6 +489,54 @@ function Search-NeteaseCandidate {
     return $match
 }
 
+function Get-SharedTitlePrefixes {
+    <#
+    .SYNOPSIS
+      Runs of text shared by several titles in one library.
+
+      A prefix repeated at the start of many titles is channel branding, not part
+      of any artist's name ("在百万豪装录音棚大声听 ..."). It must end on a boundary
+      character, otherwise a repeated real artist name ("许嵩《...》" several times)
+      would be mistaken for branding and stripped.
+    #>
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Titles,
+        [int]$MinimumCount = 4,
+        [int]$MinimumLength = 4,
+        [int]$MaximumLength = 30
+    )
+
+    $counts = @{}
+    foreach ($entry in @($Titles)) {
+        $text = [string]$entry
+        if ([string]::IsNullOrEmpty($text)) { continue }
+        $upper = [Math]::Min($MaximumLength, $text.Length)
+        for ($length = $MinimumLength; $length -le $upper; $length++) {
+            $prefix = $text.Substring(0, $length)
+            if (-not [regex]::IsMatch($prefix, '[】\]）)\s\-–—｜|：:·、,，。!！?？]$')) { continue }
+            if ($counts.ContainsKey($prefix)) { $counts[$prefix] = $counts[$prefix] + 1 } else { $counts[$prefix] = 1 }
+        }
+    }
+    return @($counts.Keys | Where-Object { $counts[$_] -ge $MinimumCount } | Sort-Object -Property Length -Descending)
+}
+
+function Remove-SharedTitlePrefix {
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Title,
+        [AllowEmptyCollection()][string[]]$Prefixes = @()
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Title)) { return $Title }
+    if (@($Prefixes).Count -eq 0) { return $Title }
+    $longest = ''
+    foreach ($prefix in @($Prefixes)) {
+        if ($prefix -and $prefix.Length -gt $longest.Length -and $Title.StartsWith($prefix, [StringComparison]::Ordinal)) { $longest = $prefix }
+    }
+    if (-not $longest) { return $Title }
+    $separators = [char[]]@(' ', '-', [char]0x2013, [char]0x2014, [char]0xFF0D, '|', [char]0xFF5C, [char]0x00B7, [char]0x3001, ',', [char]0xFF0C, '.', [char]0x3002, '!', [char]0xFF01, '?', [char]0xFF1F, ':', [char]0xFF1A, '+', '~', [char]0xFF5E, '*', '"', [char]0x201C, [char]0x201D, [char]0x2018, [char]0x2019)
+    return $Title.Substring($longest.Length).TrimStart($separators)
+}
+
 function Get-TitleDeclaredArtist {
     <#
     .SYNOPSIS
@@ -498,9 +546,18 @@ function Get-TitleDeclaredArtist {
       them, and "<artist>《<song>》" is the dominant convention. That label is more
       trustworthy than a folder name and is used when the online lookup cannot
       confirm a match.
-    #>
-    param([Parameter(Mandatory)][AllowEmptyString()][string]$Title)
 
+      A wrong name is worse than none: anything that still looks like a sentence,
+      a lyric, channel branding or a series tag is refused so the caller can fall
+      back to the library index.
+    #>
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Title,
+        [AllowEmptyCollection()][string[]]$KnownPrefixes = @()
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Title)) { return '' }
+    $Title = Remove-SharedTitlePrefix -Title $Title -Prefixes $KnownPrefixes
     if ([string]::IsNullOrWhiteSpace($Title)) { return '' }
     $pairs = @(@('《', '》'), @('「', '」'), @('『', '』'))
     foreach ($pair in $pairs) {
@@ -514,20 +571,34 @@ function Get-TitleDeclaredArtist {
             $before = $Title.Substring(0, $start).Trim()
             # Drop a quoted lyric sitting in front of the artist.
             $before = [regex]::Replace($before, '^[\u201c"''][^\u201d"'']{0,80}[\u201d"'']\s*', '').Trim()
-            # "artist - song" in front of the bracket: keep the artist side.
-            if ([regex]::IsMatch($before, '\s+-\s+')) {
-                $before = [string](@([regex]::Split($before, '\s+-\s+') | Where-Object { $_ })[0])
-            } elseif ($before.Contains('-') -and [regex]::IsMatch($before, '[\u3400-\u9fff]')) {
-                # CJK titles often glue it as "artist-song-series" with no spaces,
-                # e.g. "小树-不安的前方-动漫"; the first segment is the singer.
-                $before = [string](@($before.Split('-') | Where-Object { $_ })[0])
-            }
-            $before = [regex]::Replace($before, '[\s\-–—－|｜·、,，。!！?？:：+~～*"' + [char]0x201c + [char]0x201d + [char]0x2018 + [char]0x2019 + ']+$', '').Trim()
             # A lyric, a sentence, or another bracketed block is not an artist.
+            # This runs before the trailing cleanup, which would otherwise erase
+            # the punctuation ("仙气空灵！") that proves it is not a name.
             $isSentence = [regex]::IsMatch($before, '[，。！？、丨｜\u201c\u201d\u2018\u2019]')
             $isBracketed = [regex]::IsMatch($before, '[《》「」『』【】]')
-            if (-not $isSentence -and -not $isBracketed -and $before.Length -gt 0 -and $before.Length -le 40) {
-                return $before
+            if (-not $isSentence -and -not $isBracketed) {
+                # "artist - song" in front of the bracket: keep the artist side.
+                if ([regex]::IsMatch($before, '\s+-\s+')) {
+                    $before = [string](@([regex]::Split($before, '\s+-\s+') | Where-Object { $_ })[0])
+                } elseif ($before.Contains('-') -and [regex]::IsMatch($before, '[\u3400-\u9fff]')) {
+                    # CJK titles often glue it as "artist-song-series" with no
+                    # spaces, e.g. "小树-不安的前方-动漫"; the first part is the singer.
+                    $before = [string](@($before.Split('-') | Where-Object { $_ })[0])
+                }
+                $before = [regex]::Replace($before, '[\s\-–—－|｜·、,，。!！?？:：+~～*"' + [char]0x201c + [char]0x201d + [char]0x2018 + [char]0x2019 + ']+$', '').Trim()
+                # Accept only a single credit, never a phrase. Text mixing CJK with
+                # spaces is a comment or channel branding; a long CJK run with no
+                # separator is branding glued straight onto the name. A Latin credit
+                # may contain spaces ("Alan Walker&Sabrina Carpenter&Farruko").
+                $hasCjk = [regex]::IsMatch($before, '[\u3400-\u9fff\u3040-\u30ff]')
+                $hasSpace = [regex]::IsMatch($before, '\s')
+                $hasSeparator = [regex]::IsMatch($before, '[&,，、×]|\bfeat\.?\b|\bft\.?\b')
+                $acceptable = $true
+                if ($hasCjk -and $hasSpace) { $acceptable = $false }
+                elseif ($hasCjk -and -not $hasSeparator -and $before.Length -gt 12) { $acceptable = $false }
+                if ($acceptable -and $before.Length -gt 0 -and $before.Length -le 40) {
+                    return $before
+                }
             }
             $from = $end + 1
         }
@@ -554,6 +625,46 @@ function Get-TitleDeclaredArtist {
         if ($cleanHead -and $cleanTail -and $tail.Length -le 40) { return $tail }
     }
     return ''
+}
+
+function Resolve-DisplayArtist {
+    <#
+    .SYNOPSIS
+      The artist to display for one library item, given its cache row.
+
+      A resolved online match is final and expensive, so it is always reused. A
+      value derived from the title costs nothing to recompute and is therefore
+      recomputed on every read: that lets improved parsing rules heal rows an
+      older build already wrote, with no migration. When the rules now refuse a
+      title, the caller's indexed value stays in place rather than being blanked.
+    #>
+    param(
+        [AllowEmptyString()][string]$Title = '',
+        [AllowEmptyString()][string]$Indexed = '',
+        [AllowNull()]$CachedRow = $null,
+        [AllowEmptyCollection()][string[]]$KnownPrefixes = @()
+    )
+
+    if ($CachedRow) {
+        $source = [string](Get-OptionalProperty $CachedRow 'source' '')
+        $cached = [string](Get-OptionalProperty $CachedRow 'artist' '')
+        if ($source -ne 'title' -and $cached) {
+            return [pscustomobject]@{
+                artist = $cached
+                album = [string](Get-OptionalProperty $CachedRow 'album' '')
+                source = $source
+            }
+        }
+    }
+    $declared = ''
+    try { $declared = Get-TitleDeclaredArtist -Title $Title -KnownPrefixes $KnownPrefixes } catch { $declared = '' }
+    if ($declared) {
+        return [pscustomobject]@{ artist = $declared; album = ''; source = 'title' }
+    }
+    if ($Indexed) {
+        return [pscustomobject]@{ artist = $Indexed; album = ''; source = '' }
+    }
+    return $null
 }
 
 function Get-TitleSearchKeywords {

@@ -522,27 +522,22 @@ function Get-UiLibrary {
 
     # Bilibili downloads tag the uploader rather than the singer and sit directly
     # in the library root, so neither the index nor the folder names the artist.
-    # Apply the cached resolution; when the online lookup has not run yet, fall
-    # back to the uploader's own "<artist>《<song>》" label instead of a placeholder.
+    # Apply the resolution: the cached online match when there is one, otherwise
+    # the uploader's own "<artist>《<song>》" label, otherwise the index value.
     # Fail-soft: this also runs inside media runspaces that hold no state DB.
     $resolved = @{}
     try { $resolved = Get-LocalTrackArtistMapDb } catch { $resolved = @{} }
+    $prefixes = @()
+    try { $prefixes = @(Get-SharedTitlePrefixes -Titles @($items | ForEach-Object { [string]$_.title })) } catch { $prefixes = @() }
     foreach ($item in $items) {
         $key = Get-MusicServerPathKey -Path ([string]$item.file)
         $row = if ($key -and $resolved.ContainsKey($key)) { $resolved[$key] } else { $null }
-        if ($row -and [string]$row.artist) {
-            $item.artist = [string]$row.artist
-            if ([string]$row.album) { $item.album = [string]$row.album }
-            $item | Add-Member -NotePropertyName 'artist_source' -NotePropertyValue ([string]$row.source) -Force
-            continue
-        }
-        if (-not [string]$item.artist) {
-            $declared = ''
-            try { $declared = Get-TitleDeclaredArtist -Title ([string]$item.title) } catch { $declared = '' }
-            if ($declared) {
-                $item.artist = $declared
-                $item | Add-Member -NotePropertyName 'artist_source' -NotePropertyValue 'title' -Force
-            }
+        $decision = Resolve-DisplayArtist -Title ([string]$item.title) -Indexed ([string]$item.artist) -CachedRow $row -KnownPrefixes $prefixes
+        if (-not $decision) { continue }
+        if ($decision.artist) { $item.artist = $decision.artist }
+        if ($decision.album) { $item.album = $decision.album }
+        if ($decision.source) {
+            $item | Add-Member -NotePropertyName 'artist_source' -NotePropertyValue ([string]$decision.source) -Force
         }
     }
 
@@ -1200,6 +1195,10 @@ function Start-ArtistBackfill {
             }
             if ($pending.Count -eq 0) { return }
             Write-UiLog "ARTIST backfill started: $($pending.Count) file(s) pending"
+            # Channel branding is a prefix shared by many titles, so it can only be
+            # recognised from the whole set rather than one title at a time.
+            $prefixes = @()
+            try { $prefixes = @(Get-SharedTitlePrefixes -Titles @($pending | ForEach-Object { [string]$_.title })) } catch { $prefixes = @() }
             foreach ($item in $pending) {
                 if ([DateTime]::UtcNow -gt $deadline) {
                     Write-UiLog "ARTIST backfill stopped at its time budget with $($pending.Count) file(s) left"
@@ -1214,7 +1213,7 @@ function Start-ArtistBackfill {
                     } else {
                         # No online match: keep the uploader's own labelling when the
                         # file name declares one, and remember the miss either way.
-                        $declared = Get-TitleDeclaredArtist -Title ([string]$item.title)
+                        $declared = Get-TitleDeclaredArtist -Title ([string]$item.title) -KnownPrefixes $prefixes
                         if ($declared) {
                             Save-LocalTrackArtistDb -PathKey $key -Artist $declared -Status 'RESOLVED' -Source 'title' | Out-Null
                             $resolved += 1
