@@ -211,16 +211,9 @@ CREATE TABLE IF NOT EXISTS app_settings (
 -- Local files carry uploader tags rather than the singer, so the real artist is
 -- resolved once and cached here. Rows are keyed by normalized file path because
 -- that is the fact that survives re-indexing; a NOT_FOUND row records that the
--- lookup ran so the next start does not repeat the same network search.
-CREATE TABLE IF NOT EXISTS local_track_artists (
-    path_key TEXT PRIMARY KEY,
-    artist TEXT NOT NULL DEFAULT '',
-    album TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL DEFAULT '',
-    source TEXT NOT NULL DEFAULT '',
-    updated_at TEXT NOT NULL DEFAULT ''
-);
-CREATE INDEX IF NOT EXISTS idx_local_track_artists_status ON local_track_artists(status);
+-- lookup ran so the next start does not repeat the same network search. The
+-- definition is shared with the launcher, which creates this table on its own.
+$script:LocalTrackArtistDdl
 CREATE INDEX IF NOT EXISTS idx_wanted_state ON wanted_queue(state);
 CREATE INDEX IF NOT EXISTS idx_wanted_lease ON wanted_queue(lease_expires_at);
 CREATE INDEX IF NOT EXISTS idx_wanted_lease_epoch ON wanted_queue(lease_expires_epoch);
