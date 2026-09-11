@@ -103,6 +103,19 @@ CREATE TABLE IF NOT EXISTS recommendation_feedback (
     value TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
 );
+-- Entities related to a disliked track, so disliking one song also lowers the
+-- weight of the things it is related to (its singer, its album, songs that sound
+-- like it, and anything it seeded) rather than only that one recording.
+-- A new table needs no ALTER path: CREATE TABLE IF NOT EXISTS adds it to an
+-- existing state DB, unlike a new column.
+CREATE TABLE IF NOT EXISTS dislike_relations (
+    track_id TEXT NOT NULL,
+    relation_type TEXT NOT NULL,
+    relation_key TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (track_id, relation_type, relation_key)
+);
+CREATE INDEX IF NOT EXISTS idx_dislike_relations_type ON dislike_relations(relation_type);
 CREATE TABLE IF NOT EXISTS recommendation_files (
     file_name TEXT PRIMARY KEY,
     track_id TEXT NOT NULL DEFAULT '',
@@ -332,9 +345,9 @@ function Save-CanonicalTrackDb {
         [int]$ExpectedRevision = -1
     )
     $now = Get-NowIso
-    $identifiers = ConvertTo-Json -InputObject @(Get-OptionalProperty $Track 'identifiers' @()) -Compress -Depth 10
-    $preview = ConvertTo-Json -InputObject @(Get-OptionalProperty $Track 'preview_sources' @()) -Compress -Depth 10
-    $candidates = ConvertTo-Json -InputObject @(Get-OptionalProperty $Track 'download_candidates' @()) -Compress -Depth 10
+    $identifiers = ConvertTo-MusicServerJsonArrayText -Items (Get-OptionalProperty $Track 'identifiers' @())
+    $preview = ConvertTo-MusicServerJsonArrayText -Items (Get-OptionalProperty $Track 'preview_sources' @())
+    $candidates = ConvertTo-MusicServerJsonArrayText -Items (Get-OptionalProperty $Track 'download_candidates' @())
     $existing = @(Invoke-MusicServerParamSql -Template 'SELECT revision FROM canonical_tracks WHERE id = @id LIMIT 1;' -Params @{ id = [string]$Track.id })
     if ($existing.Count -gt 0) {
         $currentRevision = [int]$existing[0].revision
@@ -440,35 +453,14 @@ function Add-CanonicalTrackIdentifierDb {
     if (-not $Type -or -not $Value) { return $false }
     $rows = @(Invoke-MusicServerParamSql -Template 'SELECT identifiers_json FROM canonical_tracks WHERE id = @id LIMIT 1;' -Params @{ id = $TrackId })
     if ($rows.Count -eq 0) { return $false }
-    # Windows PowerShell 5.1 can hand back a nested array from ConvertFrom-Json
-    # inside a module scope, so flatten defensively instead of trusting the shape.
-    $identifiers = New-Object System.Collections.ArrayList
-    $parsed = $null
-    try { if ($rows[0].identifiers_json) { $parsed = ConvertFrom-Json -InputObject ([string]$rows[0].identifiers_json) } } catch { $parsed = $null }
-    $pending = New-Object System.Collections.Queue
-    foreach ($entry in @($parsed)) { $pending.Enqueue($entry) }
-    while ($pending.Count -gt 0) {
-        $entry = $pending.Dequeue()
-        if ($null -eq $entry) { continue }
-        # PS 5.1 can hand back Object[], ArrayList or List wrappers here, so treat
-        # any non-string enumerable as a container and keep flattening.
-        if (($entry -is [System.Collections.IEnumerable]) -and -not ($entry -is [string])) {
-            foreach ($inner in $entry) { $pending.Enqueue($inner) }
-            continue
-        }
-        # ConvertTo-Json renders a list wrapper as {value:[...],Count:n}; unwrap it
-        # so an already corrupted row still reports its real identifiers.
-        if (-not (Get-OptionalProperty $entry 'type' '') -and $entry.PSObject.Properties['value'] -and ($entry.value -is [System.Collections.IEnumerable]) -and -not ($entry.value -is [string])) {
-            foreach ($inner in $entry.value) { $pending.Enqueue($inner) }
-            continue
-        }
-        [void]$identifiers.Add($entry)
-    }
+    # ConvertFrom-MusicServerJsonArray owns the PS 5.1 nesting/`{value,Count}`
+    # wrapper handling now, so this no longer needs its own flattening loop.
+    $identifiers = @(ConvertFrom-MusicServerJsonArray -Json ([string]$rows[0].identifiers_json))
     foreach ($existing in $identifiers) {
         if ([string](Get-OptionalProperty $existing 'type' '') -eq $Type -and [string](Get-OptionalProperty $existing 'value' '') -eq $Value) { return $false }
     }
-    [void]$identifiers.Add([pscustomobject]@{ type = $Type; value = $Value })
-    $json = ConvertTo-Json -InputObject @($identifiers.ToArray()) -Compress -Depth 10
+    $updated = @($identifiers) + @([pscustomobject]@{ type = $Type; value = $Value })
+    $json = ConvertTo-MusicServerJsonArrayText -Items $updated
     $affected = Invoke-MusicServerParamNonQuery -Template @"
 UPDATE canonical_tracks
 SET identifiers_json = @ident, updated_at = @now, revision = revision + 1
@@ -584,9 +576,9 @@ function Convert-DbTrackRow {
     $identifiers = @()
     $preview = @()
     $candidates = @()
-    try { if ($Row.identifiers_json) { $identifiers = @(ConvertFrom-Json -InputObject ([string]$Row.identifiers_json)) } } catch {}
-    try { if ($Row.preview_sources_json) { $preview = @(ConvertFrom-Json -InputObject ([string]$Row.preview_sources_json)) } } catch {}
-    try { if ($Row.download_candidates_json) { $candidates = @(ConvertFrom-Json -InputObject ([string]$Row.download_candidates_json)) } } catch {}
+    try { if ($Row.identifiers_json) { $identifiers = @(ConvertFrom-MusicServerJsonArray -Json ([string]$Row.identifiers_json)) } } catch {}
+    try { if ($Row.preview_sources_json) { $preview = @(ConvertFrom-MusicServerJsonArray -Json ([string]$Row.preview_sources_json)) } } catch {}
+    try { if ($Row.download_candidates_json) { $candidates = @(ConvertFrom-MusicServerJsonArray -Json ([string]$Row.download_candidates_json)) } } catch {}
     return [pscustomobject]@{
         id = [string]$Row.id; title = [string]$Row.title; artist = [string]$Row.artist
         album = [string]$Row.album; duration = [int]$Row.duration; cover_url = [string]$Row.cover_url
@@ -869,8 +861,8 @@ function Select-LocalRecommendationTracks {
         [AllowEmptyCollection()][string[]]$ExcludedKeys = @(),
         [int]$Limit = 6,
         [double]$RecentlyPlayedDays = 14,
-        [Parameter(Mandatory = $false)][hashtable]$DislikeKeys = @{},
-        [double]$DislikeWeightDivisor = 4
+        [Parameter(Mandatory = $false)][hashtable]$DislikeBuckets = @{},
+        [Parameter(Mandatory = $false)][hashtable]$DislikeDivisors = @{}
     )
 
     if ($Limit -le 0) { return @() }
@@ -928,14 +920,22 @@ function Select-LocalRecommendationTracks {
         $playedAt = Convert-ToUtcDateTime $lastPlayed
         if ($playedAt -and $playedAt -gt $cutoff) { continue }
 
-        # A disliked owned track sinks within its tier rather than being excluded:
-        # dividing its weight here, before the ordering, is what lets a non-disliked
-        # artist actually win the slot. Demoting after selection would only reorder
-        # the tracks already chosen. "少推荐" is a penalty, not an exclusion, so the
-        # track stays eligible and reappears when nothing better remains.
-        if ($DislikeKeys.Count -gt 0) {
-            $disliked = Test-CandidateDisliked -Title $title -Artist $artist -TrackId $trackId -PenaltyKeys $DislikeKeys
-            if ($disliked) { $best = [Math]::Max(1, [int][Math]::Floor([double]$best / $DislikeWeightDivisor)) }
+        # Owned tracks related to something disliked sink within their tier rather
+        # than being excluded: dividing the weight here, before the ordering, is what
+        # lets an unrelated track actually win the slot. Demoting after selection
+        # would only reorder the tracks already chosen. "少推荐" is a penalty, not an
+        # exclusion, so the track stays eligible and returns when nothing better is
+        # left. A disliked singer is the common case, so the ARTIST relation matters
+        # as much as an exact track match here.
+        if ($DislikeBuckets.Count -gt 0) {
+            $relation = Get-CandidateDislikeRelation -Title $title -Artist $artist `
+                -Album ([string](Get-OptionalProperty $candidate 'Album' (Get-OptionalProperty $candidate 'album'))) `
+                -TrackId $trackId -Buckets $DislikeBuckets
+            if ($relation) {
+                $divisor = 4.0
+                if ($DislikeDivisors.ContainsKey($relation)) { $divisor = [double]$DislikeDivisors[$relation] }
+                if ($divisor -gt 1) { $best = [Math]::Max(1, [int][Math]::Floor([double]$best / $divisor)) }
+            }
         }
 
         [void]$scored.Add([pscustomobject]@{
@@ -1008,17 +1008,27 @@ function Get-RecommendationExcludedKeysDb {
 # can still surface when there is nothing better, which is what the user asked for.
 
 function Write-TrackDislikeDb {
+    <#
+    .SYNOPSIS
+      Records that the listener dislikes a song.
+
+      The value carries the identity of the disliked song, not just a flag, because
+      everything RELATED to it is then down-weighted too -- so the caller's singer,
+      album and NetEase id are what make that possible. Anything left blank is
+      backfilled from the canonical track by Get-DislikedTrackKeysDb.
+    #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$TrackId,
         [AllowEmptyString()][string]$Title = '',
         [AllowEmptyString()][string]$Artist = '',
+        [AllowEmptyString()][string]$Album = '',
         [AllowEmptyString()][string]$NeteaseId = '',
         [string]$Source = 'music_api'
     )
 
     $value = ConvertTo-Json -InputObject ([ordered]@{
-        title = $Title; artist = $Artist; netease_id = $NeteaseId; positive = $false
+        title = $Title; artist = $Artist; album = $Album; netease_id = $NeteaseId; positive = $false
     }) -Compress
     $now = Get-NowIso
     $lit = @{
@@ -1131,12 +1141,13 @@ function Get-DislikedTrackKeysDb {
     $result = @()
     foreach ($trackId in @($preference.Keys)) {
         if ([string]$preference[$trackId] -ne 'DISLIKE') { continue }
-        $title = ''; $artist = ''; $neteaseId = ''
+        $title = ''; $artist = ''; $album = ''; $neteaseId = ''
         if ($values.ContainsKey($trackId)) {
             $valueObject = Convert-RecommendationFeedbackValue -Value ([string]$values[$trackId])
             if ($valueObject) {
                 $title = [string](Get-OptionalProperty $valueObject 'title' (Get-OptionalProperty $valueObject 'Title'))
                 $artist = [string](Get-OptionalProperty $valueObject 'artist' (Get-OptionalProperty $valueObject 'Artist'))
+                $album = [string](Get-OptionalProperty $valueObject 'album' (Get-OptionalProperty $valueObject 'Album'))
                 $neteaseId = [string](Get-OptionalProperty $valueObject 'netease_id' (Get-OptionalProperty $valueObject 'NeteaseId'))
             }
         }
@@ -1144,69 +1155,255 @@ function Get-DislikedTrackKeysDb {
         if ($canonical) {
             if (-not $title) { $title = [string]$canonical.title }
             if (-not $artist) { $artist = [string]$canonical.artist }
+            if (-not $album) { $album = [string]$canonical.album }
+            # Read the identifier here rather than calling the provider module's
+            # helper, so this module stays usable on its own with Providers absent.
+            if (-not $neteaseId) {
+                foreach ($identifier in @(Get-OptionalProperty $canonical 'identifiers' @())) {
+                    if ([string](Get-OptionalProperty $identifier 'type') -eq 'netease') {
+                        $neteaseId = [string](Get-OptionalProperty $identifier 'value')
+                        break
+                    }
+                }
+            }
         }
         $result += [pscustomobject]@{
-            TrackId = $trackId; Title = $title; Artist = $artist; NeteaseId = $neteaseId
+            TrackId = $trackId; Title = $title; Artist = $artist; Album = $album; NeteaseId = $neteaseId
         }
     }
     return @($result)
 }
 
-function Test-CandidateDisliked {
+# ================================================================
+# Dislike relations ("和这首歌有关的")
+# ================================================================
+#
+# Disliking one song must lower the weight of what that song is RELATED to, not
+# only that exact recording: its singer, its album, songs that sound like it, and
+# anything it seeded. The relations are cached in `dislike_relations` rather than
+# recomputed per run, because the similarity lookup costs a network request.
+#
+# Layering: this module owns the relation vocabulary and its storage; the provider
+# module performs the bounded NetEase lookup, and the caller decides the amounts.
+
+# Strongest first. A candidate is graded by the closest relation it has, so a
+# same-album track is not double-penalised for also being a same-artist track.
+$script:DislikeRelationOrder = @('TRACK','ARTIST','ALBUM','SIMILAR','SEED')
+
+function Save-DislikeRelationsDb {
     <#
     .SYNOPSIS
-      Whether a recommendation candidate is one the listener marked as disliked.
+      Records the entities a disliked track is related to.
 
-      Matching uses every key a candidate can be recognised by, because the same
-      song reaches the pool from different seeds and recordings: the NetEase id,
-      the canonical track id, the normalized song name, and the normalized
-      song+artist pair.
+      Insert-or-ignore, so re-expanding a track is idempotent and an existing
+      relation is never duplicated.
     #>
     [CmdletBinding()]
     param(
-        [AllowEmptyString()][string]$Title = '',
-        [AllowEmptyString()][string]$Artist = '',
-        [AllowEmptyString()][string]$NeteaseId = '',
-        [AllowEmptyString()][string]$TrackId = '',
-        [Parameter(Mandatory)][hashtable]$PenaltyKeys = @{}
+        [Parameter(Mandatory)][string]$TrackId,
+        [AllowEmptyCollection()][object[]]$Relations = @(),
+        [string]$RelationType = ''
     )
 
-    if ($PenaltyKeys.Count -eq 0) { return $false }
-    if ($NeteaseId -and $PenaltyKeys.ContainsKey("netease:$NeteaseId")) { return $true }
-    if ($TrackId -and $PenaltyKeys.ContainsKey($TrackId)) { return $true }
-    if ($Title) {
-        if ($PenaltyKeys.ContainsKey((Normalize-MusicText $Title))) { return $true }
-        if ($Artist -and $PenaltyKeys.ContainsKey((Normalize-MusicText "$Title$Artist"))) { return $true }
-        if ($PenaltyKeys.ContainsKey([string](Get-CanonicalTrackId -Title $Title -Artist $Artist))) { return $true }
+    $now = Get-NowIso
+    $statements = New-Object System.Collections.Generic.List[string]
+    foreach ($relation in @($Relations)) {
+        $type = if ($RelationType) { $RelationType } else { [string](Get-OptionalProperty $relation 'Type' (Get-OptionalProperty $relation 'type')) }
+        $key = if ($RelationType) { [string]$relation } else { [string](Get-OptionalProperty $relation 'Key' (Get-OptionalProperty $relation 'key')) }
+        if (-not $type -or -not $key) { continue }
+        # Only the vocabulary this module understands may be stored, so a typo
+        # cannot create a bucket nothing ever reads.
+        if (-not ($script:DislikeRelationOrder -contains $type)) { continue }
+        [void]$statements.Add("INSERT OR IGNORE INTO dislike_relations (track_id, relation_type, relation_key, created_at) VALUES (" +
+            (ConvertTo-MusicServerSqlLiteral $TrackId) + ',' +
+            (ConvertTo-MusicServerSqlLiteral $type) + ',' +
+            (ConvertTo-MusicServerSqlLiteral $key) + ',' +
+            (ConvertTo-MusicServerSqlLiteral $now) + ')')
     }
-    return $false
+    if ($statements.Count -eq 0) { return 0 }
+    return [int](Invoke-StateAtomicSql -Statements @($statements))
 }
 
-function Get-DislikePenaltyKeys {
+function Get-DislikeRelationMapDb {
     <#
     .SYNOPSIS
-      Normalized key set used to recognise a disliked track in a candidate list.
-
-      Normalizing on BOTH sides matters: comparing a normalized lookup against raw
-      keys silently fails for any key that normalization rewrites.
+      Stored relations keyed by disliked track id: id -> array of @{Type,Key}.
     #>
     [CmdletBinding()]
-    param([AllowEmptyCollection()][object[]]$Disliked = @())
+    param()
 
-    $keys = @{}
+    $map = @{}
+    foreach ($row in @(Invoke-MusicServerParamSql -Template 'SELECT track_id, relation_type, relation_key FROM dislike_relations ORDER BY relation_type, relation_key;' -Params @{})) {
+        $trackId = [string](Get-OptionalProperty $row 'track_id')
+        $type = [string](Get-OptionalProperty $row 'relation_type')
+        $key = [string](Get-OptionalProperty $row 'relation_key')
+        if (-not $trackId -or -not $type -or -not $key) { continue }
+        if (-not $map.ContainsKey($trackId)) { $map[$trackId] = New-Object System.Collections.ArrayList }
+        [void]$map[$trackId].Add([pscustomobject]@{ Type = $type; Key = $key })
+    }
+    return $map
+}
+
+function Get-DislikeRelationBuckets {
+    <#
+    .SYNOPSIS
+      Merges disliked tracks and their stored relations into matchable buckets.
+
+      The exact-track bucket is built here from the disliked row itself (not from
+      storage), so a dislike works on the very next run even before any relation
+      has been expanded. Normalizing on BOTH sides matters: comparing a normalized
+      lookup against raw keys silently fails for anything normalization rewrites.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowEmptyCollection()][object[]]$Disliked = @(),
+        [hashtable]$RelationMap = @{},
+        [AllowEmptyCollection()][object[]]$SimilarSongs = @(),
+        [AllowEmptyString()][string]$SimilarForTrackId = ''
+    )
+
+    $buckets = @{}
+    foreach ($type in $script:DislikeRelationOrder) { $buckets[$type] = @{} }
+
     foreach ($row in @($Disliked)) {
         $trackId = [string](Get-OptionalProperty $row 'TrackId' (Get-OptionalProperty $row 'track_id'))
         $neteaseId = [string](Get-OptionalProperty $row 'NeteaseId' (Get-OptionalProperty $row 'netease_id'))
         $title = [string](Get-OptionalProperty $row 'Title' (Get-OptionalProperty $row 'title'))
         $artist = [string](Get-OptionalProperty $row 'Artist' (Get-OptionalProperty $row 'artist'))
-        if ($trackId) { $keys[[string]$trackId] = $true }
-        if ($neteaseId) { $keys["netease:$neteaseId"] = $true }
+        $album = [string](Get-OptionalProperty $row 'Album' (Get-OptionalProperty $row 'album'))
+
+        if ($trackId) { $buckets['TRACK'][$trackId] = $true }
+        if ($neteaseId) { $buckets['TRACK']["netease:$neteaseId"] = $true }
         if ($title) {
-            $keys[(Normalize-MusicText $title)] = $true
-            if ($artist) { $keys[(Normalize-MusicText "$title$artist")] = $true }
+            $normalizedTitle = Normalize-MusicText $title
+            if ($normalizedTitle) { $buckets['TRACK'][$normalizedTitle] = $true }
+            $pair = Normalize-MusicText "$title$artist"
+            if ($pair) { $buckets['TRACK'][$pair] = $true }
+            if ($title -and $artist) {
+                $canonicalId = [string](Get-CanonicalTrackId -Title $title -Artist $artist)
+                if ($canonicalId) { $buckets['TRACK'][$canonicalId] = $true }
+            }
+            # Anything this song seeded is related to it.
+            if ($normalizedTitle) { $buckets['SEED'][$normalizedTitle] = $true }
+        }
+        # Each credited singer is its own relation: a duet "A,B" must not make a
+        # solo track by B look unrelated.
+        if ($artist) {
+            foreach ($name in @(Split-LocalArtistNames -Artist $artist)) {
+                $key = Normalize-MusicText $name
+                if ($key) { $buckets['ARTIST'][$key] = $true }
+            }
+        }
+        if ($album) {
+            $key = Normalize-MusicText $album
+            if ($key) { $buckets['ALBUM'][$key] = $true }
+        }
+
+        # Relations expanded on an earlier run.
+        if ($trackId -and $RelationMap.ContainsKey($trackId)) {
+            foreach ($relation in @($RelationMap[$trackId])) {
+                $type = [string]$relation.Type
+                $key = [string]$relation.Key
+                if (-not $type -or -not $key) { continue }
+                if (-not $buckets.ContainsKey($type)) { continue }
+                $buckets[$type][$key] = $true
+            }
         }
     }
-    return $keys
+
+    # Similar songs found during this run, not yet persisted.
+    foreach ($song in @($SimilarSongs)) {
+        $sid = [string](Get-OptionalProperty $song 'id' (Get-OptionalProperty $song 'NeteaseId'))
+        $name = [string](Get-OptionalProperty $song 'name' (Get-OptionalProperty $song 'Title'))
+        $artists = @(@(Get-OptionalProperty $song 'artists' @()) | ForEach-Object { [string](Get-OptionalProperty $_ 'name' '') } | Where-Object { $_ })
+        if ($sid) { $buckets['SIMILAR']["netease:$sid"] = $true }
+        if ($name -and $artists) {
+            $pair = Normalize-MusicText "$name$($artists -join ',')"
+            if ($pair) { $buckets['SIMILAR'][$pair] = $true }
+        }
+        if ($name) {
+            $soloPair = Normalize-MusicText $name
+            if ($soloPair) { $buckets['SIMILAR'][$soloPair] = $true }
+        }
+    }
+
+    return $buckets
+}
+
+function Get-CandidateDislikeRelation {
+    <#
+    .SYNOPSIS
+      The closest relation a candidate has to anything disliked, or '' when none.
+
+      Returns the strongest match only, so one candidate is penalised once rather
+      than stacking every relation it happens to satisfy.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowEmptyString()][string]$Title = '',
+        [AllowEmptyString()][string]$Artist = '',
+        [AllowEmptyString()][string]$Album = '',
+        [AllowEmptyString()][string]$NeteaseId = '',
+        [AllowEmptyString()][string]$TrackId = '',
+        [AllowEmptyString()][string]$FromSeed = '',
+        [hashtable]$Buckets = @{}
+    )
+
+    if ($Buckets.Count -eq 0) { return '' }
+    $bucket = { param($name) if ($Buckets.ContainsKey($name)) { $Buckets[$name] } else { @{} } }
+
+    # TRACK: the same recording, however it arrives.
+    $exact = & $bucket 'TRACK'
+    if ($exact.Count -gt 0) {
+        if ($TrackId -and $exact.ContainsKey($TrackId)) { return 'TRACK' }
+        if ($NeteaseId -and $exact.ContainsKey("netease:$NeteaseId")) { return 'TRACK' }
+        if ($Title) {
+            $normalizedTitle = Normalize-MusicText $Title
+            if ($normalizedTitle -and $exact.ContainsKey($normalizedTitle)) { return 'TRACK' }
+            if ($Artist) {
+                $pair = Normalize-MusicText "$Title$Artist"
+                if ($pair -and $exact.ContainsKey($pair)) { return 'TRACK' }
+            }
+            if ($exact.ContainsKey([string](Get-CanonicalTrackId -Title $Title -Artist $Artist))) { return 'TRACK' }
+        }
+    }
+
+    # ARTIST: the singer of a disliked song.
+    $artistBucket = & $bucket 'ARTIST'
+    if ($artistBucket.Count -gt 0 -and $Artist) {
+        foreach ($name in @(Split-LocalArtistNames -Artist $Artist)) {
+            $key = Normalize-MusicText $name
+            if ($key -and $artistBucket.ContainsKey($key)) { return 'ARTIST' }
+        }
+    }
+
+    # ALBUM: the same release.
+    $albumBucket = & $bucket 'ALBUM'
+    if ($albumBucket.Count -gt 0 -and $Album) {
+        $key = Normalize-MusicText $Album
+        if ($key -and $albumBucket.ContainsKey($key)) { return 'ALBUM' }
+    }
+
+    # SIMILAR: a song that sounds like the disliked one.
+    $similarBucket = & $bucket 'SIMILAR'
+    if ($similarBucket.Count -gt 0) {
+        if ($NeteaseId -and $similarBucket.ContainsKey("netease:$NeteaseId")) { return 'SIMILAR' }
+        if ($Title) {
+            $pair = Normalize-MusicText "$Title$Artist"
+            if ($pair -and $similarBucket.ContainsKey($pair)) { return 'SIMILAR' }
+            $normalizedTitle = Normalize-MusicText $Title
+            if ($normalizedTitle -and $similarBucket.ContainsKey($normalizedTitle)) { return 'SIMILAR' }
+        }
+    }
+
+    # SEED: this candidate was discovered from a disliked song.
+    $seedBucket = & $bucket 'SEED'
+    if ($seedBucket.Count -gt 0 -and $FromSeed) {
+        $key = Normalize-MusicText $FromSeed
+        if ($key -and $seedBucket.ContainsKey($key)) { return 'SEED' }
+    }
+
+    return ''
 }
 
 function Write-RecommendationDisplayFeedbackDb {
@@ -1270,9 +1467,9 @@ function Save-DailyRecommendationsDb {
     [void]$statements.Add(("DELETE FROM events WHERE event_type = 'RECOMMENDATION_DISPLAY' AND message LIKE " + (ConvertTo-MusicServerSqlLiteral "date=${Date};rank=%")))
     foreach ($track in @($trackMap.Values)) {
         $trackId = [string](Get-OptionalProperty $track 'id')
-        $identifiers = ConvertTo-Json -InputObject @(Get-OptionalProperty $track 'identifiers' @()) -Compress -Depth 10
-        $preview = ConvertTo-Json -InputObject @(Get-OptionalProperty $track 'preview_sources' @()) -Compress -Depth 10
-        $candidates = ConvertTo-Json -InputObject @(Get-OptionalProperty $track 'download_candidates' @()) -Compress -Depth 10
+        $identifiers = ConvertTo-MusicServerJsonArrayText -Items (Get-OptionalProperty $track 'identifiers' @())
+        $preview = ConvertTo-MusicServerJsonArrayText -Items (Get-OptionalProperty $track 'preview_sources' @())
+        $candidates = ConvertTo-MusicServerJsonArrayText -Items (Get-OptionalProperty $track 'download_candidates' @())
         $lit = @{
             id = ConvertTo-MusicServerSqlLiteral $trackId; title = ConvertTo-MusicServerSqlLiteral ([string](Get-OptionalProperty $track 'title'))
             artist = ConvertTo-MusicServerSqlLiteral ([string](Get-OptionalProperty $track 'artist')); album = ConvertTo-MusicServerSqlLiteral ([string](Get-OptionalProperty $track 'album'))
@@ -1285,7 +1482,7 @@ function Save-DailyRecommendationsDb {
         [void]$statements.Add("INSERT INTO canonical_tracks (id,title,artist,album,duration,cover_url,identifiers_json,preview_sources_json,download_candidates_json,local_song_id,status,release_year,created_at,updated_at,revision) VALUES ($($lit.id),$($lit.title),$($lit.artist),$($lit.album),$($lit.dur),$($lit.cover),$($lit.ident),$($lit.prev),$($lit.cand),$($lit.local),$($lit.status),$($lit.year),$($lit.created),$($lit.updated),1) ON CONFLICT(id) DO UPDATE SET title=excluded.title, artist=excluded.artist, album=excluded.album, duration=excluded.duration, cover_url=excluded.cover_url, identifiers_json=excluded.identifiers_json, preview_sources_json=excluded.preview_sources_json, download_candidates_json=excluded.download_candidates_json, local_song_id=CASE WHEN canonical_tracks.local_song_id IS NULL OR canonical_tracks.local_song_id='' THEN excluded.local_song_id ELSE canonical_tracks.local_song_id END, status=CASE WHEN canonical_tracks.status='REMOTE' THEN excluded.status ELSE canonical_tracks.status END, release_year=CASE WHEN excluded.release_year > 0 THEN excluded.release_year ELSE canonical_tracks.release_year END, created_at=canonical_tracks.created_at, updated_at=excluded.updated_at, revision=canonical_tracks.revision")
     }
     foreach ($rec in @($recs | Sort-Object { [int](Get-OptionalProperty $_ 'rank') })) {
-        $preview = ConvertTo-Json -InputObject @(Get-OptionalProperty $rec 'preview_sources' @()) -Compress -Depth 10
+        $preview = ConvertTo-MusicServerJsonArrayText -Items (Get-OptionalProperty $rec 'preview_sources' @())
         $lit = @{
             d = ConvertTo-MusicServerSqlLiteral $Date; r = ConvertTo-MusicServerSqlLiteral ([int](Get-OptionalProperty $rec 'rank')); rid = ConvertTo-MusicServerSqlLiteral ([string](Get-OptionalProperty $rec 'id'))
             tid = ConvertTo-MusicServerSqlLiteral ([string](Get-OptionalProperty $rec 'track_id')); nid = ConvertTo-MusicServerSqlLiteral ([string](Get-OptionalProperty $rec 'netease_id'))
@@ -1338,7 +1535,7 @@ function Get-TodayRecommendationBatchDb {
 function Convert-DbRecRow {
     param([Parameter(Mandatory)][psobject]$Row)
     $preview = @()
-    try { if ($Row.preview_sources_json) { $preview = @(ConvertFrom-Json -InputObject ([string]$Row.preview_sources_json)) } } catch {}
+    try { if ($Row.preview_sources_json) { $preview = @(ConvertFrom-MusicServerJsonArray -Json ([string]$Row.preview_sources_json)) } } catch {}
     return [pscustomobject]@{
         id = [string]$Row.rec_id; date = [string]$Row.date; track_id = [string]$Row.track_id
         netease_id = [string]$Row.netease_id; title = [string]$Row.title; artist = [string]$Row.artist

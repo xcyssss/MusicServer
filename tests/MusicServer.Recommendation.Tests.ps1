@@ -845,43 +845,44 @@ Describe 'Disliked tracks and release year' {
         @(Get-DislikedTrackKeysDb).Count | Should Be 0
     }
 
-    It 'lists a disliked track with every key a candidate can be matched on' {
+    It 'puts every key a candidate can be matched on into the TRACK bucket' {
         $track = New-CanonicalTrack -Title 'Key Song' -Artist '许嵩' -Identifiers @([pscustomobject]@{ type = 'netease'; value = '167876' })
         Save-CanonicalTrackDb -Track $track | Out-Null
         Write-TrackDislikeDb -TrackId $track.id -Title 'Key Song' -Artist '许嵩' -NeteaseId '167876' | Out-Null
-        $keys = Get-DislikePenaltyKeys -Disliked @(Get-DislikedTrackKeysDb)
-        $keys.ContainsKey($track.id) | Should Be $true
-        $keys.ContainsKey('netease:167876') | Should Be $true
-        $keys.ContainsKey([string](Normalize-MusicText 'Key Song')) | Should Be $true
-        $keys.ContainsKey([string](Normalize-MusicText 'Key Song许嵩')) | Should Be $true
+        $buckets = Get-DislikeRelationBuckets -Disliked @(Get-DislikedTrackKeysDb)
+        $track_bucket = $buckets['TRACK']
+        $track_bucket.ContainsKey($track.id) | Should Be $true
+        $track_bucket.ContainsKey('netease:167876') | Should Be $true
+        $track_bucket.ContainsKey([string](Normalize-MusicText 'Key Song')) | Should Be $true
+        $track_bucket.ContainsKey([string](Normalize-MusicText 'Key Song许嵩')) | Should Be $true
     }
 
     It 'matches a candidate by NetEase id, track id, name, or name+artist' {
         $track = New-CanonicalTrack -Title 'Match Song' -Artist '许嵩' -Identifiers @([pscustomobject]@{ type = 'netease'; value = '999' })
         Save-CanonicalTrackDb -Track $track | Out-Null
         Write-TrackDislikeDb -TrackId $track.id -Title 'Match Song' -Artist '许嵩' -NeteaseId '999' | Out-Null
-        $keys = Get-DislikePenaltyKeys -Disliked @(Get-DislikedTrackKeysDb)
+        $buckets = Get-DislikeRelationBuckets -Disliked @(Get-DislikedTrackKeysDb)
 
-        (Test-CandidateDisliked -Title 'Other' -Artist 'Other' -NeteaseId '999' -PenaltyKeys $keys) | Should Be $true
-        (Test-CandidateDisliked -Title 'Other' -Artist 'Other' -TrackId $track.id -PenaltyKeys $keys) | Should Be $true
-        (Test-CandidateDisliked -Title 'Match Song' -Artist 'Other' -PenaltyKeys $keys) | Should Be $true
-        (Test-CandidateDisliked -Title 'Match Song' -Artist '许嵩' -PenaltyKeys $keys) | Should Be $true
+        (Get-CandidateDislikeRelation -Title 'Other' -Artist 'Other' -NeteaseId '999' -Buckets $buckets) | Should Be 'TRACK'
+        (Get-CandidateDislikeRelation -Title 'Other' -Artist 'Other' -TrackId $track.id -Buckets $buckets) | Should Be 'TRACK'
+        (Get-CandidateDislikeRelation -Title 'Match Song' -Artist 'Other' -Buckets $buckets) | Should Be 'TRACK'
+        (Get-CandidateDislikeRelation -Title 'Match Song' -Artist '许嵩' -Buckets $buckets) | Should Be 'TRACK'
         # A different recording of a different song must not be caught.
-        (Test-CandidateDisliked -Title '无关歌曲' -Artist '其他歌手' -NeteaseId '111' -PenaltyKeys $keys) | Should Be $false
+        (Get-CandidateDislikeRelation -Title '无关歌曲' -Artist '其他歌手' -NeteaseId '111' -Buckets $buckets) | Should Be ''
     }
 
     It 'never matches when nothing is disliked' {
-        (Test-CandidateDisliked -Title 'Anything' -Artist 'Anyone' -NeteaseId '1' -PenaltyKeys @{}) | Should Be $false
+        (Get-CandidateDislikeRelation -Title 'Anything' -Artist 'Anyone' -NeteaseId '1' -Buckets @{}) | Should Be ''
     }
 
-    It 'normalizes penalty keys so a separator cannot defeat the match' {
+    It 'normalizes relation keys so a separator cannot defeat the match' {
         # The disliked title is raw; the candidate arrives from NetEase with
         # different punctuation. Both must normalize to the same key.
         $track = New-CanonicalTrack -Title 'On My Way（Live）' -Artist 'Alan Walker'
         Save-CanonicalTrackDb -Track $track | Out-Null
         Write-TrackDislikeDb -TrackId $track.id -Title 'On My Way（Live）' -Artist 'Alan Walker' | Out-Null
-        $keys = Get-DislikePenaltyKeys -Disliked @(Get-DislikedTrackKeysDb)
-        (Test-CandidateDisliked -Title 'On My Way(Live)' -Artist 'Alan Walker' -PenaltyKeys $keys) | Should Be $true
+        $buckets = Get-DislikeRelationBuckets -Disliked @(Get-DislikedTrackKeysDb)
+        (Get-CandidateDislikeRelation -Title 'On My Way(Live)' -Artist 'Alan Walker' -Buckets $buckets) | Should Be 'TRACK'
     }
 
     It 'lets a non-disliked track win the slot from a disliked one' {
@@ -900,8 +901,8 @@ Describe 'Disliked tracks and release year' {
         $base[0].LibraryId | Should Be 'library-fav'
 
         # Dislike it: the other artist must take the slot instead.
-        $keys = Get-DislikePenaltyKeys -Disliked @([pscustomobject]@{ TrackId = ([string]$favourite.TrackId); Title = 'Favourite'; Artist = '最爱歌手'; NeteaseId = '' })
-        $after = @(Select-LocalRecommendationTracks -Candidates @($favourite, $other) -Affinity $affinity -Limit 1 -DislikeKeys $keys)
+        $buckets = Get-DislikeRelationBuckets -Disliked @([pscustomobject]@{ TrackId = ([string]$favourite.TrackId); Title = 'Favourite'; Artist = '最爱歌手'; Album = ''; NeteaseId = '' })
+        $after = @(Select-LocalRecommendationTracks -Candidates @($favourite, $other) -Affinity $affinity -Limit 1 -DislikeBuckets $buckets -DislikeDivisors @{ TRACK = 4; ARTIST = 3; ALBUM = 2; SIMILAR = 2; SEED = 1 })
         $after.Count | Should Be 1
         $after[0].LibraryId | Should Be 'library-other'
     }
@@ -911,10 +912,99 @@ Describe 'Disliked tracks and release year' {
         # disliked track must still be returned, with a reduced but nonzero weight.
         $only = New-DislikeCandidate -Title 'Only One' -Artist '唯一歌手' -LibraryId 'library-only'
         $affinity = Get-LocalArtistAffinity -ListeningStats @([pscustomobject]@{ artist = '唯一歌手'; play_count = 30 }) -PositiveTracks @()
-        $keys = Get-DislikePenaltyKeys -Disliked @([pscustomobject]@{ TrackId = ([string]$only.TrackId); Title = 'Only One'; Artist = '唯一歌手'; NeteaseId = '' })
-        $picks = @(Select-LocalRecommendationTracks -Candidates @($only) -Affinity $affinity -Limit 1 -DislikeKeys $keys)
+        $buckets = Get-DislikeRelationBuckets -Disliked @([pscustomobject]@{ TrackId = ([string]$only.TrackId); Title = 'Only One'; Artist = '唯一歌手'; Album = ''; NeteaseId = '' })
+        $picks = @(Select-LocalRecommendationTracks -Candidates @($only) -Affinity $affinity -Limit 1 -DislikeBuckets $buckets -DislikeDivisors @{ TRACK = 4; ARTIST = 3; ALBUM = 2; SIMILAR = 2; SEED = 1 })
         $picks.Count | Should Be 1
         $picks[0].LibraryId | Should Be 'library-only'
         ([int]$picks[0].Weight -gt 0) | Should Be $true
+    }
+
+    It 'down-weights another song by the disliked singer, not just the exact track' {
+        # This is the reported requirement: disliking one song must lower the weight
+        # of what is RELATED to it. A different song by the same singer is the most
+        # common relation, and it must sink without being the same recording.
+        $dislikedRow = [pscustomobject]@{ TrackId = 'track_disliked'; Title = '讨厌的歌'; Artist = '同一个歌手'; Album = '同一张专辑'; NeteaseId = '111' }
+        $buckets = Get-DislikeRelationBuckets -Disliked @($dislikedRow)
+
+        # A different track by the same singer, on a different album.
+        (Get-CandidateDislikeRelation -Title '另一首歌' -Artist '同一个歌手' -Album '别的专辑' -Buckets $buckets) | Should Be 'ARTIST'
+        # The same album, credited differently.
+        (Get-CandidateDislikeRelation -Title '专辑里的另一首' -Artist '别的歌手' -Album '同一张专辑' -Buckets $buckets) | Should Be 'ALBUM'
+        # The exact recording still reports the strongest relation.
+        (Get-CandidateDislikeRelation -Title '讨厌的歌' -Artist '同一个歌手' -Buckets $buckets) | Should Be 'TRACK'
+        (Get-CandidateDislikeRelation -Title '讨厌的歌' -NeteaseId '111' -Buckets $buckets) | Should Be 'TRACK'
+        # An unrelated song is untouched.
+        (Get-CandidateDislikeRelation -Title '无关的歌' -Artist '无关歌手' -Album '无关专辑' -Buckets $buckets) | Should Be ''
+    }
+
+    It 'reports only the strongest relation so one candidate is penalised once' {
+        $buckets = Get-DislikeRelationBuckets -Disliked @([pscustomobject]@{ TrackId = 'track_x'; Title = 'Song'; Artist = 'Singer'; Album = 'Album'; NeteaseId = '5' })
+        # Same track AND same artist AND same album: must report TRACK only.
+        (Get-CandidateDislikeRelation -Title 'Song' -Artist 'Singer' -Album 'Album' -Buckets $buckets) | Should Be 'TRACK'
+    }
+
+    It 'splits a duet credit so a solo track by one of the singers is related' {
+        $buckets = Get-DislikeRelationBuckets -Disliked @([pscustomobject]@{ TrackId = 'track_duet'; Title = '合唱'; Artist = '歌手甲,歌手乙'; Album = ''; NeteaseId = '' })
+        (Get-CandidateDislikeRelation -Title '独唱' -Artist '歌手甲' -Buckets $buckets) | Should Be 'ARTIST'
+        (Get-CandidateDislikeRelation -Title '独唱' -Artist '歌手乙' -Buckets $buckets) | Should Be 'ARTIST'
+        (Get-CandidateDislikeRelation -Title '独唱' -Artist '歌手丙' -Buckets $buckets) | Should Be ''
+    }
+
+    It 'penalises a song discovered from the disliked song as its seed' {
+        $buckets = Get-DislikeRelationBuckets -Disliked @([pscustomobject]@{ TrackId = 'track_seed'; Title = '种子歌'; Artist = '歌手'; Album = ''; NeteaseId = '' })
+        (Get-CandidateDislikeRelation -Title '别的歌' -Artist '别的歌手' -FromSeed '种子歌' -Buckets $buckets) | Should Be 'SEED'
+        (Get-CandidateDislikeRelation -Title '别的歌' -Artist '别的歌手' -FromSeed '其他种子' -Buckets $buckets) | Should Be ''
+    }
+
+    It 'treats stored similarity relations as related songs' {
+        $buckets = Get-DislikeRelationBuckets -Disliked @([pscustomobject]@{ TrackId = 'track_a'; Title = 'A'; Artist = '甲'; Album = ''; NeteaseId = '1' }) `
+            -RelationMap @{ 'track_a' = @([pscustomobject]@{ Type = 'SIMILAR'; Key = 'netease:999' }, [pscustomobject]@{ Type = 'SIMILAR'; Key = ([string](Normalize-MusicText '相似歌相似歌手')) }) }
+        (Get-CandidateDislikeRelation -Title '别的' -Artist '别的' -NeteaseId '999' -Buckets $buckets) | Should Be 'SIMILAR'
+        (Get-CandidateDislikeRelation -Title '相似歌' -Artist '相似歌手' -Buckets $buckets) | Should Be 'SIMILAR'
+        (Get-CandidateDislikeRelation -Title '不相似' -Artist '别人' -NeteaseId '1000' -Buckets $buckets) | Should Be ''
+    }
+
+    It 'persists relations idempotently and reads them back' {
+        $track = New-CanonicalTrack -Title 'Related Song' -Artist '关联歌手' -Album '关联专辑'
+        Save-CanonicalTrackDb -Track $track | Out-Null
+        Save-DislikeRelationsDb -TrackId $track.id -Relations @([pscustomobject]@{ Type = 'ARTIST'; Key = 'x' }) | Out-Null
+        # Re-saving the same relation must not duplicate it.
+        Save-DislikeRelationsDb -TrackId $track.id -Relations @([pscustomobject]@{ Type = 'ARTIST'; Key = 'x' }) | Out-Null
+        $map = Get-DislikeRelationMapDb
+        @($map[$track.id]).Count | Should Be 1
+        # An unknown relation type is refused rather than stored unreadable.
+        Save-DislikeRelationsDb -TrackId $track.id -Relations @([pscustomobject]@{ Type = 'NOT_A_RELATION'; Key = 'y' }) | Out-Null
+        @((Get-DislikeRelationMapDb)[$track.id]).Count | Should Be 1
+    }
+
+    It 'stops applying relations once the dislike is withdrawn' {
+        $track = New-CanonicalTrack -Title 'Withdrawn' -Artist '撤销歌手' -Album '撤销专辑'
+        Save-CanonicalTrackDb -Track $track | Out-Null
+        Write-TrackDislikeDb -TrackId $track.id -Title 'Withdrawn' -Artist '撤销歌手' -Album '撤销专辑' | Out-Null
+        Save-DislikeRelationsDb -TrackId $track.id -Relations @([pscustomobject]@{ Type = 'SIMILAR'; Key = 'netease:777' }) | Out-Null
+
+        $before = Get-DislikeRelationBuckets -Disliked @(Get-DislikedTrackKeysDb) -RelationMap (Get-DislikeRelationMapDb)
+        (Get-CandidateDislikeRelation -Title '别的' -Artist '别的' -NeteaseId '777' -Buckets $before) | Should Be 'SIMILAR'
+
+        Write-TrackUndislikeDb -TrackId $track.id | Out-Null
+        # The rows may linger as a cost-saving cache, but they must go inert: the
+        # buckets are built from currently-disliked songs only.
+        $after = Get-DislikeRelationBuckets -Disliked @(Get-DislikedTrackKeysDb) -RelationMap (Get-DislikeRelationMapDb)
+        (Get-CandidateDislikeRelation -Title '别的' -Artist '别的' -NeteaseId '777' -Buckets $after) | Should Be ''
+    }
+
+    It 'resolves the singer and album of a disliked track from its canonical row' {
+        # The dislike value carries what the API knew at the time; the canonical
+        # track is the source of truth and must fill in whatever is missing, or a
+        # dislike would produce no ARTIST relation at all.
+        $track = New-CanonicalTrack -Title 'Canonical Song' -Artist '真实歌手' -Album '真实专辑' `
+            -Identifiers @([pscustomobject]@{ type = 'netease'; value = '4242' })
+        Save-CanonicalTrackDb -Track $track | Out-Null
+        Write-TrackDislikeDb -TrackId $track.id | Out-Null
+        $row = @(Get-DislikedTrackKeysDb) | Select-Object -First 1
+        $row.Title | Should Be 'Canonical Song'
+        $row.Artist | Should Be '真实歌手'
+        $row.Album | Should Be '真实专辑'
+        $row.NeteaseId | Should Be '4242'
     }
 }

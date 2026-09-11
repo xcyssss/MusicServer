@@ -1,4 +1,4 @@
-﻿$ProjectRoot = Split-Path -Parent $PSScriptRoot
+$ProjectRoot = Split-Path -Parent $PSScriptRoot
 
 function Get-TestSqliteExecutable {
     if ($env:MUSICSERVER_SQLITE) {
@@ -172,5 +172,119 @@ next;line'); -- comment; INSERT INTO missing_table VALUES (1);
         [string](@(Invoke-MusicServerSqlJson -Query 'PRAGMA journal_mode;')[0].journal_mode) | Should Be 'delete'
         (Get-SchemaVersion) | Should Be 17
         [int](@(Invoke-MusicServerSqlJson -Query 'PRAGMA busy_timeout;')[0].timeout) | Should Be 5000
+    }
+
+    It 'returns one row as a flat row, never a wrapper array wrapping that row' {
+        # PS 5.1's ConvertFrom-Json returned a one-item JSON array nested inside
+        # another array. Scalar member access hid it, but property lookups did not:
+        # @(rows)[0].title answered correctly while @(rows)[0] was really the list.
+        Invoke-MusicServerSqlNonQuery -Query 'CREATE TABLE probe (title TEXT NOT NULL); INSERT INTO probe (title) VALUES (''only row'');'
+        $rows = @(Invoke-MusicServerSqlJson -Query 'SELECT title FROM probe;')
+        $rows.Count | Should Be 1
+        $rows[0].GetType().Name | Should Be 'PSCustomObject'
+        [string]$rows[0].title | Should Be 'only row'
+    }
+}
+
+Describe 'MusicServer JSON array parsing' {
+    It 'flattens a JSON array at every length' {
+        @(ConvertFrom-MusicServerJsonArray -Json '[]').Count | Should Be 0
+        @(ConvertFrom-MusicServerJsonArray -Json '[{"a":1}]').Count | Should Be 1
+        @(ConvertFrom-MusicServerJsonArray -Json '[{"a":1},{"a":2}]').Count | Should Be 2
+        @(ConvertFrom-MusicServerJsonArray -Json '[{"a":1},{"a":2},{"a":3}]').Count | Should Be 3
+    }
+
+    It 'exposes the items themselves rather than a nested list' {
+        # The regression that mattered: every reader of identifiers_json saw a
+        # wrapper, so Get-NeteaseIdFromTrack returned '' for every stored track.
+        $items = @(ConvertFrom-MusicServerJsonArray -Json '[{"type":"netease","value":"4242"}]')
+        $items[0].GetType().Name | Should Be 'PSCustomObject'
+        [string]$items[0].type | Should Be 'netease'
+        [string]$items[0].value | Should Be '4242'
+    }
+
+    It 'returns nothing for absent, empty, malformed or non-array input' {
+        @(ConvertFrom-MusicServerJsonArray -Json $null).Count | Should Be 0
+        @(ConvertFrom-MusicServerJsonArray -Json '').Count | Should Be 0
+        @(ConvertFrom-MusicServerJsonArray -Json '   ').Count | Should Be 0
+        @(ConvertFrom-MusicServerJsonArray -Json '[]').Count | Should Be 0
+        @(ConvertFrom-MusicServerJsonArray -Json 'not json at all').Count | Should Be 0
+        # A bare object is not a list of items and must not become a one-item list.
+        @(ConvertFrom-MusicServerJsonArray -Json '{}').Count | Should Be 0
+        @(ConvertFrom-MusicServerJsonArray -Json '{"a":1}').Count | Should Be 0
+    }
+
+    It 'drops JSON null holes rather than reporting them as items' {
+        # New-CanonicalTrack once turned a missing -Identifiers into @($null), which
+        # reached disk as [null]. A null is not an item.
+        @(ConvertFrom-MusicServerJsonArray -Json '[null]').Count | Should Be 0
+        @(ConvertFrom-MusicServerJsonArray -Json '[null,null]').Count | Should Be 0
+        $mixed = @(ConvertFrom-MusicServerJsonArray -Json '[null,{"type":"netease","value":"7"}]')
+        $mixed.Count | Should Be 1
+        [string]$mixed[0].value | Should Be '7'
+    }
+
+    It 'unwraps the legacy ConvertTo-Json collection wrapper shape' {
+        # ConvertTo-Json renders an ArrayList as {value:[...],Count:n} rather than an
+        # array, so rows written that way must still yield their real items.
+        $items = @(ConvertFrom-MusicServerJsonArray -Json '[{"value":[{"type":"netease","value":"777"}],"Count":1}]')
+        $items.Count | Should Be 1
+        [string]$items[0].type | Should Be 'netease'
+        [string]$items[0].value | Should Be '777'
+    }
+
+    It 'writes an array that its own reader round-trips, with no null holes' {
+        (ConvertTo-MusicServerJsonArrayText -Items @()) | Should Be '[]'
+        (ConvertTo-MusicServerJsonArrayText -Items $null) | Should Be '[]'
+        (ConvertTo-MusicServerJsonArrayText -Items @($null)) | Should Be '[]'
+        foreach ($case in @(
+            , @([pscustomobject]@{ type = 'netease'; value = '1' })
+            , @([pscustomobject]@{ type = 'netease'; value = '1' }, [pscustomobject]@{ type = 'netease'; value = '2' })
+            , @([pscustomobject]@{ type = 'netease'; value = '1' }, [pscustomobject]@{ type = 'netease'; value = '2' }, [pscustomobject]@{ type = 'netease'; value = '3' })
+        )) {
+            $text = ConvertTo-MusicServerJsonArrayText -Items $case
+            $text.StartsWith('[') | Should Be $true
+            @(ConvertFrom-MusicServerJsonArray -Json $text).Count | Should Be $case.Count
+        }
+    }
+
+    It 'treats a hashtable as one JSON object instead of enumerating it' {
+        # A Hashtable is IEnumerable, but PowerShell enumerating it hands back THE
+        # HASHTABLE ITSELF (each DictionaryEntry comes back as a hashtable again), so
+        # a flattener that treats every IEnumerable as a list re-enqueues the same
+        # hashtable forever. That is an infinite loop with no output and no error:
+        # every caller of Save-CanonicalTrackDb hung, and -PreviewSources /
+        # -Identifiers are routinely passed exactly this way. Reaching the
+        # assertions below at all is half the test; the observed JSON is the rest.
+        # Key order in ConvertTo-Json output is not guaranteed, so assert on values.
+        $text = ConvertTo-MusicServerJsonArrayText -Items @(@{ provider = 'music_api'; preview_url = 'https://example.invalid/p.mp3' })
+        $text.StartsWith('[') | Should Be $true
+        $back = @(ConvertFrom-MusicServerJsonArray -Json $text)
+        $back.Count | Should Be 1
+        [string]$back[0].provider | Should Be 'music_api'
+        [string]$back[0].preview_url | Should Be 'https://example.invalid/p.mp3'
+
+        # A bare hashtable is also a single item, not a list of its keys.
+        $bare = @(ConvertFrom-MusicServerJsonArray -Json (ConvertTo-MusicServerJsonArrayText -Items @{ provider = 'music_api' }))
+        $bare.Count | Should Be 1
+        [string]$bare[0].provider | Should Be 'music_api'
+
+        # An item carrying its own `value`/`Count` fields is still an item: the legacy
+        # wrapper is identified by `value` being a LIST, so a scalar value cannot be
+        # mistaken for one.
+        $scalar = @(ConvertFrom-MusicServerJsonArray -Json (ConvertTo-MusicServerJsonArrayText -Items @(@{ value = 'x'; Count = 1 })))
+        $scalar.Count | Should Be 1
+        [string]$scalar[0].value | Should Be 'x'
+    }
+
+    It 'keeps hashtable and object items side by side in one array' {
+        $text = ConvertTo-MusicServerJsonArrayText -Items @(
+            @{ type = 'netease'; value = '4242' },
+            [pscustomobject]@{ type = 'bilibili'; value = 'BV1xx' }
+        )
+        $back = @(ConvertFrom-MusicServerJsonArray -Json $text)
+        $back.Count | Should Be 2
+        [string]$back[0].value | Should Be '4242'
+        [string]$back[1].value | Should Be 'BV1xx'
     }
 }

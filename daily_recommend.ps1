@@ -72,11 +72,27 @@ $Headers = @{
     'Referer'    = 'https://music.163.com/'
 }
 $RecommendationCooldownDays = 14
-# How hard a disliked song is pushed down. A fresh candidate scores 1 per seed
-# that surfaced it (typically 1-3), so -5 reliably sinks a disliked track below
-# anything else while still leaving it reachable when the pool is thin.
-$DislikeScorePenalty = 5
-$DislikeWeightDivisor = 4
+# How hard a song related to a disliked one is pushed down, by how close the
+# relation is. A fresh candidate scores 1 per seed that surfaced it (typically
+# 1-3), so these sink a related song below unrelated ones while leaving it
+# reachable when the pool is thin. "少推荐" is a penalty, never an exclusion.
+$DislikeRelationPenalty = @{
+    TRACK   = 5   # the disliked recording itself
+    ARTIST  = 3   # another song by the same singer
+    ALBUM   = 2   # another track off the same release
+    SIMILAR = 2   # a song NetEase considers similar
+    SEED    = 1   # discovered from the disliked song as a seed
+}
+# The local source ranks by affinity weight instead of a score, so the same
+# relations divide that weight. SEED is 1 (no change): a local track is not
+# "discovered from" anything.
+$DislikeRelationDivisor = @{
+    TRACK   = 4
+    ARTIST  = 3
+    ALBUM   = 2
+    SIMILAR = 2
+    SEED    = 1
+}
 
 function Write-Step([string]$Message) { Write-Host "`n>>> $Message" -ForegroundColor Cyan }
 
@@ -253,12 +269,80 @@ foreach ($row in $cooldownRows) {
 }
 Write-Host "  排除条目：$($exclude.Count)，已接受网易云 ID：$($acceptedIds.Count)，近期冷却：$cooldownCount" -ForegroundColor Yellow
 
-# Disliked tracks, resolved once and used by BOTH sources below. "少推荐" is a soft
-# penalty, not an exclusion: the track keeps a much lower weight, so it sinks below
-# fresh candidates but can still surface when there is nothing better. Excluding it
-# outright, the way REJECTED does, would not be what was asked for.
-$dislikedKeys = Get-DislikePenaltyKeys -Disliked @(Get-DislikedTrackKeysDb)
-if ($dislikedKeys.Count -gt 0) { Write-Host "  讨厌歌曲键：$($dislikedKeys.Count)" -ForegroundColor Yellow }
+# Disliked songs, resolved once and used by BOTH sources below.
+#
+# Disliking one song must lower the weight of everything RELATED to it -- its
+# singer, its album, songs that sound like it, and anything it seeded -- not only
+# that exact recording. The relations are stored so the similarity lookup, which
+# costs a network request, is paid once per disliked song rather than every run.
+$disliked = @(Get-DislikedTrackKeysDb)
+$dislikeRelationMap = @{}
+try { $dislikeRelationMap = Get-DislikeRelationMapDb } catch { $dislikeRelationMap = @{} }
+$dislikeLookups = 0
+$dislikeLookupLimit = 5
+$songsPenalized = 0
+foreach ($row in $disliked) {
+    $expanded = @()
+    # Free relations: read straight off the disliked track itself.
+    foreach ($name in @(Split-LocalArtistNames -Artist ([string]$row.Artist))) {
+        $key = Normalize-MusicText $name
+        if ($key) { $expanded += [pscustomobject]@{ Type = 'ARTIST'; Key = $key } }
+    }
+    $albumKey = Normalize-MusicText ([string]$row.Album)
+    if ($albumKey) { $expanded += [pscustomobject]@{ Type = 'ALBUM'; Key = $albumKey } }
+    $seedKey = Normalize-MusicText ([string]$row.Title)
+    if ($seedKey) { $expanded += [pscustomobject]@{ Type = 'SEED'; Key = $seedKey } }
+    if ($expanded.Count -gt 0) {
+        Save-DislikeRelationsDb -TrackId ([string]$row.TrackId) -Relations $expanded | Out-Null
+    }
+
+    # Similar songs: one bounded NetEase request, only when this track has no
+    # SIMILAR relation yet, so a settled dislike is never re-queried.
+    $hasSimilar = $false
+    if ($dislikeRelationMap.ContainsKey([string]$row.TrackId)) {
+        $hasSimilar = @($dislikeRelationMap[[string]$row.TrackId] | Where-Object { [string]$_.Type -eq 'SIMILAR' }).Count -gt 0
+    }
+    if (-not $hasSimilar -and $row.NeteaseId -and $dislikeLookups -lt $dislikeLookupLimit) {
+        $dislikeLookups++
+        $similar = @(Get-NeteaseSimilarSongs -Config $Config -NeteaseId ([string]$row.NeteaseId) -Limit 10)
+        $relations = @()
+        $bootstrapped = @()
+        foreach ($song in $similar) {
+            $sid = [string](Get-OptionalProperty $song 'id')
+            $name = [string](Get-OptionalProperty $song 'name')
+            $artists = @(@(Get-OptionalProperty $song 'artists' @()) | ForEach-Object { [string](Get-OptionalProperty $_ 'name' '') } | Where-Object { $_ })
+            if ($sid) { $relations += [pscustomobject]@{ Type = 'SIMILAR'; Key = "netease:$sid" } }
+            if ($name -and $artists) {
+                $pair = Normalize-MusicText "$name$($artists -join ',')"
+                if ($pair) {
+                    $relations += [pscustomobject]@{ Type = 'SIMILAR'; Key = $pair }
+                    # Latch the similar song's own singer and album too, so the
+                    # penalty reaches the related artist and not just the one track.
+                    foreach ($artistName in @($artists)) {
+                        $artistKey = Normalize-MusicText $artistName
+                        if ($artistKey) { $bootstrapped += [pscustomobject]@{ Type = 'ARTIST'; Key = $artistKey } }
+                    }
+                    $albumName = [string](Get-OptionalProperty (Get-OptionalProperty $song 'album' $null) 'name' '')
+                    $similarAlbum = Normalize-MusicText $albumName
+                    if ($similarAlbum) { $bootstrapped += [pscustomobject]@{ Type = 'ALBUM'; Key = $similarAlbum } }
+                }
+            }
+        }
+        $all = @($relations) + @($bootstrapped)
+        if ($all.Count -gt 0) { Save-DislikeRelationsDb -TrackId ([string]$row.TrackId) -Relations $all | Out-Null }
+        # Only a non-empty answer is remembered as settled; an empty one is retried
+        # on a later run rather than permanently claiming "nothing is similar".
+        if ($relations.Count -eq 0) { continue }
+    }
+}
+$dislikeRelationMap = @{}
+try { $dislikeRelationMap = Get-DislikeRelationMapDb } catch { $dislikeRelationMap = @{} }
+$dislikeBuckets = Get-DislikeRelationBuckets -Disliked $disliked -RelationMap $dislikeRelationMap
+$bucketsTotal = 0
+foreach ($name in @('TRACK','ARTIST','ALBUM','SIMILAR','SEED')) { if ($dislikeBuckets.ContainsKey($name)) { $bucketsTotal += $dislikeBuckets[$name].Count } }
+if ($disliked.Count -gt 0) {
+    Write-Host "  讨厌歌曲：$($disliked.Count) 首；关联键 $bucketsTotal 个（歌手/专辑/相似/种子）；相似查询 $dislikeLookups 次" -ForegroundColor Yellow
+}
 
 # ---------------------------------------------------------------------------
 # Local re-listen recommendations
@@ -336,10 +420,10 @@ try {
 $localBudget = [Math]::Max(0, [Math]::Min($LocalCount, $Count))
 $localPicks = @()
 if ($localBudget -gt 0 -and $affinity.Count -gt 0) {
-    # The dislike penalty is applied inside the selection so a disliked owned track
-    # loses its slot to a non-disliked one; demoting afterwards would only reorder
-    # the picks already chosen.
-    $localPicks = @(Select-LocalRecommendationTracks -Candidates @($localCandidates) -Affinity $affinity -ExcludedKeys @($localExclude) -Limit $localBudget -DislikeKeys $dislikedKeys -DislikeWeightDivisor $DislikeWeightDivisor)
+    # The relation penalty is applied inside the selection so an owned track related
+    # to a disliked song (same singer, same album) loses its slot to an unrelated
+    # one; demoting afterwards would only reorder the picks already chosen.
+    $localPicks = @(Select-LocalRecommendationTracks -Candidates @($localCandidates) -Affinity $affinity -ExcludedKeys @($localExclude) -Limit $localBudget -DislikeBuckets $dislikeBuckets -DislikeDivisors $DislikeRelationDivisor)
 }
 Write-Host "  本地重听推荐：$($localPicks.Count) 首（候选 $($localCandidates.Count) 首，歌手亲和度 $($affinity.Count) 个，预算 $localBudget）" -ForegroundColor Yellow
 
@@ -387,18 +471,27 @@ foreach ($seed in $picked) {
     }
 }
 
-# Disliked tracks are pushed down rather than removed. "少推荐" is a soft penalty:
-# a disliked song keeps a much lower score than a fresh candidate, so it sinks out
-# of the day under normal circumstances but can still appear when there is nothing
-# better -- which is what excluding it outright would prevent.
-$dislikePenalty = 0
-if ($dislikedKeys.Count -gt 0) {
+# Candidates related to a disliked song are pushed down rather than removed, by
+# how close the relation is. "少推荐" is a soft penalty: a related song keeps a much
+# lower score than an unrelated one, so it sinks out of the day under normal
+# circumstances but can still appear when there is nothing better -- which is what
+# excluding it outright would prevent.
+$dislikeByRelation = @{}
+if ($bucketsTotal -gt 0) {
     foreach ($candidate in @($candidateMap.Values)) {
-        $isDisliked = Test-CandidateDisliked -Title ([string]$candidate.Title) -Artist ([string]$candidate.Artist) `
-            -NeteaseId ([string]$candidate.NeteaseId) -PenaltyKeys $dislikedKeys
-        if ($isDisliked) { $candidate.Score = $candidate.Score - $DislikeScorePenalty; $dislikePenalty++ }
+        $relation = Get-CandidateDislikeRelation -Title ([string]$candidate.Title) -Artist ([string]$candidate.Artist) `
+            -Album ([string]$candidate.Album) -NeteaseId ([string]$candidate.NeteaseId) `
+            -FromSeed ([string]$candidate.FromSeed) -Buckets $dislikeBuckets
+        if (-not $relation) { continue }
+        $amount = 0
+        if ($DislikeRelationPenalty.ContainsKey($relation)) { $amount = [int]$DislikeRelationPenalty[$relation] }
+        if ($amount -le 0) { continue }
+        $candidate.Score = $candidate.Score - $amount
+        $songsPenalized++
+        if ($dislikeByRelation.ContainsKey($relation)) { $dislikeByRelation[$relation]++ } else { $dislikeByRelation[$relation] = 1 }
     }
-    Write-Host "  讨厌歌曲命中：$dislikePenalty 首（每首 -$DislikeScorePenalty 分）" -ForegroundColor Yellow
+    $summary = @($dislikeByRelation.Keys | Sort-Object | ForEach-Object { "$_=$($dislikeByRelation[$_])" }) -join ' '
+    Write-Host "  关联降权：$songsPenalized 首（$summary）" -ForegroundColor Yellow
 }
 
 $ranked = @($candidateMap.Values | Sort-Object @{Expression = {$_.Score}; Descending = $true}, @{Expression = { Get-Random }})

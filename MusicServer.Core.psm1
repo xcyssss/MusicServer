@@ -278,9 +278,18 @@ function New-CanonicalTrack {
     )
     if (-not $TrackId) { $TrackId = Get-CanonicalTrackId -Title $Title -Artist $Artist }
     $now = Get-NowIso
+    # `@($null)` is a ONE-element array holding null, so a track created without
+    # -Identifiers stored `[null]` in identifiers_json. Normalize to a real empty
+    # list instead of relying on every reader to skip the hole.
+    $identifierItems = @()
+    if ($null -ne $Identifiers) { $identifierItems = @($Identifiers) }
+    $previewItems = @()
+    if ($null -ne $PreviewSources) { $previewItems = @($PreviewSources) }
+    $candidateItems = @()
+    if ($null -ne $DownloadCandidates) { $candidateItems = @($DownloadCandidates) }
     return [pscustomobject]@{
         id = $TrackId; title = $Title; artist = $Artist; album = $Album; duration = $Duration; cover_url = $CoverUrl
-        identifiers = @($Identifiers); preview_sources = @($PreviewSources); download_candidates = @($DownloadCandidates)
+        identifiers = $identifierItems; preview_sources = $previewItems; download_candidates = $candidateItems
         local_song_id = $LocalSongId; release_year = $ReleaseYear; status = $Status; created_at = $now; updated_at = $now
     }
 }

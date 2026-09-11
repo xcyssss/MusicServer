@@ -902,6 +902,48 @@ function Resolve-NeteaseTrackArtist {
     return $null
 }
 
+function Get-NeteaseSimilarSongs {
+    <#
+    .SYNOPSIS
+      Songs NetEase considers similar to one NetEase id, for dislike relations.
+
+      Bounded like every other NetEase call: at most ONE request, charged against
+      the `netease` circuit, and refused outright when the circuit is blocked. Set
+      MUSICSERVER_DISABLE_NETEASE_SEARCH=1 to disable it (hermetic tests).
+
+      Returns whatever the endpoint provides (id, name, artists); the caller maps
+      it into relation keys so this stays a transport helper.
+    #>
+    param(
+        [Parameter(Mandatory)][psobject]$Config,
+        [AllowEmptyString()][string]$NeteaseId = '',
+        [int]$Limit = 10
+    )
+
+    if ($env:MUSICSERVER_DISABLE_NETEASE_SEARCH -eq '1') { return @() }
+    if (-not $NeteaseId) { return @() }
+    if (-not (Test-ProviderRequestAvailable -Config $Config -Provider 'netease')) { return @() }
+    if (-not (Claim-ProviderRequest -Config $Config -Provider 'netease')) { return @() }
+
+    $headers = @{
+        'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36'
+        'Referer'    = 'https://music.163.com/'
+    }
+    $started = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        $url = "https://music.163.com/api/v1/discovery/simiSong?songid=$([uri]::EscapeDataString($NeteaseId))&limit=$Limit"
+        $response = Invoke-RestMethod -Uri $url -Headers $headers -TimeoutSec 20
+    } catch {
+        Record-ProviderFailure -Config $Config -Provider 'netease' -ErrorType 'SIMI_FAILED' -Message $_.Exception.Message | Out-Null
+        return @()
+    }
+    $started.Stop()
+    Record-ProviderSuccess -Config $Config -Provider 'netease' -LatencyMs $started.Elapsed.TotalMilliseconds
+    $songs = @()
+    try { if ($response.songs) { $songs = @($response.songs) } } catch { $songs = @() }
+    return @($songs)
+}
+
 function Invoke-NeteaseDownload {
     <#
     .SYNOPSIS
