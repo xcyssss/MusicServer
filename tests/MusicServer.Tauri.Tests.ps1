@@ -2,6 +2,56 @@
 
 . (Join-Path $PSScriptRoot 'MusicServer.DesktopSmoke.ps1')
 
+Describe 'Owned API startup wait' {
+    $tokens = $null; $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile((Join-Path $ProjectRoot 'start_musicserver_ui.ps1'), [ref]$tokens, [ref]$errors)
+    foreach ($name in @('Test-ApiReady', 'Write-UiLog', 'Start-MusicServerApi')) {
+        $definition = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
+        . ([scriptblock]::Create($definition.Extent.Text))
+    }
+    BeforeEach {
+        $Root = $TestDrive
+        $ApiScript = Join-Path $TestDrive 'api.ps1'
+        Set-Content -LiteralPath $ApiScript -Value '# fixture'
+        $ApiPrefix = 'http://127.0.0.1:8787/'
+        $ApiOutLog = Join-Path $TestDrive 'api.out'
+        $ApiErrLog = Join-Path $TestDrive 'api.err'
+        Mock Write-UiLog {}
+        Mock Start-Process { [pscustomobject]@{ Id = 123; HasExited = $false; ExitCode = 0 } }
+        Mock Test-ApiReady { $false }
+        Mock Test-ApiReady { $false } -ParameterFilter { $TimeoutMilliseconds -eq 100 }
+        Mock Start-Sleep { [Threading.Thread]::Sleep($Milliseconds) }
+    }
+
+    It 'reuses an existing API without spawning or sleeping' {
+        Mock Test-ApiReady { $true }
+        Mock Start-Sleep { throw 'Must not sleep' }
+        Start-MusicServerApi
+        Assert-MockCalled Start-Process -Times 0 -Exactly -Scope It
+    }
+
+    It 'detects an exited child before sleeping or polling it' {
+        Mock Start-Process { [pscustomobject]@{ Id = 123; HasExited = $true; ExitCode = 7 } }
+        Mock Start-Sleep { throw 'Must not sleep' }
+        { Start-MusicServerApi } | Should Throw 'ExitCode=7'
+        Assert-MockCalled Test-ApiReady -Times 1 -Exactly -Scope It
+        Assert-MockCalled Start-Sleep -Times 0 -Exactly -Scope It
+    }
+
+    It 'probes the owned child immediately with a short timeout' {
+        Mock Test-ApiReady { $true } -ParameterFilter { $TimeoutMilliseconds -eq 100 }
+        Mock Start-Sleep { throw 'Must not sleep' }
+        Start-MusicServerApi
+        Assert-MockCalled Test-ApiReady -Times 1 -Exactly -Scope It -ParameterFilter { $TimeoutMilliseconds -eq 100 }
+        Assert-MockCalled Start-Sleep -Times 0 -Exactly -Scope It
+    }
+
+    It 'stops waiting when the total budget expires' {
+        { Start-MusicServerApi -StartupTimeoutSeconds 1 } | Should Throw 'did not become healthy'
+        Assert-MockCalled Start-Process -Times 1 -Exactly -Scope It
+    }
+}
+
 Describe 'Installed APP shutdown outcome' {
     It 'accepts a taskkill tree error only when the APP has exited' {
         Mock Start-Process { [pscustomobject]@{ ExitCode = 128 } }

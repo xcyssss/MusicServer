@@ -65,10 +65,11 @@ function Write-UiLog {
 }
 
 function Test-ApiReady {
+    param([ValidateRange(1, 400)][int]$TimeoutMilliseconds = 400)
     try {
         $client = New-Object System.Net.Sockets.TcpClient
         try {
-            $ok = $client.ConnectAsync('127.0.0.1', ([Uri]$ApiPrefix).Port).Wait(400)
+            $ok = $client.ConnectAsync('127.0.0.1', ([Uri]$ApiPrefix).Port).Wait($TimeoutMilliseconds)
             return $ok
         } finally {
             $client.Dispose()
@@ -98,6 +99,7 @@ function Test-UiReady {
 }
 
 function Start-MusicServerApi {
+    param([ValidateRange(1, 27)][int]$StartupTimeoutSeconds = 27)
     if (Test-ApiReady) {
         Write-UiLog "API already running at $ApiPrefix"
         return
@@ -113,14 +115,23 @@ function Start-MusicServerApi {
     $script:ApiProcess = Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -WorkingDirectory $Root -WindowStyle Hidden -PassThru -RedirectStandardOutput $ApiOutLog -RedirectStandardError $ApiErrLog
     $script:StartedApi = $true
 
-    for ($i = 0; $i -lt 30; $i++) {
-        Start-Sleep -Milliseconds 500
-        if (Test-ApiReady) {
+    # The preflight above retains its conservative ownership probe. Once this
+    # launcher owns the child, poll promptly under a total monotonic deadline.
+    # Previously 30 * (500 ms sleep + 400 ms connect) could consume 27 seconds.
+    $readyClock = [Diagnostics.Stopwatch]::StartNew()
+    $budgetMs = $StartupTimeoutSeconds * 1000
+    while ($readyClock.Elapsed.TotalMilliseconds -lt $budgetMs) {
+        if ($script:ApiProcess.HasExited) {
+            throw "music_api.ps1 exited before /health became ready. ExitCode=$($script:ApiProcess.ExitCode). See $ApiErrLog"
+        }
+        $remaining = [Math]::Max(1, [int]($budgetMs - $readyClock.Elapsed.TotalMilliseconds))
+        if (Test-ApiReady -TimeoutMilliseconds ([Math]::Min(100, $remaining))) {
             Write-UiLog "API started at $ApiPrefix pid=$($script:ApiProcess.Id)"
             return
         }
-        if ($script:ApiProcess.HasExited) {
-            throw "music_api.ps1 exited before /health became ready. ExitCode=$($script:ApiProcess.ExitCode). See $ApiErrLog"
+        $remaining = [int]($budgetMs - $readyClock.Elapsed.TotalMilliseconds)
+        if ($remaining -gt 0) {
+            Start-Sleep -Milliseconds ([Math]::Min(100, $remaining))
         }
     }
 
