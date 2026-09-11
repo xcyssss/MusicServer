@@ -363,9 +363,7 @@ function Invoke-NavidromeSqliteJson {
         }
         $text = (@($output) -join [Environment]::NewLine)
         if ([string]::IsNullOrWhiteSpace($text)) { return @() }
-        $parsed = ConvertFrom-Json -InputObject $text
-        if ($null -eq $parsed) { return @() }
-        return @($parsed)
+        return @(ConvertFrom-MusicServerJsonArray -Json $text)
     } catch {
         Write-UiLog "Navidrome sqlite query exception: $($_.Exception.Message)"
         return @()

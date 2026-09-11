@@ -173,4 +173,78 @@ next;line'); -- comment; INSERT INTO missing_table VALUES (1);
         (Get-SchemaVersion) | Should Be 17
         [int](@(Invoke-MusicServerSqlJson -Query 'PRAGMA busy_timeout;')[0].timeout) | Should Be 5000
     }
+
+    It 'returns one row as a flat row, never a wrapper array wrapping that row' {
+        # PS 5.1's ConvertFrom-Json returned a one-item JSON array nested inside
+        # another array. Scalar member access hid it, but property lookups did not:
+        # @(rows)[0].title answered correctly while @(rows)[0] was really the list.
+        Invoke-MusicServerSqlNonQuery -Query 'CREATE TABLE probe (title TEXT NOT NULL); INSERT INTO probe (title) VALUES (''only row'');'
+        $rows = @(Invoke-MusicServerSqlJson -Query 'SELECT title FROM probe;')
+        $rows.Count | Should Be 1
+        $rows[0].GetType().Name | Should Be 'PSCustomObject'
+        [string]$rows[0].title | Should Be 'only row'
+    }
+}
+
+Describe 'MusicServer JSON array parsing' {
+    It 'flattens a JSON array at every length' {
+        @(ConvertFrom-MusicServerJsonArray -Json '[]').Count | Should Be 0
+        @(ConvertFrom-MusicServerJsonArray -Json '[{"a":1}]').Count | Should Be 1
+        @(ConvertFrom-MusicServerJsonArray -Json '[{"a":1},{"a":2}]').Count | Should Be 2
+        @(ConvertFrom-MusicServerJsonArray -Json '[{"a":1},{"a":2},{"a":3}]').Count | Should Be 3
+    }
+
+    It 'exposes the items themselves rather than a nested list' {
+        # The regression that mattered: every reader of identifiers_json saw a
+        # wrapper, so Get-NeteaseIdFromTrack returned '' for every stored track.
+        $items = @(ConvertFrom-MusicServerJsonArray -Json '[{"type":"netease","value":"4242"}]')
+        $items[0].GetType().Name | Should Be 'PSCustomObject'
+        [string]$items[0].type | Should Be 'netease'
+        [string]$items[0].value | Should Be '4242'
+    }
+
+    It 'returns nothing for absent, empty, malformed or non-array input' {
+        @(ConvertFrom-MusicServerJsonArray -Json $null).Count | Should Be 0
+        @(ConvertFrom-MusicServerJsonArray -Json '').Count | Should Be 0
+        @(ConvertFrom-MusicServerJsonArray -Json '   ').Count | Should Be 0
+        @(ConvertFrom-MusicServerJsonArray -Json '[]').Count | Should Be 0
+        @(ConvertFrom-MusicServerJsonArray -Json 'not json at all').Count | Should Be 0
+        # A bare object is not a list of items and must not become a one-item list.
+        @(ConvertFrom-MusicServerJsonArray -Json '{}').Count | Should Be 0
+        @(ConvertFrom-MusicServerJsonArray -Json '{"a":1}').Count | Should Be 0
+    }
+
+    It 'drops JSON null holes rather than reporting them as items' {
+        # New-CanonicalTrack once turned a missing -Identifiers into @($null), which
+        # reached disk as [null]. A null is not an item.
+        @(ConvertFrom-MusicServerJsonArray -Json '[null]').Count | Should Be 0
+        @(ConvertFrom-MusicServerJsonArray -Json '[null,null]').Count | Should Be 0
+        $mixed = @(ConvertFrom-MusicServerJsonArray -Json '[null,{"type":"netease","value":"7"}]')
+        $mixed.Count | Should Be 1
+        [string]$mixed[0].value | Should Be '7'
+    }
+
+    It 'unwraps the legacy ConvertTo-Json collection wrapper shape' {
+        # ConvertTo-Json renders an ArrayList as {value:[...],Count:n} rather than an
+        # array, so rows written that way must still yield their real items.
+        $items = @(ConvertFrom-MusicServerJsonArray -Json '[{"value":[{"type":"netease","value":"777"}],"Count":1}]')
+        $items.Count | Should Be 1
+        [string]$items[0].type | Should Be 'netease'
+        [string]$items[0].value | Should Be '777'
+    }
+
+    It 'writes an array that its own reader round-trips, with no null holes' {
+        (ConvertTo-MusicServerJsonArrayText -Items @()) | Should Be '[]'
+        (ConvertTo-MusicServerJsonArrayText -Items $null) | Should Be '[]'
+        (ConvertTo-MusicServerJsonArrayText -Items @($null)) | Should Be '[]'
+        foreach ($case in @(
+            , @([pscustomobject]@{ type = 'netease'; value = '1' })
+            , @([pscustomobject]@{ type = 'netease'; value = '1' }, [pscustomobject]@{ type = 'netease'; value = '2' })
+            , @([pscustomobject]@{ type = 'netease'; value = '1' }, [pscustomobject]@{ type = 'netease'; value = '2' }, [pscustomobject]@{ type = 'netease'; value = '3' })
+        )) {
+            $text = ConvertTo-MusicServerJsonArrayText -Items $case
+            $text.StartsWith('[') | Should Be $true
+            @(ConvertFrom-MusicServerJsonArray -Json $text).Count | Should Be $case.Count
+        }
+    }
 }
