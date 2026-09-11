@@ -1,4 +1,4 @@
-﻿$ProjectRoot = Split-Path -Parent $PSScriptRoot
+$ProjectRoot = Split-Path -Parent $PSScriptRoot
 
 function Get-TestSqliteExecutable {
     if ($env:MUSICSERVER_SQLITE) {
@@ -246,5 +246,45 @@ Describe 'MusicServer JSON array parsing' {
             $text.StartsWith('[') | Should Be $true
             @(ConvertFrom-MusicServerJsonArray -Json $text).Count | Should Be $case.Count
         }
+    }
+
+    It 'treats a hashtable as one JSON object instead of enumerating it' {
+        # A Hashtable is IEnumerable, but PowerShell enumerating it hands back THE
+        # HASHTABLE ITSELF (each DictionaryEntry comes back as a hashtable again), so
+        # a flattener that treats every IEnumerable as a list re-enqueues the same
+        # hashtable forever. That is an infinite loop with no output and no error:
+        # every caller of Save-CanonicalTrackDb hung, and -PreviewSources /
+        # -Identifiers are routinely passed exactly this way. Reaching the
+        # assertions below at all is half the test; the observed JSON is the rest.
+        # Key order in ConvertTo-Json output is not guaranteed, so assert on values.
+        $text = ConvertTo-MusicServerJsonArrayText -Items @(@{ provider = 'music_api'; preview_url = 'https://example.invalid/p.mp3' })
+        $text.StartsWith('[') | Should Be $true
+        $back = @(ConvertFrom-MusicServerJsonArray -Json $text)
+        $back.Count | Should Be 1
+        [string]$back[0].provider | Should Be 'music_api'
+        [string]$back[0].preview_url | Should Be 'https://example.invalid/p.mp3'
+
+        # A bare hashtable is also a single item, not a list of its keys.
+        $bare = @(ConvertFrom-MusicServerJsonArray -Json (ConvertTo-MusicServerJsonArrayText -Items @{ provider = 'music_api' }))
+        $bare.Count | Should Be 1
+        [string]$bare[0].provider | Should Be 'music_api'
+
+        # An item carrying its own `value`/`Count` fields is still an item: the legacy
+        # wrapper is identified by `value` being a LIST, so a scalar value cannot be
+        # mistaken for one.
+        $scalar = @(ConvertFrom-MusicServerJsonArray -Json (ConvertTo-MusicServerJsonArrayText -Items @(@{ value = 'x'; Count = 1 })))
+        $scalar.Count | Should Be 1
+        [string]$scalar[0].value | Should Be 'x'
+    }
+
+    It 'keeps hashtable and object items side by side in one array' {
+        $text = ConvertTo-MusicServerJsonArrayText -Items @(
+            @{ type = 'netease'; value = '4242' },
+            [pscustomobject]@{ type = 'bilibili'; value = 'BV1xx' }
+        )
+        $back = @(ConvertFrom-MusicServerJsonArray -Json $text)
+        $back.Count | Should Be 2
+        [string]$back[0].value | Should Be '4242'
+        [string]$back[1].value | Should Be 'BV1xx'
     }
 }

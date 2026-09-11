@@ -1,4 +1,4 @@
-﻿Set-StrictMode -Version 3.0
+Set-StrictMode -Version 3.0
 
 # MusicServer.Database.psm1 - SQLite data access layer
 # Provides safe typed SQL-template expansion, transactions, and connection management.
@@ -200,6 +200,32 @@ function ConvertFrom-MusicServerSqliteJson {
     return ConvertFrom-Json -InputObject $Json
 }
 
+function Test-MusicServerJsonCollection {
+    <#
+    .SYNOPSIS
+      True when a value is a list of JSON items rather than a single item.
+
+      A Hashtable is the trap this exists to avoid. It is IEnumerable, but
+      PowerShell does not hand back its entries: enumerating a Hashtable (including
+      each DictionaryEntry, which PowerShell hands back as a Hashtable again) yields
+      THE HASHTABLE ITSELF. A flattener that treats any IEnumerable as a list
+      therefore re-enqueues the same hashtable forever -- an infinite loop with no
+      output and no error, measured as a hang in every caller of
+      Save-CanonicalTrackDb.
+
+      `-Identifiers` and `-PreviewSources` are routinely passed as
+      `@(@{ provider = ...; preview_url = ... })`, so a dictionary must stay ONE
+      item and be serialized as a JSON object. A PSCustomObject is not IEnumerable
+      and needs no special case.
+    #>
+    param([AllowNull()]$Item)
+
+    if ($null -eq $Item) { return $false }
+    if ($Item -is [string]) { return $false }
+    if ($Item -is [System.Collections.IDictionary]) { return $false }
+    return ($Item -is [System.Collections.IEnumerable])
+}
+
 function Get-MusicServerFlatJsonItems {
     <#
     .SYNOPSIS
@@ -221,15 +247,18 @@ function Get-MusicServerFlatJsonItems {
     while ($pending.Count -gt 0) {
         $item = $pending.Dequeue()
         if ($null -eq $item) { continue }
-        if (($item -is [System.Collections.IEnumerable]) -and -not ($item -is [string])) {
+        if (Test-MusicServerJsonCollection -Item $item) {
             foreach ($inner in $item) { $pending.Enqueue($inner) }
             continue
         }
         # A collection wrapper carries the real items in `.value`; unwrap it, but only
-        # when the object is not a legitimate item (those carry their own fields).
-        if (-not $item.PSObject.Properties['type']) {
+        # when the object is not a legitimate item. Real items carry their own fields
+        # (`type`/`value`), so the wrapper is identified by BOTH `value` (a list) and
+        # `Count` -- the exact shape ConvertTo-Json gives an ArrayList/List.
+        if (-not ($item -is [System.Collections.IDictionary]) -and -not $item.PSObject.Properties['type']) {
             $valueProperty = $item.PSObject.Properties['value']
-            if ($valueProperty -and ($valueProperty.Value -is [System.Collections.IEnumerable]) -and -not ($valueProperty.Value -is [string])) {
+            $countProperty = $item.PSObject.Properties['Count']
+            if ($valueProperty -and $countProperty -and (Test-MusicServerJsonCollection -Item $valueProperty.Value)) {
                 foreach ($inner in $valueProperty.Value) { $pending.Enqueue($inner) }
                 continue
             }
