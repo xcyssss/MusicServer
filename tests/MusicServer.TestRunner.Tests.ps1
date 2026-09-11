@@ -1,9 +1,12 @@
-﻿$runner = Join-Path (Split-Path -Parent $PSScriptRoot) 'tests/run_suite.ps1'
+$runner = Join-Path (Split-Path -Parent $PSScriptRoot) 'tests/run_suite.ps1'
 
 Describe 'PowerShell 5.1 test runner contract' {
     function Invoke-RunnerFixture {
-        param([string]$Content, [switch]$Missing)
+        param([string]$Content, [switch]$Missing, [int]$TimeoutSeconds = 0)
         $fixture = Join-Path $TestDrive 'runner fixture.Tests.ps1'
+        # A nested log directory is deliberate: the runner resolves the log and its
+        # own paths through the session provider, so a caller-supplied directory
+        # that does not exist yet is the normal case.
         $log = Join-Path $TestDrive 'nested logs/result.log'
         if ($Missing) {
             $fixture = Join-Path $TestDrive 'missing.Tests.ps1'
@@ -15,7 +18,9 @@ Describe 'PowerShell 5.1 test runner contract' {
         try {
             # PS5.1 wraps native stderr as ErrorRecord; inspect the process exit code.
             $ErrorActionPreference = 'Continue'
-            $output = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $runner -SuiteFile $fixture -LogFile $log 2>&1
+            $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $runner, '-SuiteFile', $fixture, '-LogFile', $log)
+            if ($TimeoutSeconds -gt 0) { $arguments += @('-TimeoutSeconds', "$TimeoutSeconds") }
+            $output = & powershell.exe @arguments 2>&1
             $code = $LASTEXITCODE
         } finally {
             $ErrorActionPreference = $savedPreference
@@ -58,5 +63,44 @@ Describe '故意失败夹具' { Context 'failure context' { It '失败详情' { 
         $r = Invoke-RunnerFixture '# no tests'
         $r.Code | Should Be 2
         $r.Log | Should Match 'No tests discovered'
+    }
+
+    It 'kills a suite that overruns its budget and reports exit code three' {
+        # A deadlocked suite is the failure mode that used to hold a session for an
+        # hour with no verdict. Exit 3 must stay distinct from a test failure (1)
+        # and a runner error (2).
+        $r = Invoke-RunnerFixture -TimeoutSeconds 5 @'
+Describe 'hung suite' { It 'never returns' { Start-Sleep -Seconds 300 } }
+'@
+        $r.Code | Should Be 3
+        $r.Log | Should Match 'TIMEOUT: runner fixture.Tests.ps1 exceeded 5s and was killed'
+    }
+
+    It 'never reports a killed run as a pass' {
+        # A false green here is the whole reason the runner is bounded: a suite that
+        # was stopped must not leave a plausible-looking summary behind.
+        $r = Invoke-RunnerFixture -TimeoutSeconds 5 @'
+Describe 'hung suite' { It 'pretends to be fine' { Start-Sleep -Seconds 300 } }
+'@
+        $r.Code | Should Be 3
+        $r.Log | Should Not Match 'Passed: 1'
+    }
+
+    It 'leaves no child process behind after a timeout' {
+        $r = Invoke-RunnerFixture -TimeoutSeconds 5 @'
+Describe 'hung suite' { It 'never returns' { Start-Sleep -Seconds 300 } }
+'@
+        $r.Code | Should Be 3
+        # Match only THIS run's processes. Comparing every powershell.exe on the
+        # machine would race with unrelated activity; the fixture path is unique to
+        # this test and appears in the command line of both the runner and its
+        # worker. An orphan would hold the fixed API ports and make the next suite
+        # wait, manufacturing a slowdown that looks like a product bug.
+        Start-Sleep -Seconds 3
+        $leaked = @(
+            Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
+                Where-Object { $_.CommandLine -and $_.CommandLine.Contains($TestDrive) }
+        )
+        $leaked.Count | Should Be 0
     }
 }
