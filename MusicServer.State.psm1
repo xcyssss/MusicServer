@@ -760,6 +760,177 @@ function Get-RecommendationSeedCandidatesDb {
     return @($picked)
 }
 
+# ================================================================
+# Local-library recommendations
+# ================================================================
+#
+# NetEase drives discovery, which means every recommended track is one the user
+# does not own yet. This second source answers the opposite question: which of the
+# tracks already in the library does this listener most likely want to hear again?
+# It is deliberately preference-led rather than library-led -- a recommendation
+# only exists when the listener has shown interest in that artist, so a large
+# untouched library cannot turn the day into an arbitrary dump of its own files.
+
+function Get-LocalArtistAffinity {
+    <#
+    .SYNOPSIS
+      Artist -> interest weight, from listening history and explicit positives.
+
+      Explicit taste (a like, a star, an accepted download) outranks incidental
+      play counts, and repeated plays add to the weight with a cap so one looped
+      track cannot dominate the whole day.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowEmptyCollection()][object[]]$ListeningStats = @(),
+        [AllowEmptyCollection()][object[]]$PositiveTracks = @(),
+        [int]$MaxPlayWeight = 5
+    )
+
+    $affinity = @{}
+    $bump = {
+        param([string]$Artist, [int]$Weight)
+        foreach ($name in @(Split-LocalArtistNames -Artist $Artist)) {
+            $key = Normalize-MusicText $name
+            if (-not $key) { continue }
+            if ($affinity.ContainsKey($key)) { $affinity[$key] = $affinity[$key] + $Weight } else { $affinity[$key] = $Weight }
+        }
+    }
+
+    # Explicit positives are the strongest signal the product records.
+    foreach ($track in @($PositiveTracks)) {
+        $artist = [string](Get-OptionalProperty $track 'Artist' (Get-OptionalProperty $track 'artist'))
+        if ($artist) { & $bump $artist 6 }
+    }
+
+    foreach ($row in @($ListeningStats)) {
+        $plays = [int](Get-OptionalProperty $row 'play_count' 0)
+        if ($plays -le 0) { continue }
+        $artist = [string](Get-OptionalProperty $row 'artist' (Get-OptionalProperty $row 'Artist'))
+        if (-not $artist) { continue }
+        $weight = [Math]::Min($plays, [Math]::Max(1, $MaxPlayWeight)) * 2
+        & $bump $artist $weight
+    }
+
+    return $affinity
+}
+
+function Split-LocalArtistNames {
+    <#
+    .SYNOPSIS
+      Individual artist names from a credit string.
+    #>
+    param([AllowEmptyString()][string]$Artist)
+    if ([string]::IsNullOrWhiteSpace($Artist)) { return @() }
+    return @($Artist -split '[,，、/&;；]|\s+feat\.?\s+|\s+ft\.?\s+|\s+×\s+' |
+        ForEach-Object { $_.Trim() } |
+        Where-Object { $_.Length -ge 2 })
+}
+
+function Select-LocalRecommendationTracks {
+    <#
+    .SYNOPSIS
+      Owned tracks to surface today, ranked by how much the listener likes the artist.
+
+      Ordering is least-recently-played first inside each affinity tier: a track the
+      listener has never touched beats one they played last week, and both beat the
+      one still ringing in their ears. Everything already recommended, accepted or
+      cooled down is excluded by the caller's key set, so the caller keeps a single
+      definition of what must not repeat.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowEmptyCollection()][object[]]$Candidates = @(),
+        [Parameter(Mandatory)][hashtable]$Affinity = @{},
+        [AllowEmptyCollection()][string[]]$ExcludedKeys = @(),
+        [int]$Limit = 6,
+        [double]$RecentlyPlayedDays = 14
+    )
+
+    if ($Limit -le 0) { return @() }
+    # Keys must be normalized on BOTH sides. Comparing a normalized lookup against
+    # raw keys silently failed for anything normalization rewrites -- a track id or
+    # library id containing a hyphen or separator was never excluded.
+    $excluded = @{}
+    $excludedArtists = @{}
+    foreach ($key in @($ExcludedKeys)) {
+        $text = [string]$key
+        if (-not $text) { continue }
+        if ($text.StartsWith('artist:')) {
+            $name = Normalize-MusicText $text.Substring('artist:'.Length)
+            if ($name) { $excludedArtists[$name] = $true }
+            continue
+        }
+        $normalized = Normalize-MusicText $text
+        if ($normalized) { $excluded[$normalized] = $true }
+    }
+
+    $cutoff = [DateTime]::UtcNow.AddDays(-1 * [Math]::Abs($RecentlyPlayedDays))
+    $scored = New-Object System.Collections.ArrayList
+    foreach ($candidate in @($Candidates)) {
+        $artist = [string](Get-OptionalProperty $candidate 'Artist' (Get-OptionalProperty $candidate 'artist'))
+        $artistKey = ''
+        $best = 0
+        foreach ($name in @(Split-LocalArtistNames -Artist $artist)) {
+            $key = Normalize-MusicText $name
+            if ($key -and $Affinity.ContainsKey($key) -and [int]$Affinity[$key] -gt $best) {
+                $best = [int]$Affinity[$key]
+                $artistKey = $name
+            }
+        }
+        # No demonstrated interest in this artist: the library alone is not a taste
+        # signal, so the track is not recommended.
+        if ($best -le 0) { continue }
+
+        $file = [string](Get-OptionalProperty $candidate 'File' (Get-OptionalProperty $candidate 'file'))
+        $title = [string](Get-OptionalProperty $candidate 'Title' (Get-OptionalProperty $candidate 'title'))
+        $trackId = [string](Get-OptionalProperty $candidate 'TrackId' (Get-OptionalProperty $candidate 'track_id'))
+        $libraryId = [string](Get-OptionalProperty $candidate 'LibraryId' (Get-OptionalProperty $candidate 'library_id'))
+        # A track with no library id cannot be streamed: playback resolves through
+        # the index, so a file that is on disk but absent from it would be
+        # recommended as something the user cannot actually play.
+        if (-not $libraryId) { continue }
+        $blocked = $false
+        foreach ($key in @($title, $artist, $libraryId, $trackId)) {
+            if (-not $key) { continue }
+            if ($excluded.ContainsKey((Normalize-MusicText $key))) { $blocked = $true; break }
+        }
+        if ($blocked) { continue }
+        if ($artistKey -and $excludedArtists.ContainsKey((Normalize-MusicText $artistKey))) { continue }
+
+        $lastPlayed = Get-OptionalProperty $candidate 'LastPlayedAt' (Get-OptionalProperty $candidate 'last_played_at')
+        $playedAt = Convert-ToUtcDateTime $lastPlayed
+        if ($playedAt -and $playedAt -gt $cutoff) { continue }
+
+
+        [void]$scored.Add([pscustomobject]@{
+            Title = $title; Artist = $artist; File = $file; LibraryId = $libraryId
+            TrackId = $trackId; AffinityArtist = $artistKey; Weight = $best
+            LastPlayedAt = $lastPlayed
+        })
+    }
+
+    # Deterministic: affinity, then never-played before old, then title.
+    $ordered = @($scored | Sort-Object `
+        @{ Expression = { [int]$_.Weight }; Descending = $true }, `
+        @{ Expression = { if ($_.LastPlayedAt) { 1 } else { 0 } }; Descending = $false }, `
+        @{ Expression = { [string]$_.LastPlayedAt }; Descending = $false }, `
+        @{ Expression = { [string]$_.Title }; Descending = $false })
+
+    # One track per artist per day keeps the list varied instead of returning five
+    # songs by whichever artist the listener happens to loop most.
+    $picked = New-Object System.Collections.ArrayList
+    $usedArtists = @{}
+    foreach ($row in $ordered) {
+        $key = Normalize-MusicText ([string]$row.AffinityArtist)
+        if ($key -and $usedArtists.ContainsKey($key)) { continue }
+        if ($key) { $usedArtists[$key] = $true }
+        [void]$picked.Add($row)
+        if ($picked.Count -ge $Limit) { break }
+    }
+    return @($picked)
+}
+
 function Get-RecommendationCooldownTrackIdsDb {
     param(
         [string]$AsOfDate = (Get-TodayDate),

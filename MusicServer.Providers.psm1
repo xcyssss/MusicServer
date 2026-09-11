@@ -706,6 +706,55 @@ function Get-TitleSearchKeywords {
     return @($keywords | Select-Object -First 3)
 }
 
+function Get-SongSearchQueries {
+    <#
+    .SYNOPSIS
+      Ordered NetEase search queries for one library track.
+
+      A seeded track stores whatever the uploader titled it, so searching the raw
+      string wastes the lookup: the query has to be the song name, and the artist
+      belongs beside it. Each cleaned song name is tried with the artist first
+      ("空山新雨后 音阙诗听") and alone second, because an artist name can itself be
+      misspelled in the uploader's title while the song name is exact. The plain
+      artist-less form stays last so a track with no resolved artist still works.
+    #>
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Title,
+        [AllowEmptyString()][string]$Artist = '',
+        [int]$Max = 4
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Title)) { return @() }
+    if ($Max -le 0) { return @() }
+
+    $queries = New-Object System.Collections.ArrayList
+    $add = {
+        param([string]$Value)
+        $value = [regex]::Replace([string]$Value, '\s+', ' ').Trim()
+        if ($value.Length -ge 2 -and $value.Length -le 80 -and -not $queries.Contains($value)) { [void]$queries.Add($value) }
+    }
+
+    # Only the first credited artist is a useful hint; a long featured-artist list
+    # makes the query too specific to match.
+    $leadArtist = ''
+    if (-not [string]::IsNullOrWhiteSpace($Artist)) {
+        $leadArtist = ([string](@($Artist -split '[,，、/&;；]|\s+feat\.?\s+|\s+ft\.?\s+' | Where-Object { $_.Trim() })[0])).Trim()
+    }
+    $keywords = @(Get-TitleSearchKeywords -Title $Title)
+    $artistKey = ConvertTo-MusicServerKey -Value $leadArtist
+    foreach ($keyword in $keywords) {
+        $keywordKey = ConvertTo-MusicServerKey -Value $keyword
+        # Skip a keyword that is only the artist again ("陈奕迅" + "陈奕迅"), and skip
+        # re-appending an artist the keyword already names: that produces
+        # "Roselia Always recall. Roselia", which is more specific than any real
+        # NetEase title and therefore matches nothing.
+        $namesArtist = $artistKey -and ($keywordKey -eq $artistKey -or $keywordKey.Contains($artistKey))
+        if ($leadArtist -and -not $namesArtist) { & $add "$keyword $leadArtist" }
+        & $add $keyword
+    }
+    return @($queries | Select-Object -First $Max)
+}
+
 function Test-FileVouchesForArtist {
     <#
     .SYNOPSIS

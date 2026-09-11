@@ -101,8 +101,13 @@ function Get-TrackPlaybackSource {
         $preview = @(Get-OptionalProperty $Track 'preview_sources' @()) | Where-Object { [string](Get-OptionalProperty $_ 'media_url') } | Select-Object -First 1
         $previewSource = if ($recommendationPreview) { $recommendationPreview } else { $preview }
         if ($previewSource) {
+            # The provider must come from the source record, not be assumed: a
+            # NetEase preview URL reported as bilibili would mislead any caller
+            # that branches on the provider.
+            $previewProvider = [string](Get-OptionalProperty $previewSource 'provider' '')
+            if (-not $previewProvider) { $previewProvider = 'preview' }
             return [pscustomobject]@{
-                provider = 'bilibili'
+                provider = $previewProvider
                 url      = [string](Get-OptionalProperty $previewSource 'media_url')
                 title    = [string](Get-OptionalProperty $Track 'title')
                 artist   = [string](Get-OptionalProperty $Track 'artist')

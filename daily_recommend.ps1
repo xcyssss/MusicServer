@@ -15,6 +15,8 @@
     显式执行一次 legacy JSON/CSV 到 SQLite 的迁移；默认不自动激活生产迁移。
 .PARAMETER SeedCount
     使用的种子数量，默认 25。
+.PARAMETER LocalCount
+    从本地库重听推荐的曲目数量上限，默认 6；设为 0 可关闭本地来源。
 .PARAMETER Root
     项目根目录；默认当前脚本所在目录，主要用于测试和迁移。
 .PARAMETER AppHome
@@ -26,6 +28,7 @@ param(
     [int]$Count = 20,
     [switch]$DryRun,
     [int]$SeedCount = 25,
+    [int]$LocalCount = 6,
     [string]$Root = $PSScriptRoot,
     [string]$AppHome = '',
     [int]$RandomSeed = -1,
@@ -39,6 +42,7 @@ $ProgressPreference = 'SilentlyContinue'
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Core.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Database.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.State.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Providers.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Migration.psm1') -Force
 
 $Config = New-MusicServerConfig -Root $Root -AppHome $AppHome
@@ -116,12 +120,36 @@ function Get-SeedPool {
     return @(Get-RecommendationSeedCandidatesDb -SeedCount $SeedCount -NavidromeStars $starred -LibraryFallback $LibraryFallback -RandomSeed $RandomSeed)
 }
 
-# A fresh install has no likes, no Navidrome stars and no legacy import, so the
-# preference-only pool is empty and the day silently saved zero recommendations.
-# Fall back to the local library, which is what the weak LIBRARY_FALLBACK seed
-# source has always meant.
-function Get-LibrarySeedRows {
-    $rows = @()
+# The local library, as structured rows rather than bare titles. Every downstream
+# use needs more than the title: seeding wants the resolved singer beside the song
+# name, and the local recommendation source needs the file and its library id to
+# play the track it recommends.
+#
+# This deliberately does NOT filter on Navidrome's `missing` column. That column is
+# only refreshed by a Navidrome scan and the packaged runtime never runs Navidrome,
+# so every row stays flagged missing and the filter silently returned nothing,
+# degrading every seed to a bare ".mp3" basename with no artist at all. File
+# existence is the fact that matters.
+function Get-LocalLibraryRows {
+    $rows = New-Object System.Collections.ArrayList
+    $seen = @{}
+    $resolvedArtists = @{}
+    try { $resolvedArtists = Get-LocalTrackArtistMapDb } catch { $resolvedArtists = @{} }
+
+    $add = {
+        param([string]$Title, [string]$Artist, [string]$File, [string]$LibraryId, [bool]$ArtistIsResolved)
+        if ([string]::IsNullOrWhiteSpace($Title)) { return }
+        $key = if ($File) { [string](Get-MusicServerPathKey -Path $File) } else { '' }
+        if ($key) {
+            if ($seen.ContainsKey($key)) { return }
+            $seen[$key] = $true
+        }
+        [void]$rows.Add([pscustomobject]@{
+            Title = $Title; Artist = $Artist; File = $File; LibraryId = $LibraryId
+            ArtistIsResolved = $ArtistIsResolved
+        })
+    }
+
     if (Test-Path -LiteralPath $Config.NdDb -PathType Leaf) {
         $tmp = Join-Path ([IO.Path]::GetTempPath()) "musicserver_seedlib_$([guid]::NewGuid().ToString('N')).db"
         try {
@@ -130,24 +158,67 @@ function Get-LibrarySeedRows {
                 $sidecar = "$($Config.NdDb)$ext"
                 if (Test-Path -LiteralPath $sidecar) { Copy-Item -LiteralPath $sidecar -Destination "$tmp$ext" -Force -ErrorAction SilentlyContinue }
             }
-            $query = "select mf.title || ' - ' || coalesce(mf.artist,'') from media_file mf where mf.missing = 0 and mf.title is not null and mf.title <> '' limit 500;"
-            $rows = @(& $Config.Sqlite $tmp $query 2>$null | Where-Object { $_ } | ForEach-Object { [string]$_ })
-        } catch { $rows = @() }
+            $query = "select id || char(9) || title || char(9) || coalesce(path,'') from media_file where title is not null and title <> '';"
+            foreach ($line in @(& $Config.Sqlite $tmp $query 2>$null)) {
+                $parts = [string]$line -split "`t"
+                if ($parts.Count -lt 3) { continue }
+                $file = [string]$parts[2]
+                if ($file -and -not [IO.Path]::IsPathRooted($file)) { $file = Join-Path $Config.MusicDir $file }
+                if ($file -and -not [IO.File]::Exists($file)) { continue }
+                if ($file -and (Test-Path -LiteralPath $Config.DailyDir -PathType Container)) {
+                    # DailyMix holds previously downloaded recommendations, not the
+                    # user's own collection; seeding from it would recommend the
+                    # recommender's own output back to them.
+                    $dailyFull = [IO.Path]::GetFullPath($Config.DailyDir).TrimEnd('\')
+                    if ([IO.Path]::GetFullPath($file).StartsWith($dailyFull, [StringComparison]::OrdinalIgnoreCase)) { continue }
+                }
+                $artist = ''
+                $isResolved = $false
+                if ($file) {
+                    $row = $resolvedArtists[[string](Get-MusicServerPathKey -Path $file)]
+                    if ($row -and [string]$row.artist -and [string]$row.status -eq 'RESOLVED') {
+                        $artist = [string]$row.artist
+                        $isResolved = $true
+                    }
+                }
+                & $add ([string]$parts[1]) $artist $file ('library-' + [string]$parts[0]) $isResolved
+            }
+        } catch { }
         finally { Remove-Item -LiteralPath "$tmp*" -Force -ErrorAction SilentlyContinue }
     }
-    if (@($rows).Count -eq 0) {
-        $rows = @(Get-ChildItem -LiteralPath $Config.MusicDir -Filter '*.mp3' -File -Recurse -ErrorAction SilentlyContinue | ForEach-Object { [string]$_.BaseName })
+
+    foreach ($entry in @(Get-ChildItem -LiteralPath $Config.MusicDir -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.mp3','.flac','.wav','.aac','.m4a' })) {
+        $file = [IO.Path]::GetFullPath($entry.FullName)
+        if (Test-Path -LiteralPath $Config.DailyDir -PathType Container) {
+            $dailyFull = [IO.Path]::GetFullPath($Config.DailyDir).TrimEnd('\')
+            if ($file.StartsWith($dailyFull, [StringComparison]::OrdinalIgnoreCase)) { continue }
+        }
+        $artist = ''
+        $isResolved = $false
+        $row = $resolvedArtists[[string](Get-MusicServerPathKey -Path $file)]
+        if ($row -and [string]$row.artist -and [string]$row.status -eq 'RESOLVED') {
+            $artist = [string]$row.artist
+            $isResolved = $true
+        }
+        & $add $entry.BaseName $artist $file '' $isResolved
     }
+
     return @($rows)
 }
 
-Write-Step '收集 SQLite 种子歌曲'
+Write-Step '收集本地库与种子歌曲'
+$localRows = @(Get-LocalLibraryRows)
+Write-Host "  本地库曲目：$($localRows.Count)（其中已解析歌手 $(@($localRows | Where-Object { $_.ArtistIsResolved }).Count) 首）" -ForegroundColor Yellow
+
 $picked = @(Get-SeedPool)
 if ($picked.Count -eq 0) {
-    $librarySeeds = @(Get-LibrarySeedRows)
-    if ($librarySeeds.Count -gt 0) {
-        Write-Host "  未发现偏好种子，改用本地库种子：$($librarySeeds.Count)" -ForegroundColor Yellow
-        $picked = @(Get-SeedPool -LibraryFallback $librarySeeds)
+    # A fresh install has no likes, no stars and no legacy import, so the
+    # preference-only pool is empty and the day would silently save zero
+    # recommendations. The local library is the weakest signal and is only
+    # consulted here, so it cannot dilute a pool that reflects real taste.
+    if ($localRows.Count -gt 0) {
+        Write-Host "  未发现偏好种子，改用本地库种子：$($localRows.Count)" -ForegroundColor Yellow
+        $picked = @(Get-SeedPool -LibraryFallback $localRows)
     }
 }
 Write-Host "  本次选用种子：$($picked.Count)" -ForegroundColor Yellow
@@ -177,11 +248,108 @@ foreach ($row in $cooldownRows) {
 }
 Write-Host "  排除条目：$($exclude.Count)，已接受网易云 ID：$($acceptedIds.Count)，近期冷却：$cooldownCount" -ForegroundColor Yellow
 
+# ---------------------------------------------------------------------------
+# Local re-listen recommendations
+#
+# NetEase answers "what should I discover". This answers the opposite question:
+# which of the tracks already in the library does this listener most likely want
+# to hear again. It is preference-led, not library-led -- a track is only eligible
+# when the listener has already shown interest in that artist -- so a large
+# untouched library cannot turn the day into an arbitrary dump of its own files.
+#
+# The library-wide exclude set above is deliberately NOT used here: it contains
+# every owned file's basename, which is exactly inverted for this source. Only
+# things already recommended, accepted or rejected are excluded.
+# ---------------------------------------------------------------------------
+Write-Step '生成本地库重听推荐'
+$listeningRows = @()
+try { $listeningRows = @(Get-ListeningStatsDb) } catch { $listeningRows = @() }
+
+$lastPlayedByLibrary = @{}
+foreach ($row in $listeningRows) {
+    $libId = [string]$row.library_id
+    if (-not $libId) { continue }
+    $when = [string]$row.last_played_at
+    if ($when -and (-not $lastPlayedByLibrary.ContainsKey($libId) -or $when -gt [string]$lastPlayedByLibrary[$libId])) {
+        $lastPlayedByLibrary[$libId] = $when
+    }
+}
+
+# Only tracks with a resolved singer are eligible: clustering needs an artist, and
+# the indexed value is the uploader. Guessing here would recommend by channel name.
+$localCandidates = New-Object System.Collections.ArrayList
+foreach ($row in $localRows) {
+    if (-not $row.Artist) { continue }
+    [void]$localCandidates.Add([pscustomobject]@{
+        Title = [string]$row.Title; Artist = [string]$row.Artist; File = [string]$row.File
+        LibraryId = [string]$row.LibraryId
+        LastPlayedAt = if ($row.LibraryId -and $lastPlayedByLibrary.ContainsKey([string]$row.LibraryId)) { [string]$lastPlayedByLibrary[[string]$row.LibraryId] } else { '' }
+    })
+}
+
+$localByLibrary = @{}
+foreach ($candidate in $localCandidates) {
+    if ($candidate.LibraryId) { $localByLibrary[[string]$candidate.LibraryId] = $candidate }
+}
+$affinityStats = New-Object System.Collections.ArrayList
+foreach ($row in $listeningRows) {
+    $plays = [int]$row.play_count
+    if ($plays -le 0) { continue }
+    $libId = [string]$row.library_id
+    if (-not $libId -or -not $localByLibrary.ContainsKey($libId)) { continue }
+    $artist = [string]$localByLibrary[$libId].Artist
+    if ($artist) { [void]$affinityStats.Add([pscustomobject]@{ artist = $artist; play_count = $plays }) }
+}
+$affinityPositive = New-Object System.Collections.ArrayList
+foreach ($row in @(Get-RecommendationExcludedKeysDb | Where-Object { [string]$_.FeedbackType -eq 'ACCEPTED' })) {
+    $canonical = $null
+    if ($row.TrackId) { try { $canonical = Get-CanonicalTrackDb -TrackId ([string]$row.TrackId) } catch { $canonical = $null } }
+    if ($canonical -and [string]$canonical.artist) { [void]$affinityPositive.Add([pscustomobject]@{ Artist = [string]$canonical.artist }) }
+}
+$affinity = Get-LocalArtistAffinity -ListeningStats $affinityStats -PositiveTracks $affinityPositive
+
+$localExclude = New-Object System.Collections.ArrayList
+foreach ($row in @(Get-RecommendationExcludedKeysDb)) {
+    if ($row.Title) { [void]$localExclude.Add([string]$row.Title) }
+    if ($row.TrackId) { [void]$localExclude.Add([string]$row.TrackId) }
+}
+foreach ($row in $cooldownRows) { if ($row.track_id) { [void]$localExclude.Add([string]$row.track_id) } }
+try {
+    foreach ($row in @(Get-TodayRecommendationsDb -Date $today)) {
+        if ($row.title) { [void]$localExclude.Add([string]$row.title) }
+        if ($row.track_id) { [void]$localExclude.Add([string]$row.track_id) }
+    }
+} catch { }
+
+$localBudget = [Math]::Max(0, [Math]::Min($LocalCount, $Count))
+$localPicks = @()
+if ($localBudget -gt 0 -and $affinity.Count -gt 0) {
+    $localPicks = @(Select-LocalRecommendationTracks -Candidates @($localCandidates) -Affinity $affinity -ExcludedKeys @($localExclude) -Limit $localBudget)
+}
+Write-Host "  本地重听推荐：$($localPicks.Count) 首（候选 $($localCandidates.Count) 首，歌手亲和度 $($affinity.Count) 个，预算 $localBudget）" -ForegroundColor Yellow
+
 Write-Step '从网易云生成相似歌曲 metadata'
 $candidateMap = @{}
+$seedMisses = 0
 foreach ($seed in $picked) {
-    $found = @(Search-Netease -Keyword "$($seed.Title) $($seed.Artist)" -Limit 1)
-    if ($found.Count -eq 0) { continue }
+    # Searching the raw uploader title wastes the seed: it is the song name plus
+    # channel branding plus the song name again. Each cleaned form is tried with
+    # the resolved singer first and alone second, and the search only accepts a
+    # candidate whose title matches the query, so a wrong artist cannot be picked.
+    $found = @()
+    foreach ($query in @(Get-SongSearchQueries -Title ([string]$seed.Title) -Artist ([string]$seed.Artist))) {
+        $hits = @(Search-Netease -Keyword $query -Limit 3)
+        if ($hits.Count -eq 0) { continue }
+        $wantKey = ConvertTo-MusicServerKey -Value $query
+        foreach ($hit in $hits) {
+            $gotKey = ConvertTo-MusicServerKey -Value ([string]$hit.name)
+            if ($gotKey.Length -ge 2 -and ($gotKey -eq $wantKey -or $wantKey.Contains($gotKey) -or $gotKey.Contains($wantKey))) {
+                $found = @($hit); break
+            }
+        }
+        if ($found.Count -gt 0) { break }
+    }
+    if ($found.Count -eq 0) { $seedMisses++; continue }
     $similar = @(Get-SimiSongs -SongId ([long]$found[0].id) -Limit 10)
     foreach ($song in $similar) {
         $sid = [string]$song.id
@@ -210,7 +378,7 @@ foreach ($candidate in $ranked) {
     if ($artistKey -and $artists.ContainsKey($artistKey) -and $artists[$artistKey] -ge 5) { continue }
     $recos += $candidate
     if ($artistKey) { if ($artists.ContainsKey($artistKey)) { $artists[$artistKey]++ } else { $artists[$artistKey] = 1 } }
-    if ($recos.Count -ge $Count) { break }
+    if ($recos.Count -ge ($Count - @($localPicks).Count)) { break }
 }
 
 $recommendations = @(); $tracks = @(); $rank = 0
@@ -243,6 +411,34 @@ foreach ($candidate in $recos) {
         liked = $false; created_at = Get-NowIso; updated_at = Get-NowIso
     }
 }
+
+# Append the local re-listen picks, continuing the same rank sequence so the day is
+# one list rather than two. Save-DailyRecommendationsDb keys tracks by id, so a pick
+# already produced by the online path is skipped instead of overwriting it.
+$localAdded = 0
+foreach ($pick in $localPicks) {
+    $pickTrackId = ''
+    try { $pickTrackId = Get-CanonicalTrackId -Title ([string]$pick.Title) -Artist ([string]$pick.Artist) } catch { $pickTrackId = '' }
+    if (-not $pickTrackId) { continue }
+    if (@($tracks | Where-Object { [string]$_.id -eq $pickTrackId }).Count -gt 0) { continue }
+    $rank++
+    $identifiers = @()
+    if ($pick.LibraryId) { $identifiers = @([pscustomobject]@{ type = 'local'; value = [string]$pick.LibraryId }) }
+    $tracks += New-CanonicalTrack -TrackId $pickTrackId -Title ([string]$pick.Title) -Artist ([string]$pick.Artist) -Album '' `
+        -Duration 0 -CoverUrl '' -Identifiers $identifiers -PreviewSources @() -DownloadCandidates @() `
+        -LocalSongId ([string]$pick.LibraryId) -Status 'LOCAL'
+    $recommendations += [pscustomobject]@{
+        id = "rec_${today}_${rank}_$($pickTrackId.Substring(6, 12))"
+        date = $today; track_id = $pickTrackId; netease_id = ''
+        title = [string]$pick.Title; artist = [string]$pick.Artist; album = ''
+        duration = 0; rank = $rank; reason = "重听：$($pick.AffinityArtist)"
+        seed_source = 'local_library'
+        playback_source = "local:$($pick.LibraryId)"; preview_sources = @()
+        liked = $false; created_at = Get-NowIso; updated_at = Get-NowIso
+    }
+    $localAdded++
+}
+if ($localAdded -gt 0) { Write-Host "  已加入本地重听推荐：$localAdded 首" -ForegroundColor Green }
 
 Write-Host "`n候选推荐：$($candidateMap.Count) 首，取前 $($recommendations.Count) 首" -ForegroundColor Green
 foreach ($r in $recommendations) {

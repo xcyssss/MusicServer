@@ -113,9 +113,14 @@ Describe 'MusicServer Tauri desktop shell' {
         $generator | Should Match '\$AppHome'
         $generator | Should Match 'New-MusicServerConfig -Root \$Root -AppHome \$AppHome'
         # A fresh install has no likes or stars, so the local library must be able
-        # to seed the generator.
-        $generator | Should Match 'Get-LibrarySeedRows'
+        # to seed the generator, and it must keep the resolved singer rather than
+        # the uploader.
+        $generator | Should Match 'Get-LocalLibraryRows'
         $generator | Should Match '-LibraryFallback'
+        # The local re-listen source ships with the generator.
+        $generator | Should Match 'Select-LocalRecommendationTracks'
+        $generator | Should Match 'local_library'
+        $generator | Should Match 'Get-SongSearchQueries'
 
         $identity = Get-Content -LiteralPath (Join-Path $ProjectRoot 'MusicServer.Identity.psm1') -Raw -Encoding UTF8
         $identity | Should Match 'daily_recommend\.ps1'

@@ -288,6 +288,43 @@ Describe 'MusicServer artist resolution' {
         }
     }
 
+    Context 'song search queries' {
+
+        It 'pairs the cleaned song name with the resolved singer first' {
+            $queries = @(Get-SongSearchQueries -Title '在百万豪装录音棚大声听 郁可唯《去有风的地方》【Hi-res】' -Artist '郁可唯')
+            $queries[0] | Should Be '去有风的地方 郁可唯'
+            ($queries -contains '去有风的地方') | Should Be $true
+        }
+
+        It 'does not repeat an artist the keyword already names' {
+            # "陈奕迅 陈奕迅" and "Roselia Always recall. Roselia" are more specific
+            # than any real NetEase title, so they can never match.
+            $queries = @(Get-SongSearchQueries -Title '浮夸 - 陈奕迅' -Artist '陈奕迅')
+            ($queries -contains '陈奕迅 陈奕迅') | Should Be $false
+            ($queries -contains '浮夸 陈奕迅') | Should Be $true
+
+            $roselia = @(Get-SongSearchQueries -Title '【附歌词中字】【FULL】Roselia「Always recall.」' -Artist 'Roselia')
+            ($roselia -contains 'Roselia Always recall. Roselia') | Should Be $false
+            ($roselia -contains 'Always recall. Roselia') | Should Be $true
+        }
+
+        It 'uses only the first credited artist as the hint' {
+            $queries = @(Get-SongSearchQueries -Title 'Alan Walker&Sabrina Carpenter&Farruko《On My Way》' -Artist 'Alan Walker,Sabrina Carpenter,Farruko')
+            $queries[0] | Should Be 'On My Way Alan Walker'
+        }
+
+        It 'still searches when no singer has been resolved' {
+            $queries = @(Get-SongSearchQueries -Title '《明日方舟》EP - All by My Design')
+            ($queries.Count -gt 0) | Should Be $true
+        }
+
+        It 'respects the query cap and returns nothing for an empty title' {
+            @(Get-SongSearchQueries -Title 'a b c d e f' -Artist 'X' -Max 2).Count | Should Be 2
+            @(Get-SongSearchQueries -Title '' -Artist 'X').Count | Should Be 0
+            @(Get-SongSearchQueries -Title 'Some Song' -Max 0).Count | Should Be 0
+        }
+    }
+
     Context 'resolved artist cache' {
 
         It 'round-trips a resolved artist by normalized path' {

@@ -257,6 +257,17 @@ Describe 'MusicServer Hardening v2 - Recommendation State' {
         @($seeds | Where-Object { $_.Source -eq 'library_fallback' }).Count | Should Be 0
     }
 
+    It 'seeds from structured library rows and keeps their resolved artist' {
+        # The launcher passes rows, not "title - artist" strings, so the seed keeps
+        # the singer that artist resolution worked out instead of the uploader.
+        $seed = @(Get-RecommendationSeedCandidatesDb -SeedCount 25 -LibraryFallback @(
+            [pscustomobject]@{ Title = '胡萝卜须'; Artist = '许嵩'; File = 'c:\m\a.mp3'; LibraryId = 'library-A' }
+        ) -RandomSeed 7) | Select-Object -First 1
+        $seed.Source | Should Be 'library_fallback'
+        $seed.Title | Should Be '胡萝卜须'
+        $seed.Artist | Should Be '许嵩'
+    }
+
     It 'does not parse the string False as a positive LIKE' {
         $track = New-RecommendationTestTrack -Title 'False Like'
         Save-CanonicalTrackDb -Track $track | Out-Null
@@ -624,5 +635,119 @@ Describe 'MusicServer Hardening v2 - Recommendation State' {
         ($source -match 'Get-RecommendationSeedCandidatesDb') | Should Be $true
         ($source -match 'Get-RecommendationCooldownTrackIdsDb') | Should Be $true
         ($source -match 'Save-DailyRecommendationsDb') | Should Be $true
+    }
+
+    It 'never filters the library seed query on the Navidrome missing column' {
+        # missing is only refreshed by a Navidrome scan, which the packaged runtime
+        # never runs, so every row stays flagged and the filter returned nothing --
+        # silently degrading every seed to a bare ".mp3" basename with no artist.
+        $source = Get-Content -LiteralPath (Join-Path $ProjectRoot 'daily_recommend.ps1') -Raw
+        ($source -match 'missing\s*=\s*0') | Should Be $false
+        ($source -match 'Get-LocalLibraryRows') | Should Be $true
+    }
+}
+
+Describe 'Local library recommendation source' {
+
+    $script:affinityStats = @(
+        [pscustomobject]@{ artist = '许嵩'; play_count = 9 }
+        [pscustomobject]@{ artist = '许嵩'; play_count = 3 }
+        [pscustomobject]@{ artist = 'Roselia'; play_count = 2 }
+    )
+
+    function New-LocalCandidate {
+        param([string]$Title, [string]$Artist, [string]$LibraryId = 'library-A', [string]$LastPlayedAt = '')
+        return [pscustomobject]@{
+            Title = $Title; Artist = $Artist; File = "c:\music\$Title.mp3"
+            LibraryId = $LibraryId; LastPlayedAt = $LastPlayedAt
+        }
+    }
+
+    It 'weighs explicit positives above incidental play counts' {
+        $affinity = Get-LocalArtistAffinity -ListeningStats @() -PositiveTracks @([pscustomobject]@{ Artist = '陈奕迅' })
+        $affinity[[string](Normalize-MusicText '陈奕迅')] | Should Be 6
+    }
+
+    It 'caps the weight one looped track can contribute' {
+        $many = @(1..50 | ForEach-Object { [pscustomobject]@{ artist = '许嵩'; play_count = 100 } })
+        $affinity = Get-LocalArtistAffinity -ListeningStats $many -PositiveTracks @() -MaxPlayWeight 1
+        # 50 rows x (1 x 2), not 50 x 100 x 2.
+        $affinity[[string](Normalize-MusicText '许嵩')] | Should Be 100
+    }
+
+    It 'splits a multi-artist credit into separate affinity keys' {
+        $affinity = Get-LocalArtistAffinity -ListeningStats @([pscustomobject]@{ artist = 'Alan Walker,Sabrina Carpenter'; play_count = 1 }) -PositiveTracks @()
+        $affinity.ContainsKey([string](Normalize-MusicText 'Alan Walker')) | Should Be $true
+        $affinity.ContainsKey([string](Normalize-MusicText 'Sabrina Carpenter')) | Should Be $true
+    }
+
+    It 'recommends an owned track by an artist the listener actually plays' {
+        $picks = @(Select-LocalRecommendationTracks -Candidates @(
+            (New-LocalCandidate -Title '有何不可' -Artist '许嵩')
+        ) -Affinity (Get-LocalArtistAffinity -ListeningStats $script:affinityStats -PositiveTracks @()) -Limit 5)
+        $picks.Count | Should Be 1
+        $picks[0].Title | Should Be '有何不可'
+        $picks[0].AffinityArtist | Should Be '许嵩'
+    }
+
+    It 'never recommends an artist the listener has shown no interest in' {
+        # The library itself is not a taste signal: a large untouched collection
+        # must not turn the day into a dump of its own files.
+        $picks = @(Select-LocalRecommendationTracks -Candidates @(
+            (New-LocalCandidate -Title '无关歌曲' -Artist '从未听过的歌手')
+        ) -Affinity (Get-LocalArtistAffinity -ListeningStats $script:affinityStats -PositiveTracks @()) -Limit 5)
+        $picks.Count | Should Be 0
+    }
+
+    It 'skips a track with no library id because it could not be streamed' {
+        $picks = @(Select-LocalRecommendationTracks -Candidates @(
+            (New-LocalCandidate -Title '九尾妖狐' -Artist '许嵩' -LibraryId '')
+        ) -Affinity (Get-LocalArtistAffinity -ListeningStats $script:affinityStats -PositiveTracks @()) -Limit 5)
+        $picks.Count | Should Be 0
+    }
+
+    It 'returns at most one track per artist per day' {
+        $picks = @(Select-LocalRecommendationTracks -Candidates @(
+            (New-LocalCandidate -Title 'A1' -Artist '许嵩')
+            (New-LocalCandidate -Title 'A2' -Artist '许嵩')
+            (New-LocalCandidate -Title 'A3' -Artist '许嵩')
+        ) -Affinity (Get-LocalArtistAffinity -ListeningStats $script:affinityStats -PositiveTracks @()) -Limit 5)
+        $picks.Count | Should Be 1
+    }
+
+    It 'prefers a never-played track over one played long ago' {
+        $picks = @(Select-LocalRecommendationTracks -Candidates @(
+            (New-LocalCandidate -Title '去年听过' -Artist '许嵩' -LibraryId 'l-old' -LastPlayedAt '2026-01-01T00:00:00Z')
+            (New-LocalCandidate -Title '从未听过' -Artist '许嵩' -LibraryId 'l-new')
+        ) -Affinity (Get-LocalArtistAffinity -ListeningStats $script:affinityStats -PositiveTracks @()) -Limit 5)
+        $picks.Count | Should Be 1
+        $picks[0].Title | Should Be '从未听过'
+    }
+
+    It 'leaves a recently played track alone' {
+        $picks = @(Select-LocalRecommendationTracks -Candidates @(
+            (New-LocalCandidate -Title '刚听过' -Artist '许嵩' -LibraryId 'l-hot' -LastPlayedAt (Get-NowIso))
+        ) -Affinity (Get-LocalArtistAffinity -ListeningStats $script:affinityStats -PositiveTracks @()) -Limit 5)
+        $picks.Count | Should Be 0
+    }
+
+    It 'excludes an already recommended or accepted track by any of its keys' {
+        $affinity = Get-LocalArtistAffinity -ListeningStats $script:affinityStats -PositiveTracks @()
+        @(Select-LocalRecommendationTracks -Candidates @((New-LocalCandidate -Title '有何不可' -Artist '许嵩')) -Affinity $affinity -ExcludedKeys @('有何不可') -Limit 5).Count | Should Be 0
+        @(Select-LocalRecommendationTracks -Candidates @((New-LocalCandidate -Title '有何不可' -Artist '许嵩' -LibraryId 'library-XyZ-9')) -Affinity $affinity -ExcludedKeys @('library-XyZ-9') -Limit 5).Count | Should Be 0
+        @(Select-LocalRecommendationTracks -Candidates @((New-LocalCandidate -Title '有何不可' -Artist '许嵩' -LibraryId 'library-Q')) -Affinity $affinity -ExcludedKeys @('track_9225fa1258aa953c5115ff46') -Limit 5).Count | Should Be 1
+    }
+
+    It 'excludes a whole artist when asked to' {
+        $affinity = Get-LocalArtistAffinity -ListeningStats $script:affinityStats -PositiveTracks @()
+        @(Select-LocalRecommendationTracks -Candidates @((New-LocalCandidate -Title '有何不可' -Artist '许嵩')) -Affinity $affinity -ExcludedKeys @('artist:许嵩') -Limit 5).Count | Should Be 0
+    }
+
+    It 'honours the limit and returns nothing for a zero limit' {
+        $affinity = Get-LocalArtistAffinity -ListeningStats $script:affinityStats -PositiveTracks @()
+        $many = @(1..10 | ForEach-Object { New-LocalCandidate -Title "T$_" -Artist "歌手$_" -LibraryId "library-$_" })
+        $wide = Get-LocalArtistAffinity -ListeningStats @(1..10 | ForEach-Object { [pscustomobject]@{ artist = "歌手$_"; play_count = 5 } }) -PositiveTracks @()
+        @(Select-LocalRecommendationTracks -Candidates $many -Affinity $wide -Limit 3).Count | Should Be 3
+        @(Select-LocalRecommendationTracks -Candidates $many -Affinity $wide -Limit 0).Count | Should Be 0
     }
 }

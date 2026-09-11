@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     MusicServer ApiRuntime hardening tests - real HTTP server (music_api.ps1)
     under real concurrent load, real sockets, real processes.
@@ -415,6 +415,26 @@ Describe 'R: runtime hardening of the real HTTP API (concurrent processes, real 
 
         $after = [int](@(Invoke-MusicServerSqlJson -Query $countExpr))[0].total
         $after | Should Be $before
+
+        Stop-AllApiServers
+    }
+
+    It 'R6: a preview reports the provider that actually serves it' {
+        # The URL is NetEase's, so reporting bilibili would mislead any caller that
+        # branches on the provider.
+        $track = New-CanonicalTrack -Title 'Preview Provider' -Artist '测试歌手' -Status 'REMOTE' -PreviewSources @(@{
+            provider = 'netease'; id = '1234567'
+            url = 'https://music.163.com/#/song?id=1234567'
+            media_url = 'https://music.163.com/song/media/outer/url?id=1234567.mp3'
+        })
+        Save-CanonicalTrackDb -Track $track | Out-Null
+
+        $api = Start-MusicApi -Root $script:T.Root
+        $get = Invoke-Http -BaseUrl $api.BaseUrl -Method 'GET' -Path "/api/tracks/$($track.id)"
+        $get.Status | Should Be 200
+        $get.Json.playback_source.provider | Should Be 'netease'
+        $get.Json.playback_source.type | Should Be 'preview'
+        (($get.Json.playback_source.url) -like '*music.163.com*') | Should Be $true
 
         Stop-AllApiServers
     }
