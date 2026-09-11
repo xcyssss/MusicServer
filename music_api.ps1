@@ -31,6 +31,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$startupClock = [Diagnostics.Stopwatch]::StartNew()
+$startupPhases = [ordered]@{}
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}
 try { Add-Type -AssemblyName System.Web -ErrorAction SilentlyContinue } catch {}
 
@@ -43,6 +45,7 @@ Import-Module (Join-Path $PSScriptRoot 'MusicServer.Providers.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Database.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.State.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Http.psm1') -Force
+$startupPhases['module_imports'] = $startupClock.Elapsed.TotalMilliseconds
 
 $Config = New-MusicServerConfig -Root $Root
 Initialize-MusicServerState -Config $Config -SkipLibrary
@@ -66,10 +69,14 @@ if (-not $SqliteExe -or -not (Test-Path -LiteralPath $SqliteExe)) {
 if (-not (Test-Path -LiteralPath $SqliteExe) -and -not (Get-Command $SqliteExe -ErrorAction SilentlyContinue)) {
     throw "SQLite3 executable not found: $SqliteExe"
 }
+$startupPhases['config_state'] = $startupClock.Elapsed.TotalMilliseconds
 Initialize-MusicServerDatabase -DbPath $DbPath -SqliteExe $SqliteExe
+$startupPhases['database_connect'] = $startupClock.Elapsed.TotalMilliseconds
 Initialize-MusicServerSchema
+$startupPhases['schema'] = $startupClock.Elapsed.TotalMilliseconds
 Apply-ConfiguredMusicDir -Config $Config
 Initialize-MusicServerLibrary -Config $Config | Out-Null
+$startupPhases['config_library'] = $startupClock.Elapsed.TotalMilliseconds
 Write-Host ("API v2 ready | db={0} | music_dir={1} | migration=NOT_REQUESTED" -f $DbPath, $Config.MusicDir) -ForegroundColor Green
 Write-ApiLog ("API v2 ready | db={0} | music_dir={1}" -f $DbPath, $Config.MusicDir)
 
@@ -706,12 +713,14 @@ function Resolve-RouteLikeTransaction {
 $script:requestCount = 0
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Identity.psm1') -Force
 $script:BuildMarker = Get-MusicServerBuildIdentity -Root $PSScriptRoot
+$startupPhases['build_identity'] = $startupClock.Elapsed.TotalMilliseconds
 
 $listener = [System.Net.HttpListener]::new()
 $prefix = $Prefix
 if (-not $prefix.EndsWith('/')) { $prefix += '/' }
 $listener.Prefixes.Add($prefix)
 $listener.Start()
+$startupPhases['listener_start'] = $startupClock.Elapsed.TotalMilliseconds
 Write-Host "API listening on $prefix" -ForegroundColor Cyan
 Write-ApiLog ("API listening on {0} | marker={1}" -f $prefix, $script:BuildMarker)
 
@@ -723,6 +732,7 @@ Write-ApiLog ("API listening on {0} | marker={1}" -f $prefix, $script:BuildMarke
 $script:TodayCacheItems = $null
 $script:TodayCacheAt = [DateTime]::MinValue
 $script:TodayCacheSeconds = 60
+Write-MusicServerStartupTrace -Role api -Checkpoints $startupPhases
 while ($true) {
     $script:Context = $listener.GetContext()
     $script:RequestNavidromeLibrary = $null

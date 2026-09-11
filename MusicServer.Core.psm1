@@ -610,4 +610,29 @@ function Get-MusicServerLocalIdentity {
     } finally { $sha.Dispose() }
 }
 
+function Write-MusicServerStartupTrace {
+    param(
+        [ValidateSet('ui', 'api')][string]$Role,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Checkpoints
+    )
+    if (-not $env:MUSICSERVER_STARTUP_TRACE) { return }
+    $stream = $null
+    try {
+        $events = @()
+        $previous = 0.0
+        foreach ($phase in $Checkpoints.Keys) {
+            if ($events.Count -ge 32) { break }
+            $elapsed = [double]$Checkpoints[$phase]
+            $events += [ordered]@{ phase = [string]$phase; elapsed_ms = $elapsed; duration_ms = $elapsed - $previous }
+            $previous = $elapsed
+        }
+        # Separate per-role files avoid contention with the desktop report.
+        # Never overwrite an existing report or make diagnostics block startup.
+        $report = [ordered]@{ schema = 1; role = $Role; pid = $PID; events = $events; scope = 'script entry through request-loop readiness; not rendered UI' }
+        $bytes = [Text.Encoding]::UTF8.GetBytes(($report | ConvertTo-Json -Depth 5 -Compress))
+        $stream = [IO.File]::Open(($env:MUSICSERVER_STARTUP_TRACE + '.' + $Role + '.json'), [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        $stream.Write($bytes, 0, $bytes.Length)
+    } catch {} finally { if ($stream) { $stream.Dispose() } }
+}
+
 Export-ModuleMember -Function *
