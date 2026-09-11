@@ -438,4 +438,39 @@ Describe 'R: runtime hardening of the real HTTP API (concurrent processes, real 
 
         Stop-AllApiServers
     }
+
+    It 'R7: disliking a track is preference-only and survives a server restart' {
+        $track = New-CanonicalTrack -Title 'Dislike Route' -Artist '测试歌手' -Status 'REMOTE'
+        Save-CanonicalTrackDb -Track $track | Out-Null
+        $tid = [string]$track.id
+
+        $api = Start-MusicApi -Root $script:T.Root
+        $base = $api.BaseUrl
+
+        $before = Invoke-Http -BaseUrl $base -Method 'GET' -Path "/api/tracks/$tid"
+        $before.Status | Should Be 200
+        $before.Json.disliked | Should Be $false
+
+        $post = Invoke-Http -BaseUrl $base -Method 'POST' -Path "/api/tracks/$tid/dislike"
+        $post.Status | Should Be 200
+        $post.Json.disliked | Should Be $true
+        $post.Json.accepted | Should Be $true
+
+        $after = Invoke-Http -BaseUrl $base -Method 'GET' -Path "/api/tracks/$tid"
+        $after.Json.disliked | Should Be $true
+        # Dislike is one axis with like, so the heart is off.
+        $after.Json.liked | Should Be $false
+        # Preference-only: nothing was queued for download.
+        (Get-WantedItemDb -TrackId $tid) | Should BeNullOrEmpty
+
+        $delete = Invoke-Http -BaseUrl $base -Method 'DELETE' -Path "/api/tracks/$tid/dislike"
+        $delete.Status | Should Be 200
+        $delete.Json.disliked | Should Be $false
+        (Invoke-Http -BaseUrl $base -Method 'GET' -Path "/api/tracks/$tid").Json.disliked | Should Be $false
+
+        $missing = Invoke-Http -BaseUrl $base -Method 'POST' -Path '/api/tracks/zzz_no_such_track_qq/dislike'
+        $missing.Status | Should Be 404
+
+        Stop-AllApiServers
+    }
 }

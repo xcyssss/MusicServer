@@ -630,13 +630,18 @@ function Get-TitleDeclaredArtist {
 function Resolve-DisplayArtist {
     <#
     .SYNOPSIS
-      The artist to display for one library item, given its cache row.
+      The artist (and release year) to display for one library item, given its
+      cache row.
 
       A resolved online match is final and expensive, so it is always reused. A
       value derived from the title costs nothing to recompute and is therefore
       recomputed on every read: that lets improved parsing rules heal rows an
       older build already wrote, with no migration. When the rules now refuse a
       title, the caller's indexed value stays in place rather than being blanked.
+
+      The year is only ever NetEase's album publish date. The file's own `year`
+      tag is deliberately ignored: for Bilibili downloads it holds the upload or
+      encode year, so a 1990s song uploaded in 2024 would be labelled 2024.
     #>
     param(
         [AllowEmptyString()][string]$Title = '',
@@ -652,6 +657,7 @@ function Resolve-DisplayArtist {
             return [pscustomobject]@{
                 artist = $cached
                 album = [string](Get-OptionalProperty $CachedRow 'album' '')
+                year = [int](Get-OptionalProperty $CachedRow 'release_year' 0)
                 source = $source
             }
         }
@@ -659,10 +665,10 @@ function Resolve-DisplayArtist {
     $declared = ''
     try { $declared = Get-TitleDeclaredArtist -Title $Title -KnownPrefixes $KnownPrefixes } catch { $declared = '' }
     if ($declared) {
-        return [pscustomobject]@{ artist = $declared; album = ''; source = 'title' }
+        return [pscustomobject]@{ artist = $declared; album = ''; year = 0; source = 'title' }
     }
     if ($Indexed) {
-        return [pscustomobject]@{ artist = $Indexed; album = ''; source = '' }
+        return [pscustomobject]@{ artist = $Indexed; album = ''; year = 0; source = '' }
     }
     return $null
 }
@@ -786,6 +792,29 @@ function ConvertTo-MusicServerKey {
     return ([regex]::Replace($Value.ToLowerInvariant(), '[\s\-_·、,，。.!！?？:：;；''"\u201c\u201d\u2018\u2019()（）\[\]【】《》「」『』|｜/\\~～+*&]', ''))
 }
 
+function Get-NeteasePublishYear {
+    <#
+    .SYNOPSIS
+      The release year from a NetEase album.publishTime value, or 0 when unknown.
+
+      publishTime is epoch milliseconds. Values outside a plausible range are
+      rejected rather than clamped: a wrong year is worse than no year, and 0 lets
+      the UI show nothing.
+    #>
+    param([AllowNull()]$PublishTime)
+
+    $raw = 0L
+    try { $raw = [long]$PublishTime } catch { return 0 }
+    if ($raw -le 0) { return 0 }
+    # Some fields arrive in seconds; normalize to milliseconds.
+    if ($raw -lt 100000000000L) { $raw = $raw * 1000L }
+    try {
+        $year = ([DateTimeOffset]::FromUnixTimeMilliseconds($raw)).UtcDateTime.Year
+    } catch { return 0 }
+    if ($year -lt 1900 -or $year -gt ([DateTime]::UtcNow.Year + 1)) { return 0 }
+    return [int]$year
+}
+
 function Select-NeteaseArtistForTitle {
     <#
     .SYNOPSIS
@@ -819,6 +848,10 @@ function Select-NeteaseArtistForTitle {
                 artist = $artist
                 album = [string](Get-OptionalProperty (Get-OptionalProperty $song 'album' $null) 'name' '')
                 song = [string](Get-OptionalProperty $song 'name' '')
+                # album.publishTime is epoch milliseconds. This is the real release
+                # year, unlike the file's own `year` tag, which for Bilibili
+                # downloads holds the upload/encode year.
+                publish_year = Get-NeteasePublishYear -PublishTime (Get-OptionalProperty (Get-OptionalProperty $song 'album' $null) 'publishTime' 0)
             }
             $bestDelta = $delta
         }

@@ -344,6 +344,10 @@ function Add-ResolvedArtist {
     # recognisable from the whole set; a single-item lookup gets no prefixes.
     $prefixes = @()
     try { $prefixes = @(Get-SharedTitlePrefixes -Titles @($Items | ForEach-Object { [string](Get-OptionalProperty $_ 'title' '') })) } catch { $prefixes = @() }
+    # The year is a property of the track, not of the artist decision, so every row
+    # carries one even when there is no decision at all. 0 means unknown and the UI
+    # renders nothing; it is never back-filled from the file's own `year` tag.
+    foreach ($item in @($Items)) { $item | Add-Member -NotePropertyName 'year' -NotePropertyValue 0 -Force }
     foreach ($item in @($Items)) {
         $key = Get-MusicServerPathKey -Path ([string](Get-OptionalProperty $item 'file' ''))
         $row = if ($key -and $resolved.ContainsKey($key)) { $resolved[$key] } else { $null }
@@ -351,6 +355,7 @@ function Add-ResolvedArtist {
         if (-not $decision) { continue }
         if ($decision.artist) { $item.artist = $decision.artist }
         if ($decision.album) { $item.album = $decision.album }
+        $item.year = [int]$decision.year
     }
     return @($Items)
 }
@@ -460,7 +465,7 @@ function Get-LibraryItemResponse {
                     name = [string]$row.name; artist = [string]$row.artist; album = [string]$row.album
                     duration = [int]$row.duration; track = [int]$row.track
                     addedto = [string]$row.addedto; collectionat = [string]$row.collectionat
-                    path = [string]$row.path; file = $file
+                    path = [string]$row.path; file = $file; year = 0
                     stream_url = "/api/library/$LocalId/stream"
                     lyrics_url = "/api/library/$LocalId/lyrics"
                 }
@@ -477,7 +482,7 @@ function Get-LibraryItemResponse {
             $item = [pscustomobject]@{
                 id = $LocalId; source = 'local'; provider = 'navidrome'
                 name = $name; artist = $artist; album = $artist; duration = 0; track = 0
-                addedto = ''; collectionat = ''; path = $found; file = $found
+                addedto = ''; collectionat = ''; path = $found; file = $found; year = 0
                 stream_url = "/api/library/$LocalId/stream"
                 lyrics_url = if ($lrcPath) { "/api/library/$LocalId/lyrics" } else { '' }
             }
@@ -561,6 +566,9 @@ function Remove-LibraryTrack {
 
 function Get-TodayRecommendationResponse {
     $batch = @(Get-TodayRecommendationBatchDb)
+    # One fold for the whole day rather than a query per row.
+    $preference = @{}
+    try { $preference = Get-TrackPreferenceMapDb } catch { $preference = @{} }
     return @(foreach ($entry in $batch) {
         $rec = $entry.Recommendation
         $trackId = [string]$rec.track_id
@@ -569,6 +577,7 @@ function Get-TodayRecommendationResponse {
         $liked = [bool]$rec.liked
         $feedback = $entry.Feedback
         if ($feedback) { $liked = ($feedback -eq 'LIKE') }
+        $disliked = ($preference.ContainsKey($trackId) -and [string]$preference[$trackId] -eq 'DISLIKE')
         $playback = $null
         try { $playback = Get-TrackPlaybackSource -Track $track -TrackId $trackId -Recommendation $rec } catch {}
         $isLocal = ($playback -and $playback.provider -eq 'navidrome')
@@ -582,11 +591,13 @@ function Get-TodayRecommendationResponse {
             artist   = [string]$track.artist
             album    = [string]$track.album
             duration = [int]$track.duration
+            year     = [int](Get-OptionalProperty $track 'release_year' 0)
             cover_url = [string]$track.cover_url
             track    = $track
             preview_source = @($track.preview_sources) | Where-Object { [string](Get-OptionalProperty $_ 'media_url') } | Select-Object -First 1
             playback_source = $playback
             liked    = $liked
+            disliked = $disliked
             stream_url = if ($isLocal) { $playback.url } else { '' }
             lyrics_url = if ($isLocal -and $playback.id) { "/api/library/$($playback.id)/lyrics" } else { "/api/tracks/$trackId/lyrics" }
             local_status = if ($isLocal) { 'LOCAL' } else { [string]$track.status }
@@ -610,12 +621,17 @@ function Get-TrackResponse {
     $playback = $null
     try { $playback = Get-TrackPlaybackSource -Track $track -TrackId $TrackId -Recommendation $rec } catch {}
     $isLocal = ($playback -and $playback.provider -eq 'navidrome')
+    # Disliking records an UNLIKE, so a disliked track is never reported as liked;
+    # `disliked` is the separate state the UI renders.
+    $disliked = $false
+    try { $disliked = ((Get-LatestTrackPreferenceDb -TrackId $TrackId) -eq 'DISLIKE') } catch { $disliked = $false }
     return [pscustomobject]@{
         track_id        = $TrackId
         track           = $track
         recommendation  = $rec
         wanted          = $wanted
         liked           = $liked
+        disliked        = $disliked
         playback_source = $playback
         local_status    = if ($isLocal) { 'LOCAL' } else { [string]$track.status }
     }
@@ -881,6 +897,35 @@ while ($true) {
                 wanted   = $tx.Wanted
             }
             Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 200 })
+        }
+        elseif (($method -eq 'POST' -or $method -eq 'DELETE') -and $path -match '^/api/tracks/([^/]+)/dislike$') {
+            $trackId = [System.Web.HttpUtility]::UrlDecode($Matches[1], [System.Text.Encoding]::UTF8)
+            $track = Get-CanonicalTrackDb -TrackId $trackId
+            if (-not $track) {
+                $body = @{ error = 'TRACK_NOT_FOUND'; track_id = $trackId }
+                Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 404 })
+            } else {
+                # Preference-only: no queue change, no download cancellation, no
+                # file deletion. Disliking says what to recommend, not what to keep.
+                if ($method -eq 'POST') {
+                    $neteaseId = ''
+                    foreach ($id in @(Get-OptionalProperty $track 'identifiers' @())) {
+                        if ([string](Get-OptionalProperty $id 'type') -eq 'netease') { $neteaseId = [string](Get-OptionalProperty $id 'value'); break }
+                    }
+                    $tx = Write-TrackDislikeDb -TrackId $trackId -Title ([string]$track.title) -Artist ([string]$track.artist) -NeteaseId $neteaseId -Source 'music_api'
+                } else {
+                    $tx = Write-TrackUndislikeDb -TrackId $trackId -Source 'music_api'
+                }
+                # disliked/liked are part of /api/today items, so drop the cache.
+                $script:TodayCacheItems = $null
+                $script:TodayCacheAt = [DateTime]::MinValue
+                $body = [pscustomobject]@{
+                    accepted = $true
+                    disliked = [bool]$tx.disliked
+                    track_id = $trackId
+                }
+                Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 200 })
+            }
         }
         elseif ($method -eq 'GET' -and $path -eq '/api/wanted') {
             $wantedItems = @(Get-WantedTracksDb)

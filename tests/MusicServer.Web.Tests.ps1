@@ -253,6 +253,9 @@ Describe 'MusicServer web UI safeguards' {
         Import-Module (Join-Path $projectRoot 'MusicServer.Core.psm1') -Force -WarningAction SilentlyContinue
         Import-Module (Join-Path $projectRoot 'MusicServer.Database.psm1') -Force -WarningAction SilentlyContinue
         Import-Module (Join-Path $projectRoot 'MusicServer.Identity.psm1') -Force -WarningAction SilentlyContinue
+        # Get-UiLibrary builds each row through Resolve-DisplayArtist, which lives in
+        # the providers module; without it the dotted-in function cannot run at all.
+        Import-Module (Join-Path $projectRoot 'MusicServer.Providers.psm1') -Force -WarningAction SilentlyContinue
 
         $appHome = Join-Path ([IO.Path]::GetTempPath()) ('musicserver_web_library_' + [guid]::NewGuid().ToString('N'))
         $config = New-MusicServerConfig -Root $projectRoot -AppHome $appHome
@@ -324,6 +327,13 @@ INSERT INTO media_file VALUES ('mf-gone','Gone.mp3','Gone','Uploader Album','Upl
             # A folder-per-artist layout still works.
             $orphan = $items | Where-Object { $_.title -eq 'Orphan' } | Select-Object -First 1
             $orphan.artist | Should Be 'Some Artist'
+
+            # Every row carries a year field, and an unresolved one is 0 rather
+            # than adopting the file's own `year` tag, which is the upload year.
+            foreach ($item in $items) {
+                ($item.PSObject.Properties.Name -contains 'year') | Should Be $true
+                [int]$item.year | Should Be 0
+            }
         } finally {
             Remove-Item -LiteralPath $appHome -Recurse -Force -ErrorAction SilentlyContinue
         }

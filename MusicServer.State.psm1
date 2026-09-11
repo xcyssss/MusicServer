@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS local_track_artists (
     album TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT '',
     source TEXT NOT NULL DEFAULT '',
+    release_year INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_local_track_artists_status ON local_track_artists(status);
@@ -30,14 +31,22 @@ CREATE INDEX IF NOT EXISTS idx_local_track_artists_status ON local_track_artists
 function Initialize-LocalTrackArtistSchema {
     <#
     .SYNOPSIS
-      Creates the resolved-artist cache table when it is absent.
+      Creates (and upgrades) the resolved-artist cache table.
 
       Initialize-MusicServerSchema creates the whole schema, but the launcher
       binds an existing database with Connect-MusicServerDatabase, which by design
       changes nothing. The artist backfill runs in the launcher, so it ensures its
       own table instead of depending on the API process having started first.
+
+      CREATE TABLE IF NOT EXISTS does not add columns to an existing database, so
+      a column added to the DDL above must also be added here or upgraded
+      installs would keep the old shape and silently write nothing.
     #>
     Invoke-MusicServerSqlNonQuery -Query $script:LocalTrackArtistDdl
+    $columns = @(Invoke-MusicServerSqlJson -Query 'PRAGMA table_info(local_track_artists);')
+    if (-not ($columns | Where-Object { [string]$_.name -eq 'release_year' })) {
+        Invoke-MusicServerSqlNonQuery -Query 'ALTER TABLE local_track_artists ADD COLUMN release_year INTEGER NOT NULL DEFAULT 0;'
+    }
 }
 $script:LeaseMinutes = 30
 
@@ -59,6 +68,10 @@ CREATE TABLE IF NOT EXISTS canonical_tracks (
     download_candidates_json TEXT DEFAULT '[]',
     local_song_id TEXT DEFAULT '',
     status TEXT NOT NULL DEFAULT 'REMOTE',
+    -- NetEase's album.publishTime. The local file's own `year` tag is NOT used
+    -- for this: Bilibili downloads carry the upload/encode year there, so a
+    -- 1990s song uploaded in 2024 would claim 2024. 0 means unknown.
+    release_year INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT '',
     updated_at TEXT DEFAULT '',
     revision INTEGER NOT NULL DEFAULT 0
@@ -133,6 +146,13 @@ CREATE TABLE IF NOT EXISTS wanted_queue (
     if (-not ($wantedColumns | Where-Object { [string]$_.name -eq 'lease_expires_epoch' })) {
         Invoke-MusicServerSqlNonQuery -Query 'ALTER TABLE wanted_queue ADD COLUMN lease_expires_epoch INTEGER;'
     }
+    $trackColumns = @(Invoke-MusicServerSqlJson -Query 'PRAGMA table_info(canonical_tracks);')
+    if (-not ($trackColumns | Where-Object { [string]$_.name -eq 'release_year' })) {
+        Invoke-MusicServerSqlNonQuery -Query 'ALTER TABLE canonical_tracks ADD COLUMN release_year INTEGER NOT NULL DEFAULT 0;'
+    }
+    # The launcher bootstraps this table itself, so its own upgrader is the single
+    # implementation; calling it here keeps both paths on the same shape.
+    Initialize-LocalTrackArtistSchema
     Invoke-MusicServerSqlNonQuery -Query @"
 UPDATE wanted_queue
 SET lease_expires_epoch = CAST(strftime('%s', lease_expires_at) AS INTEGER)
@@ -261,7 +281,7 @@ function Get-LocalTrackArtistMapDb {
       Cached resolved artists keyed by normalized file path.
     #>
     $map = @{}
-    foreach ($row in @(Invoke-MusicServerSqlJson -Query 'SELECT path_key, artist, album, status, source, updated_at FROM local_track_artists;')) {
+    foreach ($row in @(Invoke-MusicServerSqlJson -Query 'SELECT path_key, artist, album, status, source, release_year, updated_at FROM local_track_artists;')) {
         $key = [string]$row.path_key
         if ($key) { $map[$key] = $row }
     }
@@ -270,7 +290,7 @@ function Get-LocalTrackArtistMapDb {
 
 function Get-LocalTrackArtistDb {
     param([Parameter(Mandatory)][string]$PathKey)
-    $rows = @(Invoke-MusicServerParamSql -Template 'SELECT path_key, artist, album, status, source, updated_at FROM local_track_artists WHERE path_key = @path_key LIMIT 1;' -Params @{ path_key = $PathKey })
+    $rows = @(Invoke-MusicServerParamSql -Template 'SELECT path_key, artist, album, status, source, release_year, updated_at FROM local_track_artists WHERE path_key = @path_key LIMIT 1;' -Params @{ path_key = $PathKey })
     if ($rows.Count -eq 0) { return $null }
     return $rows[0]
 }
@@ -286,20 +306,21 @@ function Save-LocalTrackArtistDb {
         [AllowEmptyString()][string]$Artist = '',
         [AllowEmptyString()][string]$Album = '',
         [Parameter(Mandatory)][string]$Status,
-        [AllowEmptyString()][string]$Source = ''
+        [AllowEmptyString()][string]$Source = '',
+        [int]$ReleaseYear = 0
     )
     # The template expands parameters as SQL literals, so the timestamp has to be
     # evaluated here; passing the command name would store it verbatim.
     $now = Get-NowIso
     $affected = Invoke-MusicServerParamNonQuery -Template @"
-INSERT INTO local_track_artists (path_key, artist, album, status, source, updated_at)
-VALUES (@path_key, @artist, @album, @status, @source, @updated_at)
+INSERT INTO local_track_artists (path_key, artist, album, status, source, release_year, updated_at)
+VALUES (@path_key, @artist, @album, @status, @source, @release_year, @updated_at)
 ON CONFLICT(path_key) DO UPDATE SET
     artist = excluded.artist, album = excluded.album, status = excluded.status,
-    source = excluded.source, updated_at = excluded.updated_at;
+    source = excluded.source, release_year = excluded.release_year, updated_at = excluded.updated_at;
 "@ -Params @{
         path_key = $PathKey; artist = $Artist; album = $Album
-        status = $Status; source = $Source; updated_at = $now
+        status = $Status; source = $Source; release_year = $ReleaseYear; updated_at = $now
     }
     return [int]$affected
 }
@@ -334,6 +355,7 @@ function Save-CanonicalTrackDb {
             cover_url = [string](Get-OptionalProperty $Track 'cover_url'); identifiers = $identifiers
             preview = $preview; candidates = $candidates; local_song_id = [string](Get-OptionalProperty $Track 'local_song_id')
             status = [string](Get-OptionalProperty $Track 'status' 'REMOTE'); updated_at = $now; revision = $newRevision
+            release_year = [int](Get-OptionalProperty $Track 'release_year' 0)
         }
         if ($CAS) { $updateParams['expected_revision'] = $ExpectedRevision }
         $affected = Invoke-MusicServerParamNonQuery -Template @"
@@ -341,7 +363,8 @@ UPDATE canonical_tracks SET
     title = @title, artist = @artist, album = @album, duration = @duration,
     cover_url = @cover_url, identifiers_json = @identifiers, preview_sources_json = @preview,
     download_candidates_json = @candidates, local_song_id = @local_song_id,
-    status = @status, updated_at = @updated_at, revision = @revision
+    status = @status, release_year = CASE WHEN @release_year > 0 THEN @release_year ELSE release_year END,
+    updated_at = @updated_at, revision = @revision
 WHERE id = @id$revisionPredicate;
 "@ -Params $updateParams -ReturnChanges
         if ($affected -ne 1) {
@@ -357,16 +380,16 @@ WHERE id = @id$revisionPredicate;
         Invoke-MusicServerParamNonQuery -Template @"
 INSERT INTO canonical_tracks (id, title, artist, album, duration, cover_url,
     identifiers_json, preview_sources_json, download_candidates_json,
-    local_song_id, status, created_at, updated_at, revision)
-VALUES (@id, @title, @artist, @album, @duration, @cover_url,
+    local_song_id, status, release_year, created_at, updated_at, revision)VALUES (@id, @title, @artist, @album, @duration, @cover_url,
     @identifiers, @preview, @candidates,
-    @local_song_id, @status, @created_at, @updated_at, 1);
+    @local_song_id, @status, @release_year, @created_at, @updated_at, 1);
 "@ -Params @{
             id = [string]$Track.id; title = [string]$Track.title; artist = [string](Get-OptionalProperty $Track 'artist')
             album = [string](Get-OptionalProperty $Track 'album'); duration = [int](Get-OptionalProperty $Track 'duration')
             cover_url = [string](Get-OptionalProperty $Track 'cover_url'); identifiers = $identifiers
             preview = $preview; candidates = $candidates; local_song_id = [string](Get-OptionalProperty $Track 'local_song_id')
             status = [string](Get-OptionalProperty $Track 'status' 'REMOTE'); created_at = $created; updated_at = $now
+            release_year = [int](Get-OptionalProperty $Track 'release_year' 0)
         }
         return @{ Success = $true; Revision = 1 }
     }
@@ -569,6 +592,7 @@ function Convert-DbTrackRow {
         album = [string]$Row.album; duration = [int]$Row.duration; cover_url = [string]$Row.cover_url
         identifiers = $identifiers; preview_sources = $preview; download_candidates = $candidates
         local_song_id = [string]$Row.local_song_id; status = [string]$Row.status
+        release_year = [int](Get-OptionalProperty $Row 'release_year' 0)
         created_at = [string]$Row.created_at; updated_at = [string]$Row.updated_at
         revision = [int]$Row.revision
     }
@@ -961,6 +985,219 @@ function Get-RecommendationExcludedKeysDb {
     return @($result)
 }
 
+# ================================================================
+# Dislike ("讨厌")
+# ================================================================
+#
+# Disliking is a statement about what to RECOMMEND, not about what to keep, so it
+# is deliberately preference-only: unlike LIKE it never queues a download, and
+# unlike UNLIKE it never cancels or deletes anything. It records feedback plus an
+# audit event, and the generator turns it into a reduced weight. "少推荐" is a soft
+# penalty, not an exclusion -- a disliked track sinks below fresh candidates but
+# can still surface when there is nothing better, which is what the user asked for.
+
+function Write-TrackDislikeDb {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$TrackId,
+        [AllowEmptyString()][string]$Title = '',
+        [AllowEmptyString()][string]$Artist = '',
+        [AllowEmptyString()][string]$NeteaseId = '',
+        [string]$Source = 'music_api'
+    )
+
+    $value = ConvertTo-Json -InputObject ([ordered]@{
+        title = $Title; artist = $Artist; netease_id = $NeteaseId; positive = $false
+    }) -Compress
+    $now = Get-NowIso
+    $lit = @{
+        tid = ConvertTo-MusicServerSqlLiteral $TrackId
+        src = ConvertTo-MusicServerSqlLiteral $Source
+        val = ConvertTo-MusicServerSqlLiteral $value
+        now = ConvertTo-MusicServerSqlLiteral $now
+        msg = ConvertTo-MusicServerSqlLiteral "dislike; title=$Title; artist=$Artist"
+    }
+    $statements = @(
+        # Order matters. Like and dislike are one axis, so disliking also records
+        # the UNLIKE that turns the heart off; both rows share a timestamp, so the
+        # fold in Get-TrackPreferenceMapDb breaks the tie on id and DISLIKE must be
+        # written last to win. Preference-only: this does not cancel a download or
+        # touch a file the way a real UNLIKE does.
+        "INSERT INTO recommendation_feedback (track_id, feedback_type, source, value, created_at) VALUES ($($lit.tid), 'UNLIKE', $($lit.src), 'false', $($lit.now))"
+        "INSERT INTO recommendation_feedback (track_id, feedback_type, source, value, created_at) VALUES ($($lit.tid), 'DISLIKE', $($lit.src), $($lit.val), $($lit.now))"
+        "INSERT INTO events (event_type, track_id, provider, from_state, to_state, attempt, duration_ms, result, error_type, http_status, message, created_at) VALUES ('TRACK_DISLIKED', $($lit.tid), '', '', '', 0, 0.0, 'SUCCESS', '', 0, $($lit.msg), $($lit.now))"
+    )
+    $steps = Invoke-StateAtomicSql -Statements $statements
+    return [pscustomobject]@{ track_id = $TrackId; disliked = $true; steps = $steps }
+}
+
+function Write-TrackUndislikeDb {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$TrackId,
+        [string]$Source = 'music_api'
+    )
+
+    $now = Get-NowIso
+    $lit = @{
+        tid = ConvertTo-MusicServerSqlLiteral $TrackId
+        src = ConvertTo-MusicServerSqlLiteral $Source
+        now = ConvertTo-MusicServerSqlLiteral $now
+    }
+    $statements = @(
+        "INSERT INTO recommendation_feedback (track_id, feedback_type, source, value, created_at) VALUES ($($lit.tid), 'UNDISLIKE', $($lit.src), 'false', $($lit.now))"
+        "INSERT INTO events (event_type, track_id, provider, from_state, to_state, attempt, duration_ms, result, error_type, http_status, message, created_at) VALUES ('TRACK_UNDISLIKED', $($lit.tid), '', '', '', 0, 0.0, 'SUCCESS', '', 0, 'undislike', $($lit.now))"
+    )
+    $steps = Invoke-StateAtomicSql -Statements $statements
+    return [pscustomobject]@{ track_id = $TrackId; disliked = $false; steps = $steps }
+}
+
+function Get-TrackPreferenceMapDb {
+    <#
+    .SYNOPSIS
+      Effective like/dislike state per track: 'LIKE', 'DISLIKE', or absent.
+
+      Like and dislike are one axis, so the most recent action wins and the other
+      side is cleared -- a track liked last week and disliked today is disliked.
+      Folding is ordered by (created_at, id) exactly like the seed pool, because
+      legacy migration can append an older fact after a newer one.
+    #>
+    [CmdletBinding()]
+    param()
+
+    $map = @{}
+    $rows = @(Invoke-MusicServerParamSql -Template "SELECT track_id, feedback_type, created_at, id FROM recommendation_feedback WHERE feedback_type IN ('LIKE','UNLIKE','DISLIKE','UNDISLIKE') ORDER BY created_at ASC, id ASC;" -Params @{})
+    foreach ($row in $rows) {
+        $trackId = [string](Get-OptionalProperty $row 'track_id')
+        if (-not $trackId) { continue }
+        $type = ([string](Get-OptionalProperty $row 'feedback_type')).ToUpperInvariant()
+        switch ($type) {
+            'LIKE' { $map[$trackId] = 'LIKE' }
+            'DISLIKE' { $map[$trackId] = 'DISLIKE' }
+            default { [void]$map.Remove($trackId) }
+        }
+    }
+    return $map
+}
+
+function Get-LatestTrackPreferenceDb {
+    <#
+    .SYNOPSIS
+      Effective state for one track: 'LIKE', 'DISLIKE', or '' when neutral.
+
+      Targeted rather than folded over the whole table, because this runs on every
+      track response.
+    #>
+    param([Parameter(Mandatory)][string]$TrackId)
+    $rows = @(Invoke-MusicServerParamSql -Template "SELECT feedback_type FROM recommendation_feedback WHERE track_id = @tid AND feedback_type IN ('LIKE','UNLIKE','DISLIKE','UNDISLIKE') ORDER BY created_at DESC, id DESC LIMIT 1;" -Params @{ tid = $TrackId })
+    if ($rows.Count -eq 0) { return '' }
+    $type = ([string](Get-OptionalProperty $rows[0] 'feedback_type')).ToUpperInvariant()
+    if ($type -eq 'LIKE') { return 'LIKE' }
+    if ($type -eq 'DISLIKE') { return 'DISLIKE' }
+    return ''
+}
+
+function Get-DislikedTrackKeysDb {
+    <#
+    .SYNOPSIS
+      Every currently disliked track, with the keys a candidate can be matched on.
+
+      The identifying fields are read back from the feedback value written at
+      dislike time and backfilled from the canonical track, so a candidate can be
+      recognised by NetEase id, canonical track id, or normalized title+artist
+      even when the same song arrives from a different seed.
+    #>
+    [CmdletBinding()]
+    param()
+
+    $preference = Get-TrackPreferenceMapDb
+    $values = @{}
+    foreach ($row in @(Invoke-MusicServerParamSql -Template "SELECT track_id, value, created_at, id FROM recommendation_feedback WHERE feedback_type = 'DISLIKE' ORDER BY created_at ASC, id ASC;" -Params @{})) {
+        $trackId = [string](Get-OptionalProperty $row 'track_id')
+        if ($trackId) { $values[$trackId] = [string](Get-OptionalProperty $row 'value') }
+    }
+
+    $result = @()
+    foreach ($trackId in @($preference.Keys)) {
+        if ([string]$preference[$trackId] -ne 'DISLIKE') { continue }
+        $title = ''; $artist = ''; $neteaseId = ''
+        if ($values.ContainsKey($trackId)) {
+            $valueObject = Convert-RecommendationFeedbackValue -Value ([string]$values[$trackId])
+            if ($valueObject) {
+                $title = [string](Get-OptionalProperty $valueObject 'title' (Get-OptionalProperty $valueObject 'Title'))
+                $artist = [string](Get-OptionalProperty $valueObject 'artist' (Get-OptionalProperty $valueObject 'Artist'))
+                $neteaseId = [string](Get-OptionalProperty $valueObject 'netease_id' (Get-OptionalProperty $valueObject 'NeteaseId'))
+            }
+        }
+        $canonical = Get-CanonicalTrackDb -TrackId $trackId
+        if ($canonical) {
+            if (-not $title) { $title = [string]$canonical.title }
+            if (-not $artist) { $artist = [string]$canonical.artist }
+        }
+        $result += [pscustomobject]@{
+            TrackId = $trackId; Title = $title; Artist = $artist; NeteaseId = $neteaseId
+        }
+    }
+    return @($result)
+}
+
+function Test-CandidateDisliked {
+    <#
+    .SYNOPSIS
+      Whether a recommendation candidate is one the listener marked as disliked.
+
+      Matching uses every key a candidate can be recognised by, because the same
+      song reaches the pool from different seeds and recordings: the NetEase id,
+      the canonical track id, the normalized song name, and the normalized
+      song+artist pair.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowEmptyString()][string]$Title = '',
+        [AllowEmptyString()][string]$Artist = '',
+        [AllowEmptyString()][string]$NeteaseId = '',
+        [AllowEmptyString()][string]$TrackId = '',
+        [Parameter(Mandatory)][hashtable]$PenaltyKeys = @{}
+    )
+
+    if ($PenaltyKeys.Count -eq 0) { return $false }
+    if ($NeteaseId -and $PenaltyKeys.ContainsKey("netease:$NeteaseId")) { return $true }
+    if ($TrackId -and $PenaltyKeys.ContainsKey($TrackId)) { return $true }
+    if ($Title) {
+        if ($PenaltyKeys.ContainsKey((Normalize-MusicText $Title))) { return $true }
+        if ($Artist -and $PenaltyKeys.ContainsKey((Normalize-MusicText "$Title$Artist"))) { return $true }
+        if ($PenaltyKeys.ContainsKey([string](Get-CanonicalTrackId -Title $Title -Artist $Artist))) { return $true }
+    }
+    return $false
+}
+
+function Get-DislikePenaltyKeys {
+    <#
+    .SYNOPSIS
+      Normalized key set used to recognise a disliked track in a candidate list.
+
+      Normalizing on BOTH sides matters: comparing a normalized lookup against raw
+      keys silently fails for any key that normalization rewrites.
+    #>
+    [CmdletBinding()]
+    param([AllowEmptyCollection()][object[]]$Disliked = @())
+
+    $keys = @{}
+    foreach ($row in @($Disliked)) {
+        $trackId = [string](Get-OptionalProperty $row 'TrackId' (Get-OptionalProperty $row 'track_id'))
+        $neteaseId = [string](Get-OptionalProperty $row 'NeteaseId' (Get-OptionalProperty $row 'netease_id'))
+        $title = [string](Get-OptionalProperty $row 'Title' (Get-OptionalProperty $row 'title'))
+        $artist = [string](Get-OptionalProperty $row 'Artist' (Get-OptionalProperty $row 'artist'))
+        if ($trackId) { $keys[[string]$trackId] = $true }
+        if ($neteaseId) { $keys["netease:$neteaseId"] = $true }
+        if ($title) {
+            $keys[(Normalize-MusicText $title)] = $true
+            if ($artist) { $keys[(Normalize-MusicText "$title$artist")] = $true }
+        }
+    }
+    return $keys
+}
+
 function Write-RecommendationDisplayFeedbackDb {
     param(
         [Parameter(Mandatory)][string]$TrackId,
@@ -1032,8 +1269,9 @@ function Save-DailyRecommendationsDb {
             ident = ConvertTo-MusicServerSqlLiteral $identifiers; prev = ConvertTo-MusicServerSqlLiteral $preview; cand = ConvertTo-MusicServerSqlLiteral $candidates
             local = ConvertTo-MusicServerSqlLiteral ([string](Get-OptionalProperty $track 'local_song_id')); status = ConvertTo-MusicServerSqlLiteral ([string](Get-OptionalProperty $track 'status' 'REMOTE'))
             created = ConvertTo-MusicServerSqlLiteral ([string](Get-OptionalProperty $track 'created_at' $now)); updated = ConvertTo-MusicServerSqlLiteral $now
+            year = ConvertTo-MusicServerSqlLiteral ([int](Get-OptionalProperty $track 'release_year' 0))
         }
-        [void]$statements.Add("INSERT INTO canonical_tracks (id,title,artist,album,duration,cover_url,identifiers_json,preview_sources_json,download_candidates_json,local_song_id,status,created_at,updated_at,revision) VALUES ($($lit.id),$($lit.title),$($lit.artist),$($lit.album),$($lit.dur),$($lit.cover),$($lit.ident),$($lit.prev),$($lit.cand),$($lit.local),$($lit.status),$($lit.created),$($lit.updated),1) ON CONFLICT(id) DO UPDATE SET title=excluded.title, artist=excluded.artist, album=excluded.album, duration=excluded.duration, cover_url=excluded.cover_url, identifiers_json=excluded.identifiers_json, preview_sources_json=excluded.preview_sources_json, download_candidates_json=excluded.download_candidates_json, local_song_id=CASE WHEN canonical_tracks.local_song_id IS NULL OR canonical_tracks.local_song_id='' THEN excluded.local_song_id ELSE canonical_tracks.local_song_id END, status=CASE WHEN canonical_tracks.status='REMOTE' THEN excluded.status ELSE canonical_tracks.status END, created_at=canonical_tracks.created_at, updated_at=excluded.updated_at, revision=canonical_tracks.revision")
+        [void]$statements.Add("INSERT INTO canonical_tracks (id,title,artist,album,duration,cover_url,identifiers_json,preview_sources_json,download_candidates_json,local_song_id,status,release_year,created_at,updated_at,revision) VALUES ($($lit.id),$($lit.title),$($lit.artist),$($lit.album),$($lit.dur),$($lit.cover),$($lit.ident),$($lit.prev),$($lit.cand),$($lit.local),$($lit.status),$($lit.year),$($lit.created),$($lit.updated),1) ON CONFLICT(id) DO UPDATE SET title=excluded.title, artist=excluded.artist, album=excluded.album, duration=excluded.duration, cover_url=excluded.cover_url, identifiers_json=excluded.identifiers_json, preview_sources_json=excluded.preview_sources_json, download_candidates_json=excluded.download_candidates_json, local_song_id=CASE WHEN canonical_tracks.local_song_id IS NULL OR canonical_tracks.local_song_id='' THEN excluded.local_song_id ELSE canonical_tracks.local_song_id END, status=CASE WHEN canonical_tracks.status='REMOTE' THEN excluded.status ELSE canonical_tracks.status END, release_year=CASE WHEN excluded.release_year > 0 THEN excluded.release_year ELSE canonical_tracks.release_year END, created_at=canonical_tracks.created_at, updated_at=excluded.updated_at, revision=canonical_tracks.revision")
     }
     foreach ($rec in @($recs | Sort-Object { [int](Get-OptionalProperty $_ 'rank') })) {
         $preview = ConvertTo-Json -InputObject @(Get-OptionalProperty $rec 'preview_sources' @()) -Compress -Depth 10

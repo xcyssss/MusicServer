@@ -109,6 +109,56 @@ test('like writes serialize per track and stale recommendations cannot undo the 
   assert.match(a.get('wanted-list').innerHTML, /One/);
 });
 
+test('dislike writes serialize per track and liking clears the dislike', async () => {
+  const a = await app(); const writing = deferred();
+  a.context.track = { track_id: 'one', title: 'One', liked: false, disliked: false };
+  a.run('state.items = [track]');
+  a.context.fetchHandler = url => url.endsWith('/dislike') ? writing.promise : json({});
+  const dislike = a.run('toggleDislike(track)'); await a.run('toggleDislike(track)');
+  // The optimistic state renders immediately and a second click must not fire a
+  // second write while the first is still in flight.
+  assert.equal(a.run('state.items[0].disliked'), true);
+  assert.equal(a.requests.filter(r => r.url.endsWith('/dislike')).length, 1);
+  assert.match(a.get('recommendation-list').innerHTML, /dislike-button disliked/);
+  writing.resolve(json({ disliked: true })); await dislike;
+  assert.equal(a.run('state.items[0].disliked'), true);
+
+  // Liking is the same axis, so the server-reported like must clear the dislike.
+  a.context.likeTrack = { track_id: 'one', title: 'One', liked: false, disliked: true };
+  a.run('state.items = [likeTrack]');
+  a.context.fetchHandler = url => url.endsWith('/like') ? json({ liked: true, wanted: null }) : json({});
+  await a.run('toggleLike(likeTrack)');
+  assert.equal(a.run('state.items[0].liked'), true);
+  assert.equal(a.run('state.items[0].disliked'), false);
+});
+
+test('a failed dislike reverts the button', async () => {
+  const a = await app();
+  a.context.track = { track_id: 'one', title: 'One', liked: false, disliked: false };
+  a.run('state.items = [track]');
+  a.context.fetchHandler = () => ({ ok: false, status: 500, statusText: 'ERR', json: async () => ({ error: 'BOOM' }) });
+  await a.run('toggleDislike(track)');
+  assert.equal(a.run('state.items[0].disliked'), false);
+  assert.doesNotMatch(a.get('recommendation-list').innerHTML, /dislike-button disliked/);
+});
+
+test('the release year is shown only when it is actually known', async () => {
+  const a = await app();
+  a.run("state.items = [{ track_id: 'a', title: 'Old Song', artist: '许嵩', year: 2009 }, { track_id: 'b', title: 'No Year', artist: '歌手', year: 0 }]; renderRecommendations();");
+  const html = a.get('recommendation-list').innerHTML;
+  assert.match(html, /2009 年/);
+  // 0 means unknown, so no year may be invented for the second row.
+  assert.doesNotMatch(html, /0 年/);
+  assert.match(html, /library|No Year/);
+});
+
+test('the library renders a resolved release year', async () => {
+  const a = await app();
+  a.context.fetchHandler = url => url.includes('/api/library') ? json({ items: [{ ...library[0], year: 1999 }] }) : json({});
+  await a.run('loadLibrary(true)');
+  assert.match(a.get('library-list').innerHTML, /1999 年/);
+});
+
 test('a queued download stays visible after the daily list no longer contains it', async () => {
   const a = await app();
   a.run("state.items = []; state.wanted = [{ track_id: 'zeal', state: 'RETRY_WAIT', attempt_count: 4, max_attempts: 5, title: 'ZEAL of proud', artist: 'Roselia' }]; renderRecommendations();");

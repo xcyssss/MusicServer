@@ -529,6 +529,10 @@ function Get-UiLibrary {
     try { $resolved = Get-LocalTrackArtistMapDb } catch { $resolved = @{} }
     $prefixes = @()
     try { $prefixes = @(Get-SharedTitlePrefixes -Titles @($items | ForEach-Object { [string]$_.title })) } catch { $prefixes = @() }
+    # The year is a property of the track, not of the artist decision, so every row
+    # carries one even when there is no decision at all. 0 means unknown and the UI
+    # renders nothing; it is never back-filled from the file's own `year` tag.
+    foreach ($item in $items) { $item | Add-Member -NotePropertyName 'year' -NotePropertyValue 0 -Force }
     foreach ($item in $items) {
         $key = Get-MusicServerPathKey -Path ([string]$item.file)
         $row = if ($key -and $resolved.ContainsKey($key)) { $resolved[$key] } else { $null }
@@ -536,6 +540,7 @@ function Get-UiLibrary {
         if (-not $decision) { continue }
         if ($decision.artist) { $item.artist = $decision.artist }
         if ($decision.album) { $item.album = $decision.album }
+        $item.year = [int]$decision.year
         if ($decision.source) {
             $item | Add-Member -NotePropertyName 'artist_source' -NotePropertyValue ([string]$decision.source) -Force
         }
@@ -1186,9 +1191,18 @@ function Start-ArtistBackfill {
                     $row = $cached[$key]
                     # A resolved row stays; a miss is retried only after a while,
                     # so new releases get a chance without re-querying every start.
-                    if ([string]$row.status -eq 'RESOLVED' -and [string]$row.artist) { continue }
-                    $checked = Convert-ToUtcDateTime ([string]$row.updated_at)
-                    if ($checked -and $checked -gt $cutoff) { continue }
+                    if ([string]$row.status -eq 'RESOLVED' -and [string]$row.artist) {
+                        # Resolved before release_year existed, or the online match
+                        # carried no publish date. Re-querying fills the year in;
+                        # without this every pre-existing row would show no year
+                        # forever. Bounded by the same limit and time budget.
+                        $needsYear = ([int](Get-OptionalProperty $row 'release_year' 0)) -le 0
+                        $wasOnline = [string]$row.source -eq 'netease'
+                        if (-not ($needsYear -and $wasOnline)) { continue }
+                    } else {
+                        $checked = Convert-ToUtcDateTime ([string]$row.updated_at)
+                        if ($checked -and $checked -gt $cutoff) { continue }
+                    }
                 }
                 [void]$pending.Add($item)
                 if ($pending.Count -ge $limit) { break }
@@ -1208,7 +1222,7 @@ function Start-ArtistBackfill {
                 try {
                     $match = Resolve-NeteaseTrackArtist -Config $Config -Title ([string]$item.title) -DurationSeconds ([int]$item.duration)
                     if ($match -and $match.artist) {
-                        Save-LocalTrackArtistDb -PathKey $key -Artist ([string]$match.artist) -Album ([string]$match.album) -Status 'RESOLVED' -Source 'netease' | Out-Null
+                        Save-LocalTrackArtistDb -PathKey $key -Artist ([string]$match.artist) -Album ([string]$match.album) -Status 'RESOLVED' -Source 'netease' -ReleaseYear ([int](Get-OptionalProperty $match 'publish_year' 0)) | Out-Null
                         $resolved += 1
                     } else {
                         # No online match: keep the uploader's own labelling when the

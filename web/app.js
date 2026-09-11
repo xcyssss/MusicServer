@@ -446,6 +446,15 @@ const PLAYBACK_MIN_RATIO = 0.25;
 
 const refreshes = new Map();
 const pendingLikes = new Set();
+const pendingDislikes = new Set();
+
+// The release year only ever comes from NetEase's album publish date. It is blank
+// when unknown rather than falling back to the file's own year tag, which for
+// Bilibili downloads holds the upload year and would be a confidently wrong claim.
+function yearLabel(value) {
+  const year = Number(value);
+  return Number.isFinite(year) && year > 1900 ? `${year} 年` : '';
+}
 async function fetchJson(url, options = {}) {
   const controller = new AbortController();
   const cancel = () => controller.abort();
@@ -621,7 +630,7 @@ function renderLibrary() {
   replaceList(list, visible.map((item) => {
     const playing = state.currentKey === keyOf(item);
     const display = formatTrackDisplay(item);
-    const meta = [display.artist, item.album || ''].filter(Boolean).join(' · ');
+    const meta = [display.artist, yearLabel(item.year), item.album || ''].filter(Boolean).join(' · ');
     return `<article class="track-row library-row ${playing ? 'playing' : ''}" data-library-id="${escapeHtml(item.id)}">
       <button class="play-button" data-action="play" aria-label="${playing && !$('#audio-player').paused ? '暂停' : '播放'} ${escapeHtml(display.title)}">${playing && !$('#audio-player').paused ? '❚❚' : '▶'}</button>
       <div class="track-main"><div class="track-title">${escapeHtml(display.title)}</div><div class="track-artist">${escapeHtml(meta)}</div></div>
@@ -671,19 +680,20 @@ function renderRecommendations() {
     return `<div class="wanted-row"><span>${label}</span>${badge}${retry}</div>`;
   }).join('') : '当前没有待下载或等待重试的歌曲。';
   if (!state.items.length) { list._sig = null; list.innerHTML = '<div class="empty-state">今天的推荐还在准备中。<br />先从音乐库选一首，或稍后刷新。</div>'; return; }
-  const signature = JSON.stringify(state.items.map((item) => [item.track_id, item.liked, itemStatus(item), state.currentKey === keyOf(item), $('#audio-player').paused, item.title, item.artist, item.reason, item.duration, pendingLikes.has(item.track_id)]));
+  const signature = JSON.stringify(state.items.map((item) => [item.track_id, item.liked, item.disliked, itemStatus(item), state.currentKey === keyOf(item), $('#audio-player').paused, item.title, item.artist, item.reason, item.duration, item.year, pendingLikes.has(item.track_id), pendingDislikes.has(item.track_id)]));
   if (list._sig === signature && !list._dirty) return;
   list._sig = signature;
   list._dirty = false;
   replaceList(list, state.items.map((item) => {
     const status = itemStatus(item); const playing = state.currentKey === keyOf(item);
     const display = formatTrackDisplay(item);
-    const meta = [display.artist, item.reason || '为你推荐'].filter(Boolean).join(' · ');
+    const meta = [display.artist, yearLabel(item.year), item.reason || '为你推荐'].filter(Boolean).join(' · ');
     return `<article class="track-row ${playing ? 'playing' : ''}" data-track-id="${escapeHtml(item.track_id)}">
       <button class="play-button" data-action="play" aria-label="${playing && !$('#audio-player').paused ? '暂停' : '播放'} ${escapeHtml(display.title)}">${playing && !$('#audio-player').paused ? '❚❚' : '▶'}</button>
       <div class="track-main"><div class="track-title">${escapeHtml(display.title)}</div><div class="track-artist">${escapeHtml(meta)}</div></div>
       <span class="status-badge ${statusClass(status)}">${escapeHtml(labels[status] || status)}</span>
       <span class="track-duration">${duration(item.duration)}</span>
+      <button class="dislike-button ${item.disliked ? 'disliked' : ''}" data-action="dislike" ${pendingDislikes.has(item.track_id) ? 'disabled' : ''} aria-label="${item.disliked ? '取消讨厌' : '讨厌这首歌'}" aria-pressed="${item.disliked}" title="${item.disliked ? '取消讨厌' : '讨厌：以后少推荐这首'}">👎</button>
       <button class="heart-button ${item.liked ? 'liked' : ''}" data-action="like" ${pendingLikes.has(item.track_id) ? 'disabled' : ''} aria-label="${item.liked ? '取消喜欢' : '喜欢'}" aria-pressed="${item.liked}">${item.liked ? '♥' : '♡'}</button>
     </article>`;
   }).join(''));
@@ -1022,6 +1032,38 @@ function previousItem() {
   if (item) playItem(item, state.currentCollection);
 }
 
+async function toggleDislike(item) {
+  const trackId = item.track_id;
+  if (pendingDislikes.has(trackId)) return;
+  const next = !item.disliked;
+  pendingDislikes.add(trackId);
+  item.disliked = next;
+  render();
+  showToast(next ? '已标记讨厌，以后会少推荐这首' : '已取消讨厌');
+  try {
+    const response = await fetch(`/api/tracks/${encodeURIComponent(trackId)}/dislike`, {
+      method: next ? 'POST' : 'DELETE',
+      headers: { 'Content-Type': 'application/json; charset=utf-8' },
+      body: '{}',
+    });
+    let result = null;
+    try { result = await response.json(); } catch {}
+    if (!response.ok) {
+      const detail = result?.message || result?.error || `${response.status} ${response.statusText}`;
+      throw new Error(detail);
+    }
+    item.disliked = typeof result?.disliked === 'boolean' ? result.disliked : next;
+  } catch (error) {
+    item.disliked = !next;
+    render();
+    showToast(`讨厌操作失败：${String(error?.message || '未知错误')}`);
+  } finally {
+    pendingDislikes.delete(trackId);
+    state.recommendationRevision++;
+    renderRecommendations();
+  }
+}
+
 async function toggleLike(item) {
   if (pendingLikes.has(item.track_id)) return;
   pendingLikes.add(item.track_id);
@@ -1043,6 +1085,8 @@ async function toggleLike(item) {
       throw new Error(detail);
     }
     item.liked = typeof result?.liked === 'boolean' ? result.liked : next;
+    // Like and dislike are one axis, so liking clears a dislike.
+    if (item.liked) item.disliked = false;
     item.wanted = result?.wanted || null;
     if (!item.wanted) state.wanted = (Array.isArray(state.wanted) ? state.wanted : []).filter((entry) => String(entry?.track_id || entry?.id || '') !== String(item.track_id));
     render();
@@ -1209,6 +1253,7 @@ $('#recommendation-list').addEventListener('click', (event) => {
   const row = event.target.closest('[data-track-id]'); if (!row) return;
   const item = state.items.find((candidate) => candidate.track_id === row.dataset.trackId); if (!item) return;
   if (event.target.closest('[data-action="like"]')) toggleLike(item);
+  else if (event.target.closest('[data-action="dislike"]')) toggleDislike(item);
   else if (event.target.closest('[data-action="play"]')) playItem(item, 'recommendations');
 });
 

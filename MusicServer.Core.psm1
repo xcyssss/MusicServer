@@ -273,6 +273,7 @@ function New-CanonicalTrack {
         [string]$Artist = '', [string]$Album = '', [int]$Duration = 0, [string]$CoverUrl = '',
         [object]$Identifiers = $null, [object]$PreviewSources = $null, [object]$DownloadCandidates = $null,
         [string]$LocalSongId = '',
+        [int]$ReleaseYear = 0,
         [ValidateSet('REMOTE','WANTED','RESOLVING','DOWNLOADING','VALIDATING','LOCAL','RETRY_WAIT','UNAVAILABLE')][string]$Status = 'REMOTE'
     )
     if (-not $TrackId) { $TrackId = Get-CanonicalTrackId -Title $Title -Artist $Artist }
@@ -280,7 +281,7 @@ function New-CanonicalTrack {
     return [pscustomobject]@{
         id = $TrackId; title = $Title; artist = $Artist; album = $Album; duration = $Duration; cover_url = $CoverUrl
         identifiers = @($Identifiers); preview_sources = @($PreviewSources); download_candidates = @($DownloadCandidates)
-        local_song_id = $LocalSongId; status = $Status; created_at = $now; updated_at = $now
+        local_song_id = $LocalSongId; release_year = $ReleaseYear; status = $Status; created_at = $now; updated_at = $now
     }
 }
 

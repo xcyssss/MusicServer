@@ -72,6 +72,11 @@ $Headers = @{
     'Referer'    = 'https://music.163.com/'
 }
 $RecommendationCooldownDays = 14
+# How hard a disliked song is pushed down. A fresh candidate scores 1 per seed
+# that surfaced it (typically 1-3), so -5 reliably sinks a disliked track below
+# anything else while still leaving it reachable when the pool is thin.
+$DislikeScorePenalty = 5
+$DislikeWeightDivisor = 4
 
 function Write-Step([string]$Message) { Write-Host "`n>>> $Message" -ForegroundColor Cyan }
 
@@ -248,6 +253,13 @@ foreach ($row in $cooldownRows) {
 }
 Write-Host "  排除条目：$($exclude.Count)，已接受网易云 ID：$($acceptedIds.Count)，近期冷却：$cooldownCount" -ForegroundColor Yellow
 
+# Disliked tracks, resolved once and used by BOTH sources below. "少推荐" is a soft
+# penalty, not an exclusion: the track keeps a much lower weight, so it sinks below
+# fresh candidates but can still surface when there is nothing better. Excluding it
+# outright, the way REJECTED does, would not be what was asked for.
+$dislikedKeys = Get-DislikePenaltyKeys -Disliked @(Get-DislikedTrackKeysDb)
+if ($dislikedKeys.Count -gt 0) { Write-Host "  讨厌歌曲键：$($dislikedKeys.Count)" -ForegroundColor Yellow }
+
 # ---------------------------------------------------------------------------
 # Local re-listen recommendations
 #
@@ -325,6 +337,18 @@ $localBudget = [Math]::Max(0, [Math]::Min($LocalCount, $Count))
 $localPicks = @()
 if ($localBudget -gt 0 -and $affinity.Count -gt 0) {
     $localPicks = @(Select-LocalRecommendationTracks -Candidates @($localCandidates) -Affinity $affinity -ExcludedKeys @($localExclude) -Limit $localBudget)
+    # A disliked owned track is demoted the same way an online one is: its affinity
+    # weight is divided down so a non-disliked artist wins the slot, but it is not
+    # excluded outright.
+    if ($dislikedKeys.Count -gt 0) {
+        $localPicks = @($localPicks | ForEach-Object {
+            $blocked = Test-CandidateDisliked -Title ([string]$_.Title) -Artist ([string]$_.Artist) -TrackId ([string]$_.TrackId) -PenaltyKeys $dislikedKeys
+            if ($blocked) {
+                $_ | Add-Member -NotePropertyName 'Weight' -NotePropertyValue ([Math]::Max(1, [int][Math]::Floor([int]$_.Weight / $DislikeWeightDivisor))) -Force
+            }
+            $_
+        } | Sort-Object @{ Expression = { [int]$_.Weight }; Descending = $true })
+    }
 }
 Write-Host "  本地重听推荐：$($localPicks.Count) 首（候选 $($localCandidates.Count) 首，歌手亲和度 $($affinity.Count) 个，预算 $localBudget）" -ForegroundColor Yellow
 
@@ -367,8 +391,23 @@ foreach ($seed in $picked) {
         $candidateMap[$sid] = [pscustomobject]@{
             NeteaseId = $sid; Title = [string]$song.name; Artist = $artist; Album = [string]$song.album.name
             Duration = $duration; FromSeed = [string]$seed.Title; SeedSource = [string]$seed.Source; Score = 1; CoverUrl = [string]$song.album.picUrl
+            ReleaseYear = Get-NeteasePublishYear -PublishTime (Get-OptionalProperty (Get-OptionalProperty $song 'album' $null) 'publishTime' 0)
         }
     }
+}
+
+# Disliked tracks are pushed down rather than removed. "少推荐" is a soft penalty:
+# a disliked song keeps a much lower score than a fresh candidate, so it sinks out
+# of the day under normal circumstances but can still appear when there is nothing
+# better -- which is what excluding it outright would prevent.
+$dislikePenalty = 0
+if ($dislikedKeys.Count -gt 0) {
+    foreach ($candidate in @($candidateMap.Values)) {
+        $isDisliked = Test-CandidateDisliked -Title ([string]$candidate.Title) -Artist ([string]$candidate.Artist) `
+            -NeteaseId ([string]$candidate.NeteaseId) -PenaltyKeys $dislikedKeys
+        if ($isDisliked) { $candidate.Score = $candidate.Score - $DislikeScorePenalty; $dislikePenalty++ }
+    }
+    Write-Host "  讨厌歌曲命中：$dislikePenalty 首（每首 -$DislikeScorePenalty 分）" -ForegroundColor Yellow
 }
 
 $ranked = @($candidateMap.Values | Sort-Object @{Expression = {$_.Score}; Descending = $true}, @{Expression = { Get-Random }})
@@ -399,7 +438,8 @@ foreach ($candidate in $recos) {
     )
     $track = New-CanonicalTrack -TrackId $trackId -Title $candidate.Title -Artist $candidate.Artist -Album $candidate.Album `
         -Duration $candidate.Duration -CoverUrl $candidate.CoverUrl -Identifiers $identifiers `
-        -PreviewSources $preview -DownloadCandidates $downloadCandidates -Status 'REMOTE'
+        -PreviewSources $preview -DownloadCandidates $downloadCandidates -Status 'REMOTE' `
+        -ReleaseYear ([int](Get-OptionalProperty $candidate 'ReleaseYear' 0))
     $tracks += $track
     $recommendations += [pscustomobject]@{
         id = "rec_${today}_${rank}_$($trackId.Substring(6, 12))"

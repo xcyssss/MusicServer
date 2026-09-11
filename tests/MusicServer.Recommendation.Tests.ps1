@@ -751,3 +751,127 @@ Describe 'Local library recommendation source' {
         @(Select-LocalRecommendationTracks -Candidates $many -Affinity $wide -Limit 0).Count | Should Be 0
     }
 }
+
+Describe 'Disliked tracks and release year' {
+
+    BeforeEach {
+        Initialize-RecommendationScratchDb
+    }
+
+    AfterEach {
+        [Environment]::SetEnvironmentVariable('MUSICSERVER_APP_HOME', $script:RecommendationOldAppHome)
+        if ($script:RecommendationTestRoot -and (Test-Path -LiteralPath $script:RecommendationTestRoot)) {
+            Remove-Item -LiteralPath $script:RecommendationTestRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        $script:RecommendationTestRoot = $null
+        $script:RecommendationTestConfig = $null
+    }
+
+    It 'creates the release_year column on both tables' {
+        # CREATE TABLE IF NOT EXISTS cannot add a column to an existing database, so
+        # the DDL and the explicit ALTER both have to agree; this pins the shape a
+        # fresh install gets.
+        $trackCols = @(Invoke-MusicServerSqlJson -Query 'PRAGMA table_info(canonical_tracks);') | ForEach-Object { [string]$_.name }
+        $artistCols = @(Invoke-MusicServerSqlJson -Query 'PRAGMA table_info(local_track_artists);') | ForEach-Object { [string]$_.name }
+        ($trackCols -contains 'release_year') | Should Be $true
+        ($artistCols -contains 'release_year') | Should Be $true
+        # Idempotent: re-running the bootstrap and the launcher's own upgrader works.
+        Initialize-MusicServerSchema
+        Initialize-LocalTrackArtistSchema
+    }
+
+    It 'round-trips the release year on a canonical track' {
+        $track = New-CanonicalTrack -Title '有何不可' -Artist '许嵩' -Album '自定义' -ReleaseYear 2009
+        $track.release_year | Should Be 2009
+        Save-CanonicalTrackDb -Track $track | Out-Null
+        (Get-CanonicalTrackDb -TrackId $track.id).release_year | Should Be 2009
+    }
+
+    It 'defaults an unknown release year to 0 rather than guessing' {
+        $track = New-CanonicalTrack -Title 'Unknown Year' -Artist '测试艺术家'
+        $track.release_year | Should Be 0
+        Save-CanonicalTrackDb -Track $track | Out-Null
+        (Get-CanonicalTrackDb -TrackId $track.id).release_year | Should Be 0
+    }
+
+    It 'does not let a later track save wipe an already known year' {
+        $track = New-CanonicalTrack -Title 'Keep Year' -Artist '测试艺术家' -ReleaseYear 1999
+        Save-CanonicalTrackDb -Track $track | Out-Null
+        # A re-save from a source that carries no year must not blank it.
+        $again = New-CanonicalTrack -Title 'Keep Year' -Artist '测试艺术家'
+        Save-CanonicalTrackDb -Track $again | Out-Null
+        (Get-CanonicalTrackDb -TrackId $track.id).release_year | Should Be 1999
+    }
+
+    It 'treats dislike as preference-only and turns the heart off' {
+        $track = New-CanonicalTrack -Title 'Disliked Song' -Artist '测试艺术家'
+        Save-CanonicalTrackDb -Track $track | Out-Null
+        (Get-LatestTrackPreferenceDb -TrackId $track.id) | Should Be ''
+        Write-TrackDislikeDb -TrackId $track.id -Title 'Disliked Song' -Artist '测试艺术家' -NeteaseId 'n1' | Out-Null
+        (Get-LatestTrackPreferenceDb -TrackId $track.id) | Should Be 'DISLIKE'
+        # Disliking must not queue a download or delete anything.
+        (Get-LatestRecommendationFeedbackDb -TrackId $track.id) | Should Be 'UNLIKE'
+        (Get-WantedItemDb -TrackId $track.id) | Should BeNullOrEmpty
+        ($null -eq (Get-CanonicalTrackDb -TrackId $track.id)) | Should Be $false
+    }
+
+    It 'lets the most recent like and dislike win' {
+        $track = New-CanonicalTrack -Title 'Axis Song' -Artist '测试艺术家'
+        Save-CanonicalTrackDb -Track $track | Out-Null
+        Write-TrackDislikeDb -TrackId $track.id -Title 'Axis Song' -Artist '测试艺术家' | Out-Null
+        (Get-LatestTrackPreferenceDb -TrackId $track.id) | Should Be 'DISLIKE'
+        # A like records both LIKE and the queue action; the LIKE must win.
+        Add-FeedbackValue -TrackId $track.id -Type 'LIKE' -Value 'true' -Source 'music_api'
+        (Get-LatestTrackPreferenceDb -TrackId $track.id) | Should Be 'LIKE'
+        Write-TrackDislikeDb -TrackId $track.id -Title 'Axis Song' -Artist '测试艺术家' | Out-Null
+        (Get-LatestTrackPreferenceDb -TrackId $track.id) | Should Be 'DISLIKE'
+    }
+
+    It 'returns to neutral when a dislike is withdrawn' {
+        $track = New-CanonicalTrack -Title 'Undislike Song' -Artist '测试艺术家'
+        Save-CanonicalTrackDb -Track $track | Out-Null
+        Write-TrackDislikeDb -TrackId $track.id -Title 'Undislike Song' -Artist '测试艺术家' | Out-Null
+        Write-TrackUndislikeDb -TrackId $track.id | Out-Null
+        (Get-LatestTrackPreferenceDb -TrackId $track.id) | Should Be ''
+        @(Get-DislikedTrackKeysDb).Count | Should Be 0
+    }
+
+    It 'lists a disliked track with every key a candidate can be matched on' {
+        $track = New-CanonicalTrack -Title 'Key Song' -Artist '许嵩' -Identifiers @([pscustomobject]@{ type = 'netease'; value = '167876' })
+        Save-CanonicalTrackDb -Track $track | Out-Null
+        Write-TrackDislikeDb -TrackId $track.id -Title 'Key Song' -Artist '许嵩' -NeteaseId '167876' | Out-Null
+        $keys = Get-DislikePenaltyKeys -Disliked @(Get-DislikedTrackKeysDb)
+        $keys.ContainsKey($track.id) | Should Be $true
+        $keys.ContainsKey('netease:167876') | Should Be $true
+        $keys.ContainsKey([string](Normalize-MusicText 'Key Song')) | Should Be $true
+        $keys.ContainsKey([string](Normalize-MusicText 'Key Song许嵩')) | Should Be $true
+    }
+
+    It 'matches a candidate by NetEase id, track id, name, or name+artist' {
+        $track = New-CanonicalTrack -Title 'Match Song' -Artist '许嵩' -Identifiers @([pscustomobject]@{ type = 'netease'; value = '999' })
+        Save-CanonicalTrackDb -Track $track | Out-Null
+        Write-TrackDislikeDb -TrackId $track.id -Title 'Match Song' -Artist '许嵩' -NeteaseId '999' | Out-Null
+        $keys = Get-DislikePenaltyKeys -Disliked @(Get-DislikedTrackKeysDb)
+
+        (Test-CandidateDisliked -Title 'Other' -Artist 'Other' -NeteaseId '999' -PenaltyKeys $keys) | Should Be $true
+        (Test-CandidateDisliked -Title 'Other' -Artist 'Other' -TrackId $track.id -PenaltyKeys $keys) | Should Be $true
+        (Test-CandidateDisliked -Title 'Match Song' -Artist 'Other' -PenaltyKeys $keys) | Should Be $true
+        (Test-CandidateDisliked -Title 'Match Song' -Artist '许嵩' -PenaltyKeys $keys) | Should Be $true
+        # A different recording of a different song must not be caught.
+        (Test-CandidateDisliked -Title '无关歌曲' -Artist '其他歌手' -NeteaseId '111' -PenaltyKeys $keys) | Should Be $false
+    }
+
+    It 'never matches when nothing is disliked' {
+        (Test-CandidateDisliked -Title 'Anything' -Artist 'Anyone' -NeteaseId '1' -PenaltyKeys @{}) | Should Be $false
+    }
+
+    It 'normalizes penalty keys so a separator cannot defeat the match' {
+        # The disliked title is raw; the candidate arrives from NetEase with
+        # different punctuation. Both must normalize to the same key.
+        $track = New-CanonicalTrack -Title 'On My Way（Live）' -Artist 'Alan Walker'
+        Save-CanonicalTrackDb -Track $track | Out-Null
+        Write-TrackDislikeDb -TrackId $track.id -Title 'On My Way（Live）' -Artist 'Alan Walker' | Out-Null
+        $keys = Get-DislikePenaltyKeys -Disliked @(Get-DislikedTrackKeysDb)
+        (Test-CandidateDisliked -Title 'On My Way(Live)' -Artist 'Alan Walker' -PenaltyKeys $keys) | Should Be $true
+    }
+}

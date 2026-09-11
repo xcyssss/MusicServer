@@ -43,13 +43,14 @@ function New-NeteaseSong {
         [Parameter(Mandatory)][string]$Name,
         [Parameter(Mandatory)][string]$Artists,
         [int]$Seconds = 240,
-        [string]$Album = 'Some Album'
+        [string]$Album = 'Some Album',
+        [long]$PublishTime = 0
     )
     return [pscustomobject]@{
         id = [Math]::Abs($Name.GetHashCode())
         name = $Name
         duration = $Seconds * 1000
-        album = [pscustomobject]@{ name = $Album }
+        album = [pscustomobject]@{ name = $Album; publishTime = $PublishTime }
         artists = @($Artists -split ',' | ForEach-Object { [pscustomobject]@{ name = $_.Trim() } })
     }
 }
@@ -267,6 +268,48 @@ Describe 'MusicServer artist resolution' {
             $songs = @((New-NeteaseSong -Name 'life' -Artists 'Tobu' -Seconds 204 -Album 'NCS'))
             $match = Select-NeteaseArtistForTitle -Title 'Tobu《life》百万豪装录音棚大声听' -Keyword 'life' -DurationSeconds 203 -Songs $songs
             $match.album | Should Be 'NCS'
+        }
+    }
+
+    Context 'release year' {
+
+        It 'reads the release year from the album publish time' {
+            # 1231516800000 = 2009-01-10 UTC, 许嵩《自定义》.
+            $songs = @((New-NeteaseSong -Name '有何不可' -Artists '许嵩' -Seconds 260 -Album '自定义' -PublishTime 1231516800000))
+            $match = Select-NeteaseArtistForTitle -Title '许嵩《有何不可》' -Keyword '有何不可' -DurationSeconds 260 -Songs $songs
+            $match.publish_year | Should Be 2009
+        }
+
+        It 'reports no year when the response has no publish time' {
+            # A missing year must stay 0, never be guessed at: showing a confidently
+            # wrong year is worse than showing none.
+            $songs = @((New-NeteaseSong -Name 'life' -Artists 'Tobu' -Seconds 204))
+            $match = Select-NeteaseArtistForTitle -Title 'Tobu《life》百万豪装录音棚大声听' -Keyword 'life' -DurationSeconds 203 -Songs $songs
+            $match.publish_year | Should Be 0
+        }
+
+        It 'accepts a seconds-based publish time as well as milliseconds' {
+            $songs = @((New-NeteaseSong -Name '有何不可' -Artists '许嵩' -Seconds 260 -PublishTime 1231516800))
+            $match = Select-NeteaseArtistForTitle -Title '许嵩《有何不可》' -Keyword '有何不可' -DurationSeconds 260 -Songs $songs
+            $match.publish_year | Should Be 2009
+        }
+
+        It 'rejects an implausible publish time instead of clamping it' {
+            Get-NeteasePublishYear -PublishTime 0 | Should Be 0
+            Get-NeteasePublishYear -PublishTime -1 | Should Be 0
+            Get-NeteasePublishYear -PublishTime 99999999999999 | Should Be 0
+            Get-NeteasePublishYear -PublishTime $null | Should Be 0
+        }
+
+        It 'derives the year from the album date rather than any upload year' {
+            # The file's own `year` tag is the upload/encode year for Bilibili
+            # downloads (155 of 185 real rows cluster in 2023-2026), so the
+            # resolver never reads it -- only the album publish time produces a
+            # year. 570000000000 ms = 1988-01-24, the real 《现代舞台》 date, and
+            # the file itself is a 2024 re-upload.
+            $songs = @((New-NeteaseSong -Name '冷雨夜' -Artists 'Beyond' -Seconds 262 -Album '现代舞台' -PublishTime 570000000000))
+            $match = Select-NeteaseArtistForTitle -Title 'BEYOND《冷雨夜》百万豪装录音棚大声听' -Keyword '冷雨夜' -DurationSeconds 262 -Songs $songs
+            $match.publish_year | Should Be 1988
         }
     }
 
