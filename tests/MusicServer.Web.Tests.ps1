@@ -264,6 +264,9 @@ Describe 'MusicServer web UI safeguards' {
         # Files sitting directly in the library root: the root's own name is not an artist.
         [IO.File]::WriteAllBytes((Join-Path $config.MusicDir 'Kept.mp3'), (New-Object byte[] 4))
         [IO.File]::WriteAllBytes((Join-Path $config.MusicDir 'Loose.mp3'), (New-Object byte[] 4))
+        # A Bilibili download: the index holds the uploader, the file name declares
+        # the singer. Traditional mode shows the uploader, canonical mode the singer.
+        [IO.File]::WriteAllBytes((Join-Path $config.MusicDir '米津玄师《Lemon》【Hi-res】.mp3'), (New-Object byte[] 4))
         $artistDir = Join-Path $config.MusicDir 'Some Artist'
         $null = New-Item -ItemType Directory -Path $artistDir -Force
         [IO.File]::WriteAllBytes((Join-Path $artistDir 'Nested.mp3'), (New-Object byte[] 4))
@@ -285,6 +288,7 @@ CREATE TABLE media_file (
     missing BOOLEAN NOT NULL DEFAULT 0
 );
 INSERT INTO media_file VALUES ('mf-kept','Kept.mp3','Kept','Uploader Album','Uploader One',210,1,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',1);
+INSERT INTO media_file VALUES ('mf-declared','米津玄师《Lemon》【Hi-res】.mp3','米津玄师《Lemon》【Hi-res】','Uploader Album','BilibiliUploader',200,4,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',1);
 INSERT INTO media_file VALUES ('mf-nested','Some Artist/Nested.mp3','Nested','Uploader Album','Uploader Three',190,3,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',1);
 INSERT INTO media_file VALUES ('mf-gone','Gone.mp3','Gone','Uploader Album','Uploader Two',200,2,'2026-01-01T00:00:00Z','2026-01-01T00:00:00Z',1);
 "@
@@ -334,6 +338,19 @@ INSERT INTO media_file VALUES ('mf-gone','Gone.mp3','Gone','Uploader Album','Upl
                 ($item.PSObject.Properties.Name -contains 'year') | Should Be $true
                 [int]$item.year | Should Be 0
             }
+
+            # Both display modes need the values on the same row: `artist`/`album`
+            # hold the resolved ones for canonical mode, and raw_* keep what the
+            # index (for a Bilibili download, the uploader) actually said.
+            foreach ($item in $items) {
+                ($item.PSObject.Properties.Name -contains 'raw_artist') | Should Be $true
+                ($item.PSObject.Properties.Name -contains 'raw_album') | Should Be $true
+            }
+            $declared = $items | Where-Object { $_.title -like '*Lemon*' } | Select-Object -First 1
+            $declared | Should Not BeNullOrEmpty
+            $declared.artist | Should Be '米津玄师'
+            $declared.raw_artist | Should Be 'BilibiliUploader'
+            $declared.raw_album | Should Be 'Uploader Album'
         } finally {
             Remove-Item -LiteralPath $appHome -Recurse -Force -ErrorAction SilentlyContinue
         }

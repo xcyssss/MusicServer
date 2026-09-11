@@ -2642,6 +2642,31 @@ function Remove-AppSettingDb {
     Invoke-MusicServerParamNonQuery -Template 'DELETE FROM app_settings WHERE key = @key;' -Params @{ key = $Key }
 }
 
+function Get-LibraryDisplayModeDb {
+    <#
+    .SYNOPSIS
+      Which names the library shows: 'raw' (the folder's own) or 'canonical'.
+
+      Traditional is the product default, so an absent or unreadable setting is
+      not an error and must never stop the library from loading. Only an explicit
+      'canonical' selects the regularized song name and resolved artist.
+    #>
+    $value = ''
+    try { $value = [string](Get-AppSettingDb -Key 'library_display_mode') } catch { $value = '' }
+    if ($value -eq 'canonical') { return 'canonical' }
+    return 'raw'
+}
+
+function Set-LibraryDisplayModeDb {
+    <#
+    .SYNOPSIS
+      Persists the library display mode. 'raw' is the default rather than a stored
+      requirement, so it can be stored explicitly without changing behavior.
+    #>
+    param([Parameter(Mandatory)][ValidateSet('raw', 'canonical')][string]$Mode)
+    Set-AppSettingDb -Key 'library_display_mode' -Value $Mode
+}
+
 function Sync-NavidromeMusicFolder {
     <#
     .SYNOPSIS

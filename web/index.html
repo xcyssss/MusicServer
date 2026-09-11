@@ -125,6 +125,27 @@
           </div>
           <p class="settings-hint">更改音乐库位置只会改变 MusicServer 使用的目录，不会移动、复制或删除现有歌曲和歌词。</p>
         </div>
+        <div class="settings-group">
+          <label>曲库显示方式</label>
+          <div class="settings-choice" role="radiogroup" aria-label="曲库显示方式">
+            <label class="settings-option">
+              <input type="radio" name="display-mode" value="raw" />
+              <span class="settings-option-body">
+                <strong>传统模式</strong>
+                <small>原汁原味显示文件夹里的歌曲名和原始歌手</small>
+              </span>
+            </label>
+            <label class="settings-option">
+              <input type="radio" name="display-mode" value="canonical" />
+              <span class="settings-option-body">
+                <strong>正则模式 <span class="beta-badge">Beta</span></strong>
+                <small>显示正则化后的歌曲名，以及识别出的歌手、专辑和发行年份</small>
+              </span>
+            </label>
+          </div>
+          <p id="display-mode-note" class="settings-note" role="status"></p>
+          <p class="settings-hint">正则模式依赖在线识别，偶尔会把歌名或歌手认错，所以默认使用传统模式。切换只影响显示，不改动任何文件。</p>
+        </div>
       </div>
     </aside>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>

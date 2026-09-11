@@ -115,9 +115,34 @@ Describe 'MusicServer artist resolution' {
             # Several words left over means branding or a series tag; guessing
             # which word is the singer shows a descriptor as an artist.
             Get-TitleDeclaredArtist -Title '在百万豪装录音棚大声听 黄诗扶&妖扬《吹梦到西洲》【Hi-res】' | Should Be ''
-            Get-TitleDeclaredArtist -Title '在百万豪装录音棚大声听 东宫ost 余昭源&叶里《初见》【Hi-res】' | Should Be ''
             # Branding glued straight on with no space at all.
             Get-TitleDeclaredArtist -Title '在百万豪装录音棚大声听米津玄师《Lemon》【Hi-res】' | Should Be ''
+        }
+
+        It 'reads the singer that follows a series label in front of the song name' {
+            # `爱情公寓3ost 陈韵若&陈每文《爱的回归线》`: the series label is not a
+            # singer, and keeping it attached made the CJK-with-spaces rule refuse
+            # the whole run. Refusing is not neutral here -- the caller then fell
+            # back to the indexed artist, which for these files is the Bilibili
+            # uploader, so the row showed `JLRS-LeoFM` instead of the real singer.
+            Get-TitleDeclaredArtist -Title '在百万豪装录音棚大声听 爱情公寓3ost 陈韵若&陈每文《爱的回归线》【Hi-res】' | Should Be '陈韵若&陈每文'
+            Get-TitleDeclaredArtist -Title '在百万豪装录音棚大声听 东宫ost 余昭源&叶里《初见》【Hi-res】' | Should Be '余昭源&叶里'
+            Get-TitleDeclaredArtist -Title '还珠格格3ost 刘盼《奈何》百万豪装录音棚大声听【Hi-res】' | Should Be '刘盼'
+            Get-TitleDeclaredArtist -Title '在百万豪装录音棚大声听 香蜜沉沉烬如霜ost 萨顶顶《左手指月》【Hi-res】' | Should Be '萨顶顶'
+            # A bare marker token counts too ("琅琊榜 ost 刘涛").
+            Get-TitleDeclaredArtist -Title '在百万豪装录音棚大声听 琅琊榜 ost 刘涛《红颜旧》【Hi-res】' | Should Be '刘涛'
+            # The branding prefix is stripped first, and the rule still applies.
+            Get-TitleDeclaredArtist -Title '在百万豪装录音棚大声听 爱情公寓3ost 陈韵若&陈每文《爱的回归线》【Hi-res】' -KnownPrefixes @('在百万豪装录音棚大声听 ') | Should Be '陈韵若&陈每文'
+        }
+
+        It 'only treats a real series label as one, never a name that merely ends in those letters' {
+            Get-TitleCreditAfterSeriesLabel -Text '爱情公寓3ost 陈韵若&陈每文' | Should Be '陈韵若&陈每文'
+            Get-TitleCreditAfterSeriesLabel -Text '在百万豪装录音棚大声听 爱情公寓3ost 陈韵若&陈每文' | Should Be '陈韵若&陈每文'
+            # Nothing follows the label, so there is no credit to read.
+            Get-TitleCreditAfterSeriesLabel -Text '爱情公寓3ost' | Should Be ''
+            # `Ted` is a performer, not an `ed` label: no CJK and not the bare marker.
+            Get-TitleCreditAfterSeriesLabel -Text 'Ted 某个歌手' | Should Be ''
+            Get-TitleCreditAfterSeriesLabel -Text '陈韵若&陈每文' | Should Be ''
         }
 
         It 'still reads a Latin credit that legitimately contains spaces' {

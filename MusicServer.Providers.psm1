@@ -537,6 +537,33 @@ function Remove-SharedTitlePrefix {
     return $Title.Substring($longest.Length).TrimStart($separators)
 }
 
+function Get-TitleCreditAfterSeriesLabel {
+    <#
+    .SYNOPSIS
+      The credit that follows the last series/format label in a title fragment.
+
+      Uploads name the series before the singer ("爱情公寓3ost 陈韵若&陈每文",
+      "东宫ost 余昭源&叶里"), so everything after the last `ost`/`ep`/`op`/`ed`
+      label is the credit. Only a token that really is a label counts -- the token
+      must carry CJK text or be the bare marker -- so a performer whose name
+      merely ends in those letters is left alone. Returns '' when there is no
+      label or nothing follows it.
+    #>
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) { return '' }
+    $tokens = @([regex]::Split($Text.Trim(), '\s+') | Where-Object { $_ })
+    if ($tokens.Count -lt 2) { return '' }
+    $last = -1
+    for ($i = 0; $i -lt ($tokens.Count - 1); $i++) {
+        $token = [string]$tokens[$i]
+        if (-not [regex]::IsMatch($token, '(?i)(ost|ep|op|ed)$')) { continue }
+        if ([regex]::IsMatch($token, '[\u3400-\u9fff]') -or [regex]::IsMatch($token, '^(?i)(ost|ep|op|ed)$')) { $last = $i }
+    }
+    if ($last -lt 0) { return '' }
+    return ([string](@($tokens[($last + 1)..($tokens.Count - 1)]) -join ' ')).Trim()
+}
+
 function Get-TitleDeclaredArtist {
     <#
     .SYNOPSIS
@@ -571,6 +598,13 @@ function Get-TitleDeclaredArtist {
             $before = $Title.Substring(0, $start).Trim()
             # Drop a quoted lyric sitting in front of the artist.
             $before = [regex]::Replace($before, '^[\u201c"''][^\u201d"'']{0,80}[\u201d"'']\s*', '').Trim()
+            # `爱情公寓3ost 陈韵若&陈每文《爱的回归线》`: the credit follows the series
+            # label, and keeping the label glued to it made the "CJK with spaces"
+            # rule refuse the whole run. That refusal is not neutral: the caller
+            # then falls back to the indexed artist, which for a Bilibili download
+            # is the uploader (this file displayed `JLRS-LeoFM`).
+            $afterLabel = Get-TitleCreditAfterSeriesLabel -Text $before
+            if ($afterLabel) { $before = $afterLabel }
             # A lyric, a sentence, or another bracketed block is not an artist.
             # This runs before the trailing cleanup, which would otherwise erase
             # the punctuation ("仙气空灵！") that proves it is not a name.

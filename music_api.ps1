@@ -346,6 +346,14 @@ function Add-ResolvedArtist {
     # carries one even when there is no decision at all. 0 means unknown and the UI
     # renders nothing; it is never back-filled from the file's own `year` tag.
     foreach ($item in @($Items)) { $item | Add-Member -NotePropertyName 'year' -NotePropertyValue 0 -Force }
+    # Traditional mode shows the folder's own names, but the resolution below
+    # overwrites `artist`/`album` with the resolved values. Keep the indexed ones
+    # beside them so the display mode stays a rendering choice rather than
+    # something the data layer has already destroyed.
+    foreach ($item in @($Items)) {
+        $item | Add-Member -NotePropertyName 'raw_artist' -NotePropertyValue ([string](Get-OptionalProperty $item 'artist' '')) -Force
+        $item | Add-Member -NotePropertyName 'raw_album' -NotePropertyValue ([string](Get-OptionalProperty $item 'album' '')) -Force
+    }
     foreach ($item in @($Items)) {
         $key = Get-MusicServerPathKey -Path ([string](Get-OptionalProperty $item 'file' ''))
         $row = if ($key -and $resolved.ContainsKey($key)) { $resolved[$key] } else { $null }
@@ -1067,6 +1075,37 @@ while ($true) {
                 requires_restart = $true
             }
             Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 200 })
+        }
+        elseif ($method -eq 'GET' -and $path -eq '/api/settings/display-mode') {
+            # Traditional ('raw') is the default, so nothing has to be stored for
+            # a fresh install. 'canonical' is the Beta mode that shows the
+            # regularized song name and the resolved artist.
+            $body = [pscustomobject]@{
+                mode = Get-LibraryDisplayModeDb
+                default_mode = 'raw'
+                options = @('raw', 'canonical')
+                beta = @('canonical')
+            }
+            Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 200 })
+        }
+        elseif ($method -eq 'PUT' -and $path -eq '/api/settings/display-mode') {
+            $bodyObj = $null
+            try { if ($bodyText) { $bodyObj = ConvertFrom-Json -InputObject $bodyText } } catch {}
+            $mode = if ($bodyObj) { [string]$bodyObj.mode } else { '' }
+            if ($mode -ne 'raw' -and $mode -ne 'canonical') {
+                $body = @{ error = 'INVALID_MODE'; message = 'Request body must contain "mode": "raw" or "canonical".' }
+                Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 400 })
+            } else {
+                Set-LibraryDisplayModeDb -Mode $mode
+                $body = [pscustomobject]@{
+                    accepted = $true
+                    mode = $mode
+                    # The library payload carries both the raw and the resolved
+                    # names, so switching modes needs no restart and no rescan.
+                    requires_restart = $false
+                }
+                Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 200 })
+            }
         }
         elseif ($method -eq 'GET' -and $path -eq '/health') {
             $dbOk = $false
