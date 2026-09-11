@@ -547,6 +547,14 @@ function Get-UiLibrary {
     # carries one even when there is no decision at all. 0 means unknown and the UI
     # renders nothing; it is never back-filled from the file's own `year` tag.
     foreach ($item in $items) { $item | Add-Member -NotePropertyName 'year' -NotePropertyValue 0 -Force }
+    # Traditional display shows the folder's own names, but the resolution below
+    # overwrites `artist`/`album`. Keep the indexed values beside them so the
+    # display mode stays a rendering choice rather than something the library
+    # reader has already destroyed.
+    foreach ($item in $items) {
+        $item | Add-Member -NotePropertyName 'raw_artist' -NotePropertyValue ([string]$item.artist) -Force
+        $item | Add-Member -NotePropertyName 'raw_album' -NotePropertyValue ([string]$item.album) -Force
+    }
     foreach ($item in $items) {
         $key = Get-MusicServerPathKey -Path ([string]$item.file)
         $row = if ($key -and $resolved.ContainsKey($key)) { $resolved[$key] } else { $null }

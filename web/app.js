@@ -18,11 +18,16 @@ const state = {
   listening: { mostPlayed: [], rediscover: [], loaded: false },
   libraryOrder: storedLibraryOrder,
   currentKey: null,
+  currentItem: null,
   currentCollection: 'library',
   playbackSession: null,
   lastRandomId: null,
   mode: localStorage.getItem('musicserver-play-mode') === 'random' && storedLibraryOrder.length ? 'random' : 'sequence',
   librarySort: localStorage.getItem('musicserver-library-sort') || 'default',
+  // Which names the library shows. The server stores the choice; 'raw'
+  // (traditional) is the product default, so an unreachable API keeps the
+  // original folder names instead of silently regularizing them.
+  displayMode: 'raw',
   lyrics: { available: false, format: '', text: '', entries: [], quality: '', message: '' },
   lyricsRequest: 0,
   playRequest: 0,
@@ -149,6 +154,21 @@ function cutDescriptiveTail(text) {
   return value;
 }
 
+// `流浪的猫写情诗·甜到掉牙的静享版`: a `·` tail is a subtitle about the upload
+// ("甜到掉牙的"), not part of the song. `青玉案·元夕` is a real title, so only a
+// tail that quite clearly reads as a descriptor is cut.
+const DESCRIPTIVE_TAIL_RE = /(的|版|篇|系列|字幕|音质|现场|翻唱|伴奏|纯音乐|完整版)$/;
+
+function dotTruncatedHead(text) {
+  const value = String(text || '').trim();
+  const parts = value.split(/[·・]/);
+  if (parts.length < 2) return '';
+  const head = parts[0].trim();
+  const tail = parts.slice(1).join('·').trim();
+  if (head.length < 2 || !tail || !isSongLike(head)) return '';
+  return DESCRIPTIVE_TAIL_RE.test(tail) ? head : '';
+}
+
 // `…｜Divide⧸Unite p02 Ringing Bloom` — inside a multi-track upload the real
 // song name is what follows the episode marker, not the collection title.
 function songAfterEpisode(text) {
@@ -217,10 +237,12 @@ function pickSongName(candidates, raw, episodeName, slotLeft, slotRight, strong)
       && !/[\u3400-\u9fff\u3040-\u30ff]/.test(slotLeft + slotRight);
     if (bothLatin && candidate === slotLeft) score += 2;
     if (bothLatin && artistLike) score -= 4;
-    // `霜雪千年 - 双笙&封茗囧菌`: `X&Y` on one side only is a credit list.
-    if (slotLeft && slotRight && /[&＆]/.test(candidate)) {
+    // `霜雪千年 - 双笙&封茗囧菌`, `音阙诗听×李佳思 - 流浪的猫写情诗`: an `X&Y` or
+    // `X×Y` credit list on one side means the other side is the song. Without
+    // `×` the artist line won and the row showed a singer as its title.
+    if (slotLeft && slotRight && /[&＆×✕╳]/.test(candidate)) {
       const other = candidate === slotLeft ? slotRight : slotLeft;
-      if (other && !/[&＆]/.test(other)) score -= 4;
+      if (other && !/[&＆×✕╳]/.test(other)) score -= 5;
     }
     // `「壱雫空」- MyGO!!!!!`: a song in quotation marks outranks the artist
     // that merely stands in the `Song - Artist` slot.
@@ -335,6 +357,14 @@ function cleanSongName(raw) {
   const slotNearest = localParts.length >= 3 ? localParts[localParts.length - 1] : '';
   let hasQuotedTitle = false;
 
+  // The `·` subtitle never holds the song, so its head is a strong candidate for
+  // the segments a bracket did not already settle. Strong candidates also evict
+  // the full run from the pool below, which is what keeps the tail from winning.
+  for (const value of [slotLeft, slotRight, stripNoise(stripBrackets(title))]) {
+    const head = dotTruncatedHead(value);
+    if (head && !strong.has(value)) { candidates.push(head); strong.add(head); }
+  }
+
   // Fallback 1: bracketed titles, in bracket order, skipping release/album runs.
   for (const bracket of brackets) {
     // `画风（《天行九歌》片尾曲）`: the title is cut short because a nested bracket
@@ -427,6 +457,18 @@ function cleanSongName(raw) {
 function formatTrackDisplay(item) {
   const rawTitle = item?.title || item?.name || '';
   const rawArtist = item?.artist || '';
+  // Traditional (the default) shows what the folder itself says: the file's own
+  // name and the indexed singer, with no derived album or year. The server keeps
+  // those original values in raw_* because `artist`/`album` carry the resolved
+  // ones; a row without them (an online recommendation) is already raw.
+  if (state.displayMode !== 'canonical') {
+    return {
+      title: rawTitle || '未命名歌曲',
+      artist: String(item?.raw_artist ?? rawArtist ?? '').trim(),
+      album: '',
+      year: '',
+    };
+  }
   const title = cleanSongName(rawTitle) || '未命名歌曲';
   // Detect Live/Cover tags from the original title, but never from a comment
   // tail (the `pXX` episode number marks the real track inside a compilation).
@@ -438,7 +480,12 @@ function formatTrackDisplay(item) {
   let displayTitle = title;
   if (isLive && !LIVE_RE.test(displayTitle)) displayTitle += ' (Live)';
   if ((isCover || isCoverRaw) && !COVER_RE.test(displayTitle) && !/翻唱/.test(displayTitle)) displayTitle += ' (Cover)';
-  return { title: displayTitle, artist: String(rawArtist || '').trim() };
+  return {
+    title: displayTitle,
+    artist: String(rawArtist || '').trim(),
+    album: String(item?.album || '').trim(),
+    year: yearLabel(item?.year),
+  };
 }
 
 const PLAYBACK_MIN_SECONDS = 30;
@@ -573,7 +620,10 @@ function persistLibraryOrder() {
 
 function syncLibrary(items) {
   const incoming = Array.isArray(items) ? items.map(normalizeLibraryItem) : [];
-  incoming.forEach((item) => { item.searchText = [item.title, item.artist, item.album].map((value) => String(value || '').toLocaleLowerCase()).join('\n'); });
+  // Search covers both vocabularies: in traditional mode the listener types what
+  // the folder shows, and the same row must still be findable by the resolved
+  // name (and vice versa) after switching modes.
+  incoming.forEach((item) => { item.searchText = [item.title, item.name, item.artist, item.raw_artist, item.album, item.raw_album].map((value) => String(value || '').toLocaleLowerCase()).join('\n'); });
   state.librarySequence = incoming;
   if (state.mode === 'random' && state.libraryOrder.length) {
     state.library = orderByKeys(incoming, state.libraryOrder);
@@ -623,17 +673,17 @@ function renderLibrary() {
   $('#local-count').textContent = state.library.length;
   if (!state.library.length) { list._sig = null; list.innerHTML = '<div class="empty-state">曲库还是空的。<br />从右侧推荐开始，点红心收藏喜欢的音乐。</div>'; return; }
   if (!visible.length) { list._sig = null; list.innerHTML = '<div class="empty-state">没有找到匹配的歌曲。<br />试试歌手名，或清空搜索。</div>'; return; }
-  const signature = JSON.stringify(visible.map((item) => [keyOf(item), state.currentKey === keyOf(item), $('#audio-player').paused, item.starred, item.source, item.title, item.artist, item.album, item.duration]));
+  const signature = JSON.stringify(visible.map((item) => [keyOf(item), state.currentKey === keyOf(item), $('#audio-player').paused, item.starred, item.source, item.title, item.artist, item.raw_artist, item.album, item.duration, state.displayMode]));
   if (list._sig === signature && !list._dirty) return;
   list._sig = signature;
   list._dirty = false;
   replaceList(list, visible.map((item) => {
     const playing = state.currentKey === keyOf(item);
     const display = formatTrackDisplay(item);
-    const meta = [display.artist, yearLabel(item.year), item.album || ''].filter(Boolean).join(' · ');
+    const meta = [display.artist, display.year, display.album].filter(Boolean).join(' · ');
     return `<article class="track-row library-row ${playing ? 'playing' : ''}" data-library-id="${escapeHtml(item.id)}">
       <button class="play-button" data-action="play" aria-label="${playing && !$('#audio-player').paused ? '暂停' : '播放'} ${escapeHtml(display.title)}">${playing && !$('#audio-player').paused ? '❚❚' : '▶'}</button>
-      <div class="track-main"><div class="track-title">${escapeHtml(display.title)}</div><div class="track-artist">${escapeHtml(meta)}</div></div>
+      <div class="track-main"><div class="track-title" title="${escapeHtml(display.title)}">${escapeHtml(display.title)}</div><div class="track-artist">${escapeHtml(meta)}</div></div>
       <span class="library-mark">${item.starred ? '♥' : (item.source === 'DailyMix' ? '今日' : '')}</span>
       <span class="track-duration">${duration(item.duration)}</span>
       <button class="lyrics-button" data-action="lyrics" aria-label="查看歌词">词</button>
@@ -680,14 +730,14 @@ function renderRecommendations() {
     return `<div class="wanted-row"><span>${label}</span>${badge}${retry}</div>`;
   }).join('') : '当前没有待下载或等待重试的歌曲。';
   if (!state.items.length) { list._sig = null; list.innerHTML = '<div class="empty-state">今天的推荐还在准备中。<br />先从音乐库选一首，或稍后刷新。</div>'; return; }
-  const signature = JSON.stringify(state.items.map((item) => [item.track_id, item.liked, item.disliked, itemStatus(item), state.currentKey === keyOf(item), $('#audio-player').paused, item.title, item.artist, item.reason, item.duration, item.year, pendingLikes.has(item.track_id), pendingDislikes.has(item.track_id)]));
+  const signature = JSON.stringify(state.items.map((item) => [item.track_id, item.liked, item.disliked, itemStatus(item), state.currentKey === keyOf(item), $('#audio-player').paused, item.title, item.artist, item.reason, item.duration, item.year, state.displayMode, pendingLikes.has(item.track_id), pendingDislikes.has(item.track_id)]));
   if (list._sig === signature && !list._dirty) return;
   list._sig = signature;
   list._dirty = false;
   replaceList(list, state.items.map((item) => {
     const status = itemStatus(item); const playing = state.currentKey === keyOf(item);
     const display = formatTrackDisplay(item);
-    const meta = [display.artist, yearLabel(item.year), item.reason || '为你推荐'].filter(Boolean).join(' · ');
+    const meta = [display.artist, display.year, item.reason || '为你推荐'].filter(Boolean).join(' · ');
     return `<article class="track-row ${playing ? 'playing' : ''}" data-track-id="${escapeHtml(item.track_id)}">
       <button class="play-button" data-action="play" aria-label="${playing && !$('#audio-player').paused ? '暂停' : '播放'} ${escapeHtml(display.title)}">${playing && !$('#audio-player').paused ? '❚❚' : '▶'}</button>
       <div class="track-main"><div class="track-title">${escapeHtml(display.title)}</div><div class="track-artist">${escapeHtml(meta)}</div></div>
@@ -973,7 +1023,7 @@ async function playItem(item, collection = 'library') {
   if (!source) { setPlaybackStatus(audio.paused ? '暂不可用 · 请选择其他歌曲' : '正在播放'); showToast('这首歌暂时没有可用试听源'); return; }
   const sourceUrl = new URL(source, window.location.href).href;
   const isNewTrack = state.currentKey !== key || audio.src !== sourceUrl || audio.ended;
-  state.currentKey = key; state.currentCollection = collection; updatePlayer(item); $('#library-list')._dirty = true; $('#recommendation-list')._dirty = true; render();
+  state.currentKey = key; state.currentCollection = collection; state.currentItem = item; updatePlayer(item); $('#library-list')._dirty = true; $('#recommendation-list')._dirty = true; render();
   const pt = $('#play-toggle');
   if (pt) pt.disabled = false;
   renderPlayerArt(item);
@@ -1452,7 +1502,11 @@ $('#audio-player').addEventListener('waiting', () => setPlaybackStatus('正在�
 $('#audio-player').addEventListener('playing', () => setPlaybackStatus('正在播放'));
 $('#audio-player').addEventListener('error', () => { if (state.currentKey) setPlaybackStatus('播放失败 · 点击播放重试'); });
 
-renderMode(); loadLibrary(); loadRecommendations(); loadWanted(); loadListening(); loadProviderStatus();
+renderMode(); renderDisplayModeChoice(); loadRecommendations(); loadWanted(); loadProviderStatus();
+// The display mode decides how the local names are rendered, so it is resolved
+// before the local lists are fetched. An unreachable API keeps the traditional
+// names rather than silently showing regularized ones.
+loadDisplayModeSettings().finally(() => { loadLibrary(); loadListening(); });
 setInterval(() => { if (document.hidden) return; loadLibrary(true); loadRecommendations(true); loadWanted(true); loadProviderStatus(); }, 15000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) { loadLibrary(true); loadRecommendations(true); loadWanted(true); loadProviderStatus(); } });
 $('#library-sort').value = state.librarySort;
@@ -1493,9 +1547,65 @@ if (libPanel) libPanel.addEventListener('wheel', forwardScroll, { passive: false
 function setSettingsOpen(open, returnFocus = false) {
   $('#settings-panel').hidden = !open;
   $('#settings-toggle').setAttribute('aria-expanded', String(open));
-  if (open) loadMusicLibrarySettings();
+  if (open) { loadMusicLibrarySettings(); loadDisplayModeSettings(); }
   if (returnFocus) $('#settings-toggle').focus();
 }
+
+// ======================== Display Mode ========================
+
+// Traditional ('raw') shows the folder's own names; 'canonical' (Beta) shows the
+// regularized song name and the resolved singer, album and year. The server owns
+// the choice, and switching only re-renders: the library payload already carries
+// both the raw and the resolved values.
+function applyDisplayMode(mode) {
+  const next = mode === 'canonical' ? 'canonical' : 'raw';
+  if (state.displayMode === next) { renderDisplayModeChoice(); return; }
+  state.displayMode = next;
+  $('#library-list')._dirty = true;
+  $('#recommendation-list')._dirty = true;
+  renderDisplayModeChoice();
+  if (state.currentItem) updatePlayer(state.currentItem);
+  render();
+}
+
+function renderDisplayModeChoice() {
+  document.querySelectorAll('input[name="display-mode"]').forEach((input) => {
+    input.checked = input.value === state.displayMode;
+  });
+  const note = $('#display-mode-note');
+  if (note) note.textContent = state.displayMode === 'canonical'
+    ? '当前：正则模式（Beta）· 名称来自在线识别，可能与文件夹里的原始信息不同。'
+    : '当前：传统模式 · 显示文件夹里的原始歌曲名和歌手。';
+}
+
+async function loadDisplayModeSettings() {
+  try {
+    const data = await fetchJson('/api/settings/display-mode');
+    applyDisplayMode(data?.mode);
+  } catch {
+    // Keep the traditional default rather than guessing at a regularized name.
+    renderDisplayModeChoice();
+  }
+}
+
+async function saveDisplayMode(mode) {
+  try {
+    const result = await fetchJson('/api/settings/display-mode', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode }),
+    });
+    applyDisplayMode(result?.mode || mode);
+    showToast(mode === 'canonical' ? '已切换到正则模式（Beta）' : '已切换到传统模式');
+  } catch (e) {
+    showToast(`切换失败：${e.message}`);
+    await loadDisplayModeSettings();
+  }
+}
+
+document.querySelectorAll('input[name="display-mode"]').forEach((input) => {
+  input.addEventListener('change', () => { if (input.checked) saveDisplayMode(input.value); });
+});
 
 async function loadMusicLibrarySettings() {
   try {

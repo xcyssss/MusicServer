@@ -144,7 +144,7 @@ test('a failed dislike reverts the button', async () => {
 
 test('the release year is shown only when it is actually known', async () => {
   const a = await app();
-  a.run("state.items = [{ track_id: 'a', title: 'Old Song', artist: '许嵩', year: 2009 }, { track_id: 'b', title: 'No Year', artist: '歌手', year: 0 }]; renderRecommendations();");
+  a.run("state.displayMode = 'canonical'; state.items = [{ track_id: 'a', title: 'Old Song', artist: '许嵩', year: 2009 }, { track_id: 'b', title: 'No Year', artist: '歌手', year: 0 }]; renderRecommendations();");
   const html = a.get('recommendation-list').innerHTML;
   assert.match(html, /2009 年/);
   // 0 means unknown, so no year may be invented for the second row.
@@ -155,7 +155,7 @@ test('the release year is shown only when it is actually known', async () => {
 test('the library renders a resolved release year', async () => {
   const a = await app();
   a.context.fetchHandler = url => url.includes('/api/library') ? json({ items: [{ ...library[0], year: 1999 }] }) : json({});
-  await a.run('loadLibrary(true)');
+  await a.run("state.displayMode = 'canonical'; loadLibrary(true)");
   assert.match(a.get('library-list').innerHTML, /1999 年/);
 });
 
@@ -247,8 +247,17 @@ const titleCases = [
   ['Tokyo - Owl City', 'Tokyo'],
   ['ZEAL of proud - Roselia', 'ZEAL of proud'],
   ['Steve Vai （史蒂夫 范）- For The Love Of God（上帝的爱）Live', 'Steve Vai (Live)'],
+  // `音阙诗听×李佳思 - 流浪的猫写情诗·…`: the side carrying the `×` credit is the
+  // singer list, and the `·甜到掉牙的` tail is a subtitle — the title used to come
+  // out as the artist line.
+  ['【李佳思】音阙诗听×李佳思 - 流浪的猫写情诗·甜到掉牙的静享版（无损音质+中文字幕）', '流浪的猫写情诗'],
+  // A quoted title keeps its `·`, which is why the tail rule only fires on a
+  // segment no bracket settled.
+  ['陈彼得《青玉案·元夕》百万豪装录音棚大声听', '青玉案·元夕'],
 ];
-const displayOf = (a, title) => a.run(`formatTrackDisplay(${JSON.stringify({ title, artist: 'Music', album: 'Music' })})`);
+// These cases pin the regularized (Beta) names, which is the only mode that
+// rewrites a title; traditional mode shows the file name verbatim.
+const displayOf = (a, title) => a.run(`state.displayMode = 'canonical'; formatTrackDisplay(${JSON.stringify({ title, artist: 'Music', album: 'Music' })})`);
 
 test('display titles are extracted from raw 视频 filenames', async () => {
   const a = await app();
@@ -273,5 +282,76 @@ test('a title that cannot be parsed is kept instead of becoming a placeholder', 
 test('artist metadata is passed through unchanged for the track row', async () => {
   const a = await app();
   assert.equal(displayOf(a, '光年之外').artist, 'Music');
+});
+
+// The two display modes. Traditional is the default and shows what the folder
+// says; canonical (Beta) shows the regularized name plus the resolved singer,
+// album and year. The server sends both sets of values, so switching modes is a
+// rendering decision and must not depend on a rescan or a restart.
+const reportedRow = {
+  id: 'library-love',
+  title: '在百万豪装录音棚大声听 爱情公寓3ost 陈韵若&陈每文《爱的回归线》【Hi-res】',
+  artist: '陈韵若&陈每文',
+  album: '爱情公寓3 OST',
+  year: 2012,
+  raw_artist: 'JLRS-LeoFM',
+  raw_album: 'B站收藏',
+  duration: 240,
+  stream_url: '/api/library/library-love/stream',
+  local_status: 'LOCAL',
+};
+
+test('traditional mode shows the folder names and hides every derived field', async () => {
+  const a = await app();
+  a.context.row = reportedRow;
+  a.run("state.displayMode = 'raw'; syncLibrary([row]); renderLibrary();");
+  const html = a.get('library-list').innerHTML;
+  // The file's own name, verbatim.
+  assert.match(html, /爱情公寓3ost 陈韵若&amp;陈每文《爱的回归线》【Hi-res】/);
+  // The indexed value (for a Bilibili download, the uploader), not the resolved singer.
+  assert.match(html, /JLRS-LeoFM/);
+  assert.doesNotMatch(html, /2012 年/);
+  assert.doesNotMatch(html, /爱情公寓3 OST/);
+});
+
+test('canonical mode shows the regularized name, the resolved singer, album and year', async () => {
+  const a = await app();
+  a.context.row = reportedRow;
+  a.run("state.displayMode = 'canonical'; syncLibrary([row]); renderLibrary();");
+  const html = a.get('library-list').innerHTML;
+  assert.match(html, /爱的回归线/);
+  assert.doesNotMatch(html, /爱情公寓3ost/);
+  assert.match(html, /陈韵若&amp;陈每文/);
+  assert.match(html, /爱情公寓3 OST/);
+  assert.match(html, /2012 年/);
+});
+
+test('switching modes only re-renders: the row keeps both vocabularies searchable', async () => {
+  const a = await app();
+  a.context.row = reportedRow;
+  a.run("syncLibrary([row]); renderLibrary();");
+  // Searching by the uploader name still finds the row in the default mode.
+  a.run("state.searchQuery = 'jlrs'; renderLibrary();");
+  assert.match(a.get('library-list').innerHTML, /爱的回归线/);
+  // ...and so does the resolved singer, without refetching anything.
+  a.run("state.searchQuery = '陈韵若'; renderLibrary();");
+  assert.match(a.get('library-list').innerHTML, /爱的回归线/);
+});
+
+test('saving the display mode persists it through the API and applies it locally', async () => {
+  const a = await app();
+  a.context.fetchHandler = url => url === '/api/settings/display-mode' ? json({ accepted: true, mode: 'canonical' }) : json({});
+  await a.run("saveDisplayMode('canonical')");
+  const put = a.requests.find(r => r.url === '/api/settings/display-mode' && r.options.method === 'PUT');
+  assert.ok(put, 'the mode was written through the API');
+  assert.equal(JSON.parse(put.options.body).mode, 'canonical');
+  assert.equal(a.run('state.displayMode'), 'canonical');
+});
+
+test('an unreadable display-mode setting keeps the traditional names', async () => {
+  const a = await app();
+  a.context.fetchHandler = () => ({ ok: false, status: 503, statusText: 'ERR', json: async () => ({}) });
+  await a.run('loadDisplayModeSettings()');
+  assert.equal(a.run('state.displayMode'), 'raw');
 });
 

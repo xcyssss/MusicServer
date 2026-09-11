@@ -96,4 +96,44 @@ Describe 'Configurable music library' {
         (Get-Content -LiteralPath $toml -Raw -Encoding UTF8).Trim() | Should Be 'MusicFolder = "E:\\音乐\\My Music"'
         (Sync-NavidromeMusicFolder -NdConfigPath $toml -NewMusicFolder $custom) | Should Be $false
     }
+
+    Context 'library display mode' {
+        It 'defaults to the traditional names when nothing was ever chosen' {
+            (Get-LibraryDisplayModeDb) | Should Be 'raw'
+            (Get-AppSettingDb -Key 'library_display_mode') | Should BeNullOrEmpty
+        }
+
+        It 'round-trips the canonical choice' {
+            Set-LibraryDisplayModeDb -Mode 'canonical'
+            (Get-LibraryDisplayModeDb) | Should Be 'canonical'
+            (Get-AppSettingDb -Key 'library_display_mode') | Should Be 'canonical'
+            Set-LibraryDisplayModeDb -Mode 'raw'
+            (Get-LibraryDisplayModeDb) | Should Be 'raw'
+        }
+
+        It 'falls back to the traditional names for a stored value it does not know' {
+            # A value written by a future or corrupted build must not select a mode
+            # this build cannot render, and must never break the library read.
+            Set-AppSettingDb -Key 'library_display_mode' -Value 'fancy'
+            (Get-LibraryDisplayModeDb) | Should Be 'raw'
+            Remove-AppSettingDb -Key 'library_display_mode'
+            (Get-LibraryDisplayModeDb) | Should Be 'raw'
+        }
+
+        It 'refuses to store a mode outside the vocabulary' {
+            { Set-LibraryDisplayModeDb -Mode 'fancy' } | Should Throw
+            (Get-LibraryDisplayModeDb) | Should Be 'raw'
+        }
+
+        It 'choosing a display mode never touches the music library or its files' {
+            $default = Get-DefaultMusicDir -AppHome $script:Config.AppHome
+            New-Item -ItemType Directory -Force -Path $default | Out-Null
+            $song = Join-Path $default 'keep-me.mp3'
+            Set-Content -LiteralPath $song -Value 'audio' -Encoding Ascii
+            Set-LibraryDisplayModeDb -Mode 'canonical'
+            Apply-ConfiguredMusicDir -Config $script:Config | Out-Null
+            (Test-Path -LiteralPath $song -PathType Leaf) | Should Be $true
+            $script:Config.MusicDir | Should Be ([IO.Path]::GetFullPath($default))
+        }
+    }
 }
