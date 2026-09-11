@@ -49,6 +49,13 @@ $startupPhases['module_imports'] = $startupClock.Elapsed.TotalMilliseconds
 
 $Config = New-MusicServerConfig -Root $Root
 Initialize-MusicServerState -Config $Config -SkipLibrary
+# The API is spawned with redirected stdio, so Write-Host output is discarded.
+# Runtime diagnostics must therefore go to a file under APP_HOME\logs.
+$ApiLog = Join-Path $Config.LogDir 'musicserver-api.log'
+function Write-ApiLog {
+    param([string]$Message)
+    Write-MusicServerLog -Path $ApiLog -Message $Message
+}
 $DbPath = Join-Path $Config.StateDir 'musicserver.db'
 $SqliteExe = [string]$Config.Sqlite
 if (-not $SqliteExe -or -not (Test-Path -LiteralPath $SqliteExe)) {
@@ -57,9 +64,6 @@ if (-not $SqliteExe -or -not (Test-Path -LiteralPath $SqliteExe)) {
     else {
         $cmd = Get-Command sqlite3 -ErrorAction SilentlyContinue
         if ($cmd) { $SqliteExe = $cmd.Source }
-        elseif (Test-Path -LiteralPath 'C:\Users\dell\anaconda3\Library\bin\sqlite3.exe') {
-            $SqliteExe = 'C:\Users\dell\anaconda3\Library\bin\sqlite3.exe'
-        }
     }
 }
 if (-not (Test-Path -LiteralPath $SqliteExe) -and -not (Get-Command $SqliteExe -ErrorAction SilentlyContinue)) {
@@ -74,6 +78,7 @@ Apply-ConfiguredMusicDir -Config $Config
 Initialize-MusicServerLibrary -Config $Config | Out-Null
 $startupPhases['config_library'] = $startupClock.Elapsed.TotalMilliseconds
 Write-Host ("API v2 ready | db={0} | music_dir={1} | migration=NOT_REQUESTED" -f $DbPath, $Config.MusicDir) -ForegroundColor Green
+Write-ApiLog ("API v2 ready | db={0} | music_dir={1}" -f $DbPath, $Config.MusicDir)
 
 function Send-Json([psobject]$Context) {
     $body = $Context.Body
@@ -215,10 +220,15 @@ function Invoke-SqliteJson {
 
 function Read-NavidromeLibrary {
     param([AllowEmptyString()][string]$WhereSql = '', [AllowEmptyString()][string[]]$Params = @())
+    # `missing` is Navidrome's own bookkeeping and only a scan refreshes it. The
+    # packaged runtime does not ship Navidrome, so on a machine without it every
+    # row stays flagged missing for ever and filtering on the flag hid the whole
+    # library. Callers verify the file on disk instead, which is the fact that
+    # actually matters.
     if ($WhereSql) {
-        $sql = "SELECT id, title AS name, artist, album, path, duration, track_number AS track, created_at AS addedto, updated_at AS collectionat FROM media_file WHERE missing = 0 AND $WhereSql;"
+        $sql = "SELECT id, title AS name, artist, album, path, duration, track_number AS track, created_at AS addedto, updated_at AS collectionat FROM media_file WHERE $WhereSql;"
     } else {
-        $sql = 'SELECT id, title AS name, artist, album, path, duration, track_number AS track, created_at AS addedto, updated_at AS collectionat FROM media_file WHERE missing = 0;'
+        $sql = 'SELECT id, title AS name, artist, album, path, duration, track_number AS track, created_at AS addedto, updated_at AS collectionat FROM media_file;'
     }
     return @(Invoke-SqliteJson -DbPath $Config.NdDb -Sql $sql -Params $Params)
 }
@@ -307,6 +317,46 @@ function New-ListeningLibraryItem {
     }
 }
 
+# A flat library keeps every file directly in MusicDir. The library root's own
+# name is not an artist, and reporting it as one is why every row used to show
+# the same placeholder ("Music") instead of a name.
+function Get-LibraryFolderArtist {
+    param([Parameter(Mandatory)][string]$File)
+    $parent = Split-Path -Parent $File
+    if (-not $parent) { return '' }
+    $root = [string]$Config.MusicDir
+    if (-not [string]::IsNullOrWhiteSpace($root)) {
+        try {
+            if ([IO.Path]::GetFullPath($parent).TrimEnd('\') -ieq [IO.Path]::GetFullPath($root).TrimEnd('\')) { return '' }
+        } catch { }
+    }
+    return [string](Split-Path -Leaf $parent)
+}
+
+# The indexed artist of a Bilibili download is the uploader, not the singer. The
+# launcher resolves the real singer in the background and records it in state, so
+# every library surface reads that cache here. Fail-soft: a resolution that has
+# not run yet leaves the index value in place rather than blanking it.
+function Add-ResolvedArtist {
+    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Items)
+    if (@($Items).Count -eq 0) { return @() }
+    $resolved = @{}
+    try { $resolved = Get-LocalTrackArtistMapDb } catch { $resolved = @{} }
+    # Channel branding is a prefix shared by many titles, so it is only
+    # recognisable from the whole set; a single-item lookup gets no prefixes.
+    $prefixes = @()
+    try { $prefixes = @(Get-SharedTitlePrefixes -Titles @($Items | ForEach-Object { [string](Get-OptionalProperty $_ 'title' '') })) } catch { $prefixes = @() }
+    foreach ($item in @($Items)) {
+        $key = Get-MusicServerPathKey -Path ([string](Get-OptionalProperty $item 'file' ''))
+        $row = if ($key -and $resolved.ContainsKey($key)) { $resolved[$key] } else { $null }
+        $decision = Resolve-DisplayArtist -Title ([string](Get-OptionalProperty $item 'title' '')) -Indexed ([string](Get-OptionalProperty $item 'artist' '')) -CachedRow $row -KnownPrefixes $prefixes
+        if (-not $decision) { continue }
+        if ($decision.artist) { $item.artist = $decision.artist }
+        if ($decision.album) { $item.album = $decision.album }
+    }
+    return @($Items)
+}
+
 function Get-LocalListeningItems {
     $canonicalByLocalId = Get-LocalCanonicalTrackMap
     $items = New-Object System.Collections.ArrayList
@@ -335,7 +385,7 @@ function Get-LocalListeningItems {
             if ($seenFiles.ContainsKey($fileKey)) { continue }
             $seenFiles[$fileKey] = $true
             $title = [System.IO.Path]::GetFileNameWithoutExtension($file)
-            $artist = [string](Split-Path -Leaf (Split-Path -Parent $file))
+            $artist = Get-LibraryFolderArtist -File $file
             $addedAt = ''
             try { $addedAt = (Get-Item -LiteralPath $file).LastWriteTime.ToString('o') } catch {}
             $row = [pscustomobject]@{ id = ''; name = $title; artist = $artist; album = $artist; duration = 0; track = 0; addedto = $addedAt; collectionat = $addedAt }
@@ -343,7 +393,7 @@ function Get-LocalListeningItems {
             [void]$items.Add((New-ListeningLibraryItem -Row $row -File $file -Source 'local' -LocalId $localId -CanonicalByLocalId $canonicalByLocalId))
         }
     }
-    return @($items)
+    return @(Add-ResolvedArtist -Items @($items))
 }
 
 function Get-LocalListeningItem {
@@ -404,14 +454,19 @@ function Get-LibraryItemResponse {
             $file = [string]$row[0].path
             if (-not [System.IO.Path]::IsPathRooted($file)) { $file = Join-Path $Config.MusicDir $file }
             $file = [System.IO.Path]::GetFullPath($file)
-            return [pscustomobject]@{
-                id = $LocalId; source = 'navidrome'; provider = 'navidrome'
-                name = [string]$row.name; artist = [string]$row.artist; album = [string]$row.album
-                duration = [int]$row.duration; track = [int]$row.track
-                addedto = [string]$row.addedto; collectionat = [string]$row.collectionat
-                path = [string]$row.path; file = $file
-                stream_url = "/api/library/$LocalId/stream"
-                lyrics_url = "/api/library/$LocalId/lyrics"
+            # An index row can outlive its file, so only serve it while that file
+            # is still there.
+            if ([IO.File]::Exists($file)) {
+                $item = [pscustomobject]@{
+                    id = $LocalId; source = 'navidrome'; provider = 'navidrome'
+                    name = [string]$row.name; artist = [string]$row.artist; album = [string]$row.album
+                    duration = [int]$row.duration; track = [int]$row.track
+                    addedto = [string]$row.addedto; collectionat = [string]$row.collectionat
+                    path = [string]$row.path; file = $file
+                    stream_url = "/api/library/$LocalId/stream"
+                    lyrics_url = "/api/library/$LocalId/lyrics"
+                }
+                return @(Add-ResolvedArtist -Items @($item))[0]
             }
         }
     }
@@ -420,14 +475,15 @@ function Get-LibraryItemResponse {
         if ($found) {
             $lrcPath = Get-LrcPath -Path $found
             $name = [System.IO.Path]::GetFileNameWithoutExtension($found)
-            $artist = [string](Get-Item -LiteralPath (Split-Path -Parent $found)).Name
-            return [pscustomobject]@{
+            $artist = Get-LibraryFolderArtist -File $found
+            $item = [pscustomobject]@{
                 id = $LocalId; source = 'local'; provider = 'navidrome'
                 name = $name; artist = $artist; album = $artist; duration = 0; track = 0
                 addedto = ''; collectionat = ''; path = $found; file = $found
                 stream_url = "/api/library/$LocalId/stream"
                 lyrics_url = if ($lrcPath) { "/api/library/$LocalId/lyrics" } else { '' }
             }
+            return @(Add-ResolvedArtist -Items @($item))[0]
         }
     }
     # Fallback: track linked by today's DB recommendations.
@@ -627,18 +683,20 @@ function Resolve-RouteLikeTransaction {
     return @{ Result = $result; Wanted = $wanted }
 }
 
+$script:requestCount = 0
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Identity.psm1') -Force
+$script:BuildMarker = Get-MusicServerBuildIdentity -Root $PSScriptRoot
+$startupPhases['build_identity'] = $startupClock.Elapsed.TotalMilliseconds
+
 $listener = [System.Net.HttpListener]::new()
 $prefix = $Prefix
 if (-not $prefix.EndsWith('/')) { $prefix += '/' }
 $listener.Prefixes.Add($prefix)
 $listener.Start()
 $startupPhases['listener_start'] = $startupClock.Elapsed.TotalMilliseconds
-Write-Host "API listening on $($listener.Prefixes[0])" -ForegroundColor Cyan
+Write-Host "API listening on $prefix" -ForegroundColor Cyan
+Write-ApiLog ("API listening on {0} | marker={1}" -f $prefix, $script:BuildMarker)
 
-$script:requestCount = 0
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.Identity.psm1') -Force
-$script:BuildMarker = Get-MusicServerBuildIdentity -Root $PSScriptRoot
-$startupPhases['build_identity'] = $startupClock.Elapsed.TotalMilliseconds
 # /api/today is recomputed per request and costs ~5s (each DB read spawns a
 # sqlite3 subprocess; 20 tracks x several reads). The UI polls it every 15s,
 # and because the UI proxies on a single thread, a slow /api/today blocks
@@ -660,6 +718,7 @@ while ($true) {
     $script:requestCount++
     $script:RequestSqliteStart = Get-MusicServerSqliteInvocationCount
     Write-Host ("[{0}] {1} {2}  (req #{3})" -f [DateTime]::Now.ToString('HH:mm:ss'), $method, $path, $script:requestCount) -ForegroundColor Gray
+    Write-ApiLog ("{0} {1} (req #{2})" -f $method, $path, $script:requestCount)
     $startTime = [DateTime]::UtcNow
     try {
         $bodyText = (Read-MusicServerJsonRequest -Request $request).Text
@@ -903,7 +962,7 @@ while ($true) {
         }
         elseif ($method -eq 'GET' -and $path -eq '/api/settings/music-library') {
             $currentPath = $Config.MusicDir
-            $defaultPath = Get-DefaultMusicDir -Root $Config.Root
+            $defaultPath = Get-DefaultMusicDir -AppHome $Config.AppHome
             $isDefault = ($currentPath -eq $defaultPath)
             $available = (Test-Path -LiteralPath $currentPath -PathType Container)
             $source = if ($env:MUSICSERVER_MUSIC_DIR) { 'environment' } elseif (-not $isDefault) { 'database' } else { 'default' }
@@ -957,7 +1016,7 @@ while ($true) {
         }
         elseif ($method -eq 'DELETE' -and $path -eq '/api/settings/music-library') {
             $previousPath = $Config.MusicDir
-            $defaultPath = Get-DefaultMusicDir -Root $Config.Root
+            $defaultPath = Get-DefaultMusicDir -AppHome $Config.AppHome
             Remove-AppSettingDb -Key 'music_library_path'
             Apply-ConfiguredMusicDir -Config $Config
             try { Sync-NavidromeMusicFolder -NdConfigPath $Config.NdConfig -NewMusicFolder $Config.MusicDir | Out-Null } catch {}
@@ -995,6 +1054,7 @@ while ($true) {
         elseif ($errMsg -match 'LIBRARY_NOT_FOUND') { $statusCode = 404 }
         elseif ($errMsg -match 'Sqlite|sqlite|NOT\s+NULL|constraint|no such table|database is locked') { $statusCode = 500 }
         Write-Host "  ERROR: $errMsg" -ForegroundColor Red
+        Write-ApiLog ("ERROR {0} {1} status={2} {3}" -f $method, $path, $statusCode, $errMsg)
         $errorCode = if ($inputError) { [string]$_.Exception.Data['ErrorCode'] } elseif ($statusCode -eq 404) { 'NOT_FOUND' } else { 'INTERNAL_ERROR' }
         try {
             if ($inputError) { $Context.Response.KeepAlive = $false }
@@ -1004,6 +1064,7 @@ while ($true) {
     } finally {
         $elapsed = ([DateTime]::UtcNow - $startTime).TotalMilliseconds
         Write-Host ("  done in {0:N0} ms" -f $elapsed) -ForegroundColor DarkGray
+        if ($elapsed -ge 3000) { Write-ApiLog ("SLOW {0} {1} took {2:N0} ms" -f $method, $path, $elapsed) }
     }
     if ($Once) { break }
 }

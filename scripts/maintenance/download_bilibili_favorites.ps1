@@ -12,7 +12,7 @@
 .PARAMETER OutputDir
     音频输出目录，默认 <configured MusicServer library>
 .EXAMPLE
-    .\scripts\maintenance\download_bilibili_favorites.ps1 -FavoritesUrl "https://www.bilibili.com/medialist/detail/ml1234567890" -CookieFile "cookies.txt"
+    .\scripts\maintenance\download_bilibili_favorites.ps1 -FavoritesUrl "https://www.bilibili.com/medialist/detail/ml1234567890" -CookieFile "$env:MUSICSERVER_APP_HOME\secrets\cookies.txt"
 #>
 
 param(

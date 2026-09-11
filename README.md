@@ -14,7 +14,8 @@ Tauri APP / WebView2
 127.0.0.1:8787  music_api.ps1
         │
         ├─ SQLite 状态库（唯一运行时真源）
-        ├─ Music/ 本地音乐
+        ├─ APP_HOME 持久化状态
+        ├─ MusicDir 独立音乐库
         ├─ Wanted worker
         └─ Navidrome / yt-dlp / ffmpeg 等本机集成
 ```
@@ -44,13 +45,13 @@ src-tauri/target/release/bundle/nsis/*.exe
 
 ### 可移植运行时
 
-发布版 **不再依赖 `CARGO_MANIFEST_DIR` 或编译机源码路径**。安装后的 APP 从 bundle resources 读取 runtime，并同步到可写目录：
+发布版 **不再依赖 `CARGO_MANIFEST_DIR`、编译机源码路径或可执行文件所在 checkout**。安装后的 APP 从 bundle resources 读取 runtime，并同步到可写目录：
 
 ```text
 %LOCALAPPDATA%\com.musicserver.desktop\
 ```
 
-可通过环境变量 `MUSICSERVER_APP_HOME` 覆盖该位置。为了不破坏现有开发机数据，从源码目录本地构建并直接运行的 EXE 会在运行时识别 checkout，并继续使用该 checkout 下已有的 `Music/`、`DailyMix_data/`、`Navidrome/` 等数据；这里不包含任何编译时绝对路径。
+可通过环境变量 `MUSICSERVER_APP_HOME` 覆盖该位置。无论 APP 从安装目录、源码 checkout 还是临时目录启动，APP_HOME 都只由显式环境变量或 Windows 默认目录决定；repository 中是否存在 `Music/`、`DailyMix_data/`、`Navidrome/` 不会改变数据路径。
 
 安装包内包含 SQLite，因此 UI/API 和状态库启动不要求用户另装 sqlite3。Bilibili 下载、转码和 Navidrome 集成仍分别需要 yt-dlp、ffmpeg/ffprobe、Navidrome；这些大型/外部组件不塞进桌面 runtime。
 ## 音乐库位置
@@ -67,6 +68,49 @@ src-tauri/target/release/bundle/nsis/*.exe
 
 歌词继续采用邻接文件约定：`Song.mp3` 与 `Song.lrc` 放在同一目录且 basename 相同。修改音乐库后需要重启 APP，让 UI/API/worker/Navidrome 全部使用新的目录。
 
+## 数据与源码的边界
+
+MusicServer 将三个概念严格分开：
+
+```text
+Repository = 源码、测试、文档和可重新生成的 build workspace
+APP_HOME   = SQLite、DailyMix、Navidrome 数据、日志、备份和 secrets
+MusicDir   = 用户可独立配置的音乐库
+```
+
+APP_HOME 下的默认持久化布局为：
+
+```text
+<APP_HOME>\
+├─ DailyMix_data\state\musicserver.db
+├─ Navidrome\Data\navidrome.db
+├─ Navidrome\navidrome.toml
+├─ logs\
+├─ backups\
+├─ output\
+└─ secrets\cookies.txt
+```
+
+路径解析规则是：`MUSICSERVER_APP_HOME` -> `%LOCALAPPDATA%\com.musicserver.desktop`；`MusicDir` 则按 `MUSICSERVER_MUSIC_DIR` -> SQLite `app_settings.music_library_path` -> `<APP_HOME>\Music` 解析。`DailyDir` 始终是 `<MusicDir>\DailyMix`。配置音乐库路径不会移动、复制或删除歌曲；配置的目录暂时不存在时视为不可用。
+
+源码 checkout 可以被 `git clean -fdx` 清空，也可以被删除后重新 clone。开发机若要使用已有持久化数据，请在启动前设置当前 PowerShell 会话：
+
+```powershell
+$env:MUSICSERVER_APP_HOME = 'E:\Project\MusicSever_app'
+```
+
+需要长期保存时可设置 User scope（不会修改 Machine scope）；新开的 PowerShell 才会自动继承：
+
+```powershell
+[Environment]::SetEnvironmentVariable('MUSICSERVER_APP_HOME', 'E:\Project\MusicSever_app', 'User')
+```
+
+如果需要把旧 checkout 中的 `DailyMix_data`、Navidrome 数据、日志、备份、Cookie 和歌词报告迁移到 APP_HOME，可使用安全迁移脚本。它要求 Navidrome 已停止、拒绝非空目标目录，并在逐项校验文件数量/大小/SHA-256 后才删除旧源文件；不会移动 repository `Music` 或外部音乐库：
+
+```powershell
+.\scripts\migrate_to_app_home.ps1 -AppHome $env:MUSICSERVER_APP_HOME
+```
+
 ## 开发环境
 
 项目仍以 Windows PowerShell 5.1 为正式脚本兼容基线。常用外部工具可从 PATH 找到，也可用环境变量覆盖：
@@ -77,6 +121,7 @@ MUSICSERVER_YTDLP
 MUSICSERVER_FFMPEG
 MUSICSERVER_FFPROBE
 MUSICSERVER_APP_HOME
+MUSICSERVER_NAVIDROME
 ```
 
 含中文的 `.ps1` / `.psm1` 必须保持 UTF-8 BOM；仓库 `.editorconfig` 已固定这一规则。
@@ -133,6 +178,13 @@ MusicServer/
 
 # 单曲歌词修复
 .\scripts\maintenance\fix_one_lyric.ps1 -FilePattern "*歌曲名*" -Search "歌曲名"
+```
+
+安装版桌面 APP 会自动注册每日推荐计划任务（`MusicServer_DailyRecommend`，每天 07:00，动作绑定 APP_HOME），并在启动时补跑当天尚未生成的推荐；如需自定义时间或移除：
+
+```powershell
+.\register_daily_recommend.ps1 -Time 08:30
+.\register_daily_recommend.ps1 -Unregister
 ```
 
 ## CI 与发布门禁

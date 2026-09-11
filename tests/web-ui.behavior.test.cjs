@@ -109,6 +109,37 @@ test('like writes serialize per track and stale recommendations cannot undo the 
   assert.match(a.get('wanted-list').innerHTML, /One/);
 });
 
+test('a queued download stays visible after the daily list no longer contains it', async () => {
+  const a = await app();
+  a.run("state.items = []; state.wanted = [{ track_id: 'zeal', state: 'RETRY_WAIT', attempt_count: 4, max_attempts: 5, title: 'ZEAL of proud', artist: 'Roselia' }]; renderRecommendations();");
+  assert.match(a.get('wanted-list').innerHTML, /ZEAL of proud/);
+  assert.match(a.get('wanted-list').innerHTML, /等待重试/);
+  assert.equal(a.get('queue-count').textContent, 1);
+  assert.equal(a.get('wanted-count').textContent, 1);
+
+  a.run("state.wanted = []; state.items = [{ track_id: 'zeal', title: 'ZEAL of proud', liked: false }]; renderRecommendations();");
+  assert.doesNotMatch(a.get('wanted-list').innerHTML, /ZEAL of proud/);
+  assert.equal(a.get('queue-count').textContent, 0);
+});
+
+test('a failed queue entry offers a retry that reposts it to the queue', async () => {
+  const a = await app();
+  a.run("state.items = []; state.wanted = [{ track_id: 'zeal', state: 'UNAVAILABLE', title: 'ZEAL of proud', artist: 'Roselia' }]; renderRecommendations();");
+  assert.match(a.get('wanted-list').innerHTML, /data-action="wanted-retry"/);
+  assert.match(a.get('wanted-list').innerHTML, /暂不可用/);
+
+  a.run("state.wanted = [{ track_id: 'zeal', state: 'DOWNLOADING', title: 'ZEAL of proud', artist: 'Roselia' }]; renderRecommendations();");
+  assert.doesNotMatch(a.get('wanted-list').innerHTML, /data-action="wanted-retry"/);
+
+  a.run("state.wanted = [{ track_id: 'zeal', state: 'UNAVAILABLE', title: 'ZEAL of proud', artist: 'Roselia' }]; renderRecommendations();");
+  const button = { disabled: false, getAttribute: name => (name === 'data-action' ? 'wanted-retry' : 'zeal') };
+  await a.get('wanted-list').emit('click', { target: button });
+  const retry = a.requests.find(r => r.url === '/api/wanted/zeal/retry');
+  assert.ok(retry, 'retry request was issued');
+  assert.equal(retry.options.method, 'POST');
+  assert.ok(a.requests.some(r => r.url === '/api/wanted'), 'queue refreshed after retry');
+});
+
 test('switching tracks ignores slow hydration and audio does not wait for lyrics', async () => {
   const a = await app(); const hydration = deferred(); const lyrics = deferred();
   a.context.fetchHandler = url => url === '/api/tracks/slow' ? hydration.promise : lyrics.promise;
@@ -133,7 +164,8 @@ test('obsolete lyrics requests are aborted and cannot replace newer lyrics', asy
 test('hidden windows skip data polling and resume without polling listening statistics', async () => {
   const a = await app(); a.context.document.hidden = true; a.intervals[0](); await settle(); assert.equal(a.requests.length, 0);
   a.context.document.hidden = false; a.events.get('visibilitychange')(); await settle();
-  assert.equal(a.requests.length, 3); assert.equal(a.requests.some(r => r.url.includes('/listening/')), false);
+  assert.equal(a.requests.length, 4); assert.equal(a.requests.some(r => r.url.includes('/listening/')), false);
+  assert.equal(a.requests.some(r => r.url === '/api/wanted'), true);
 });
 
 test('JSON deadline aborts a stalled response body', async () => {
@@ -144,3 +176,52 @@ test('JSON deadline aborts a stalled response body', async () => {
   for (const timer of a.timers.values()) if (timer.delay === 12000) timer.fn();
   await assertion;
 });
+
+// Song titles in this library are raw 视频 filenames, so the display formatter
+// has to find the song without inventing or truncating one. These cases are the
+// real filenames that the previous "first bracket wins" rule got wrong.
+const titleCases = [
+  ['「猫头鹰之城」Fireflies 萤火虫 - Owl City 百万级装备试听【Hi-Res】', 'Fireflies 萤火虫'],
+  ['【中字4K·HiRes】「壱雫空」- MyGO!!!!!｜Divide⧸Unite p01 「壱雫空」', '壱雫空'],
+  ['【附歌词中字】Roselia「Fear Nothing」【FULL】', 'Fear Nothing'],
+  ['【附歌词中字】Roselia -「Dazzle the Destiny」【FULL】', 'Dazzle the Destiny'],
+  ['【附歌词中字】Roselia 14th single—「Call the shots」FULL', 'Call the shots'],
+  ['【附中日歌词】7.23更新 Roselia 9th single「FIRE BIRD」 p02 Ringing Bloom', 'Ringing Bloom'],
+  ['《明日方舟》EP - What an Electromagnetic Night', 'What an Electromagnetic Night'],
+  ['BEYOND《冷雨夜》百万豪装录音棚大声听', '冷雨夜'],
+  ['『4K ⧸60』动态水印《鸣潮》先约电台EP2.8——千咲《破茧之华》', '破茧之华'],
+  ['在百万豪装录音棚大声听 陈奕迅《富士山下》【Hi-res】', '富士山下'],
+  ['『不可说』金铃过处, 片甲不留丨《百妖谱》主题曲翻唱', '不可说 (Cover)'],
+  ['后弦《画风（《天行九歌》片尾曲）》百万豪装录音棚大声听', '画风'],
+  ['小树 - 向日葵人生-动漫《我叫MT 第三季》', '向日葵人生'],
+  ['Tokyo - Owl City', 'Tokyo'],
+  ['ZEAL of proud - Roselia', 'ZEAL of proud'],
+  ['Steve Vai （史蒂夫 范）- For The Love Of God（上帝的爱）Live', 'Steve Vai (Live)'],
+];
+const displayOf = (a, title) => a.run(`formatTrackDisplay(${JSON.stringify({ title, artist: 'Music', album: 'Music' })})`);
+
+test('display titles are extracted from raw 视频 filenames', async () => {
+  const a = await app();
+  for (const [raw, expected] of titleCases) {
+    assert.equal(displayOf(a, raw).title, expected, `raw: ${raw}`);
+  }
+});
+
+test('distinct songs never collapse onto one display title', async () => {
+  const a = await app();
+  const titles = titleCases.map(([raw]) => displayOf(a, raw).title);
+  assert.equal(new Set(titles).size, titles.length);
+});
+
+test('a title that cannot be parsed is kept instead of becoming a placeholder', async () => {
+  const a = await app();
+  const raw = '邦多利三次元乐队的实力如何？如果我拿出这一场，相信每一位观众都会被ras的演奏实力折服';
+  assert.equal(displayOf(a, raw).title, raw);
+  assert.doesNotMatch(displayOf(a, raw).title, /未命名歌曲/);
+});
+
+test('artist metadata is passed through unchanged for the track row', async () => {
+  const a = await app();
+  assert.equal(displayOf(a, '光年之外').artist, 'Music');
+});
+

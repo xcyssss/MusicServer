@@ -31,7 +31,7 @@ function Resolve-MusicServerMaintenanceContext {
     }
 
     if ([string]::IsNullOrWhiteSpace($effective)) {
-        $effective = Get-DefaultMusicDir -Root $config.Root
+        $effective = Get-DefaultMusicDir -AppHome $config.AppHome
     }
     $config.MusicDir = [IO.Path]::GetFullPath($effective)
     $config.DailyDir = Join-Path $config.MusicDir 'DailyMix'
@@ -41,5 +41,6 @@ function Resolve-MusicServerMaintenanceContext {
         Config = $config
         MusicDir = $config.MusicDir
         StateDb = Join-Path $config.StateDir 'musicserver.db'
+        LyricsReport = $config.LyricsReport
     }
 }

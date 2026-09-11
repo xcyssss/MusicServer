@@ -106,35 +106,15 @@ fn resolve_bundled_runtime(resource_dir: Option<PathBuf>) -> Option<PathBuf> {
     None
 }
 
-/// A locally built release executable still lives below
-/// <checkout>/src-tauri/target/... . Discover that checkout from the executable
-/// location at runtime so existing development installs keep using their current
-/// Music/, Navidrome/ and state data without embedding a compile-time path.
-fn find_development_checkout() -> Option<PathBuf> {
-    let executable = env::current_exe().ok()?;
-    for ancestor in executable.ancestors() {
-        if has_launcher(ancestor)
-            && ancestor.join("web").is_dir()
-            && ancestor.join("src-tauri").is_dir()
-        {
-            return Some(ancestor.to_path_buf());
-        }
-    }
-    None
-}
-
-/// Stable writable application home. An explicit environment override wins.
-/// Local checkout builds retain the historical checkout root; installed builds
-/// use an identifier-scoped LOCALAPPDATA directory that cannot collide with the
-/// NSIS installation directory.
+/// Stable writable application home. An explicit environment override wins;
+/// otherwise use the identifier-scoped LOCALAPPDATA directory. The executable
+/// location is deliberately not consulted, so a checkout can be deleted or
+/// replaced without changing persistent state.
 fn resolve_app_home() -> PathBuf {
     if let Some(configured) = env::var_os(APP_HOME_ENV) {
         if !configured.is_empty() {
             return PathBuf::from(configured);
         }
-    }
-    if let Some(checkout) = find_development_checkout() {
-        return checkout;
     }
     if let Some(local_app_data) = env::var_os("LOCALAPPDATA") {
         return PathBuf::from(local_app_data).join(PACKAGED_APP_HOME_DIR);
@@ -472,11 +452,30 @@ fn open_folder(path: String) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+async fn pick_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.dialog()
+        .file()
+        .set_title("选择音乐文件夹")
+        .pick_folder(move |result| {
+            let _ = tx.send(result);
+        });
+    let result = rx
+        .recv()
+        .map_err(|e| format!("Dialog channel error: {e}"))?;
+    match result {
+        Some(path) => Ok(Some(path.to_string())),
+        None => Ok(None),
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![open_folder])
+        .invoke_handler(tauri::generate_handler![open_folder, pick_folder])
         .manage(AppState {
             child: Mutex::new(None),
         })

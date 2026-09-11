@@ -62,7 +62,9 @@ The packaged runtime contains only what the desktop APP needs to boot its own UI
 - `watchdog_ui.ps1`
 - `music_api.ps1`
 - `wanted_worker.ps1`
-- Core/Database/Http/State/Providers/Identity modules
+- `daily_recommend.ps1`
+- `register_daily_recommend.ps1`
+- Core/Database/Http/State/Providers/Identity/Migration modules
 - `web/`
 - a real `sqlite3.exe`
 
@@ -77,7 +79,7 @@ Installed builds default to:
 for the writable runtime/data home. `MUSICSERVER_APP_HOME` can override it.
 The music library is independently configurable. Runtime resolution order is `MUSICSERVER_MUSIC_DIR` -> SQLite `app_settings.music_library_path` -> `<APP_HOME>\Music`. All runtime entry points must use the same resolved `Config.MusicDir`, and `Config.DailyDir` must always be `<MusicDir>\DailyMix`. A missing configured custom path is an unavailable library, not a signal to fall back to or create the default library. Never move/copy/delete user music when changing this setting. Adjacent `Song.lrc` remains the lyric contract for `Song.mp3`.
 
-A release EXE built and launched from inside a source checkout may detect that checkout from its own executable ancestry and continue using the existing checkout data. This runtime discovery is allowed because it embeds no compile-time absolute path. **Do not reintroduce `CARGO_MANIFEST_DIR` as runtime state/location.**
+An EXE launched from a source checkout must not detect that checkout and use it as persistent state. APP_HOME is resolved only from `MUSICSERVER_APP_HOME` or the platform default `%LOCALAPPDATA%\com.musicserver.desktop`; repository contents must never change that result. **Do not reintroduce `CARGO_MANIFEST_DIR` as runtime state/location.**
 
 ## Repository layout
 
@@ -112,6 +114,7 @@ MusicServer/
 ├─ daily_cleanup.ps1              # operational maintenance tool
 ├─ lib_playlist.ps1               # shared utility (dot-sourced by daily_cleanup)
 ├─ register_wanted_worker.ps1     # operational setup
+├─ register_daily_recommend.ps1   # operational setup (daily recommendation task)
 └─ start_musicserver_ui.bat       # convenience launcher wrapper
 ```
 
@@ -155,8 +158,10 @@ Do not replace this with a static grep/Pester-only check.
 - Wanted worker uses its mutex/SQLite lease logic; do not introduce duplicate workers or bypass lease ownership.
 - `bilibili_direct` candidates must not trigger an unnecessary Bilibili search. Search is fallback when no usable local/direct candidate exists.
 - Bilibili 412/rate-limit handling must remain bounded and health-aware; do not add unbounded retry loops.
+- NetEase id discovery is a bounded fallback (one search per resolve, gated by the `netease` provider circuit, `MUSICSERVER_DISABLE_NETEASE_SEARCH=1` disables it). Never search a provider that is already blocked, and never turn `UNAVAILABLE` back into an automatic retry.
 - SQLite CLI calls use batch mode, enable foreign keys before caller SQL, and separate unquoted statement terminators onto lines so `.bail on` also stops same-line scripts on SQLite 3.53.4. Preserve SQL literals/comments and complete trigger bodies; connection-local settings must be applied per invocation. Keep the existing effective synchronous default unless a separate durability change is reviewed.
 - API/proxied JSON control bodies are limited to 64 KiB and a 5-second total read deadline. Empty bodies remain supported; nonempty bodies must be UTF-8 JSON objects. Reject unsupported chunked/compressed bodies before state writes or forwarding.
+- Runtime logs live under `APP_HOME\logs` and every component writes through `Write-MusicServerLog` (4 MB cap, keeps `.1`/`.2`). Spawned services have discarded stdio, so `Write-Host` alone is invisible in production; keep new logging bounded and avoid per-poll noise lines.
 
 ## Common local operations
 
@@ -193,10 +198,32 @@ Batch related steps as local commits; after a meaningful stage and local validat
 
 After completing a meaningful task, update this `AGENTS.md` checkpoint when the task changes architecture, release behavior, test gates, or important operating rules. Keep only current durable facts; do not accumulate transient debugging notes.
 
-## Current checkpoint — 2026-09-08
+## Current checkpoint — 2026-09-10
 
-- `MUSICSERVER_STARTUP_TRACE` optionally writes a bounded desktop startup report to a new file at the caller-supplied path. Its parent must exist; an existing file is never overwritten, and diagnostic write failure does not block startup. Events cover runtime verification/sync, port/identity checks, launcher and service readiness through navigation request; they do not measure rendered UI or individual PowerShell/SQLite initialization. Normal launches create no report.
-- Startup measurement supports `FreshRuntime` (empty runtime home per sample, excluding installation) and `Restart` (one excluded warm-up followed by reused-home samples). Each launch requires its matching trace, actual APP exit and service-port closure. This remains forced-tree cleanup, not graceful-window-close acceptance.
+- Optional `MUSICSERVER_STARTUP_TRACE` writes a bounded desktop setup report and separate `.ui.json` / `.api.json` script-phase reports. Outputs use new files, never overwrite existing reports, and diagnostic failures do not block startup. Reports contain phase timings, not rendered UI readiness. Measurement disables downloads, scheduled-task registration and artist backfill in isolated APP homes; `Restart` excludes one warm-up and `FreshRuntime` stages into a new home per sample.
+- The launcher keeps a 400 ms API preflight port probe. For its owned API child it probes immediately, with at most 100 ms per connect and 100 ms between probes under a 27-second monotonic readiness budget, and reports child exit before further waiting. Desktop build-identity checks and service ownership remain unchanged.
+
+- Local artists are resolved rather than read. Bilibili downloads tag the **uploader** in `media_file.artist` and sit directly in the library root, so the index value is not the singer. `local_track_artists` (`path_key` normalized absolute path → `artist`/`album`/`status`/`source`) caches one outcome per file, including `NOT_FOUND`, so a library that cannot be resolved is not re-searched every start. The launcher's single-runspace `Start-ArtistBackfill` (`MUSICSERVER_ARTIST_BACKFILL_LIMIT`, `MUSICSERVER_DISABLE_ARTIST_BACKFILL=1`) fills it, `Get-UiLibrary` and the API's `Add-ResolvedArtist` overlay it onto every library response, and the list cache is invalidated when a pass completes. The launcher calls `Initialize-LocalTrackArtistSchema` explicitly because it binds an existing DB with `Connect-MusicServerDatabase`, which by design creates nothing.
+
+- Artist lookup precision comes from a file-name gate, not from the search ranking. `Test-FileVouchesForArtist` accepts a NetEase candidate only when the file name already contains every artist it credits: searching a song name otherwise returns a different recording (`EXO-M` for `EXO-K《mama》`, `XG` for `Hearts2Hearts《RUDE!》`). Duration is a tie-breaker only, because uploads pad or extend the song (a 1540 s single-file upload of a 279 s track is still correct). `Get-TitleSearchKeywords` tries at most three keywords (bracketed song name first, then cleaned title) and `Resolve-NeteaseTrackArtist` charges each to the `netease` circuit, stopping as soon as the circuit refuses. `Get-TitleDeclaredArtist` supplies an offline fallback for what the lookup cannot resolve: the `<artist>《<song>》` convention, plus a guarded `Song - Artist` tail that is only trusted when neither side carries brackets, series or marketing noise — guessing wrong would display a song name as an artist, which is worse than showing none.
+
+- `Resolve-DisplayArtist` is the single display decision and both overlays (launcher `Get-UiLibrary`, API `Add-ResolvedArtist`) go through it. A cached `netease` match is final and reused; a `source = 'title'` value costs no network call and is therefore **recomputed on every read**, so improved parsing rules heal rows an older build already wrote with no migration. When the rules now refuse a title, the indexed value stays rather than being blanked. Channel branding is a prefix shared by many titles (`Get-SharedTitlePrefixes` / `Remove-SharedTitlePrefix`), so it is detected from the whole set and stripped only when it ends on a boundary character — otherwise a repeated real artist name (`许嵩《…》` four times) would be deleted as if it were branding. A declared name must also be a single credit: CJK text mixing spaces, or a long CJK run with no separator, is a comment or branding, while a Latin credit may still contain spaces (`Alan Walker&Sabrina Carpenter&Farruko`). The sentence/bracket rejection must run **before** trailing-punctuation cleanup, which would otherwise erase the `！` in `仙气空灵！` that proves the text is a comment.
+
+- `local_track_artists.updated_at` must be produced by `Get-NowIso` before the SQL template is expanded. Templates expand parameters as literals, so passing the bare command name stores it verbatim and silently breaks the 30-day retry window.
+
+- Hermetic runtime fixtures (`MusicServer.RuntimeFixture.ps1`, `MusicServer.UiProxyRuntime.Tests.ps1`) set `MUSICSERVER_DISABLE_ARTIST_BACKFILL=1` for the child launcher. Without it the background resolution reaches the network inside socket regressions and the suite stalls rather than failing.
+
+- The library read path must not filter on Navidrome's `missing` column. That column is only refreshed by a Navidrome scan, and the packaged runtime never installs or runs Navidrome, so every row stays flagged `missing = 1` and `WHERE missing = 0` returns nothing. The launcher and the API now select all rows and require `[IO.File]::Exists` on the resolved path instead; `Get-LibraryFolderArtist` returns empty when a file's parent is the library root itself, so a flat library can no longer report the library name as every artist. `tests/MusicServer.ArtistResolution.Tests.ps1` covers the resolver and the gate; `tests/MusicServer.Web.Tests.ps1` pins the no-`missing`-filter and file-existence behavior.
+
+- Runtime logging: `Write-MusicServerLog` (bounded at 4 MB, keeps `.1`/`.2`) is the single sink under `APP_HOME\logs`. The launcher, the watchdog, the API (`musicserver-api.log`: startup, per-request line, `ERROR`, `SLOW` ≥ 3 s) and the worker (`musicserver-worker.log`: pass start, candidate choice, download/validation outcome, retry reasons) all log through it; per-poll keep-alive lines stay console-only. Previously only the launcher wrote a file, so API/worker diagnostics were silently discarded.
+
+- Download success rate: `Test-ProviderRequestAvailable` now reports `HALF_OPEN` as available so the single allowed probe is actually claimed (`Claim-ProviderRequest` -> `Claim-HalfOpenProbeDb` keeps exclusivity); the previous `probe_pending` check deadlocked the circuit. `Search-NeteaseCandidate` adds a bounded NetEase discovery fallback for tracks without a NetEase id: at most one search per resolve, charged to the `netease` provider circuit, only when no local/direct candidate exists, disabled with `MUSICSERVER_DISABLE_NETEASE_SEARCH=1`. A discovered id is persisted through `Add-CanonicalTrackIdentifierDb`. `UNAVAILABLE` stays terminal; the 下载动态 panel renders an explicit 重试 action for `UNAVAILABLE`/`RETRY_WAIT` rows.
+
+- The desktop runtime ships `daily_recommend.ps1`, `register_daily_recommend.ps1` and their `MusicServer.Migration.psm1` dependency. All three are staged by `scripts/prepare_tauri_runtime.ps1`, listed in the Rust runtime `REQUIRED` allowlist and included in the content build identity; `daily_recommend.ps1` takes `-AppHome` so a scheduled run is independent of environment variables. The launcher registers `MusicServer_DailyRecommend` (daily 07:00, action bound to the packaged APP_HOME) idempotently. Registration is skipped for source checkouts (`.git` present) and disabled with `MUSICSERVER_DISABLE_SCHEDULED_TASKS=1`; failures are logged and never block startup. `MusicServer_DailyCleanup` is still a legacy manual task and is not auto-registered.
+
+- A fresh install must produce recommendations with no manual setup, which needs three things that were all previously missing. (1) `register_daily_recommend.ps1` passes `New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable` (1-hour limit, `IgnoreNew`); plain `Register-ScheduledTask` defaults refuse to start on battery and never catch up a 07:00 trigger missed while the PC was off, so laptop users silently got nothing. (2) The launcher repairs a task whose settings are stale through `Test-DailyRecommendTaskCurrent` instead of trusting the action path alone, so already-installed builds recover on the next start. (3) `Get-RecommendationSeedCandidatesDb -LibraryFallback` seeds from the local library **only when the preference pool is empty**, and `daily_recommend.ps1` reads it from a copy of the Navidrome DB (or `.mp3` basenames) — otherwise a user with no likes, stars or legacy import has zero seeds and the generator still "saves" an empty day. Backfill is keyed on `Test-DailyRecommendGeneratedToday` (any `daily_recommendations` row for today) rather than the last run time, so a run that failed mid-way is retried while a completed day is not regenerated on every APP start; a run that started within the last 15 minutes is left alone. Because the task action is pinned to `-AppHome $Root`, the health check builds its own config with `New-MusicServerConfig -Root $Root -AppHome $Root` instead of reusing the environment-resolved `$Config`, which can point at a different home. Verified end-to-end against the staged runtime in a simulated install directory: no `.git`, no `MUSICSERVER_APP_HOME`, empty day -> task registered, backfill started, packaged generator produced rows from `library_fallback`.
+
+- `MusicServer_DailyRecommend` follows the user rather than freezing install-time state. `Get-DailyRecommendTaskPreferences` reads the trigger time and `-Count` back from the task being replaced, so a repair caused by a moved install directory, a reinstall, or stale settings written by an older build keeps the schedule the user chose instead of resetting it to 07:00 / 20. The task stores only `-AppHome`; the music library is resolved at run time by `daily_recommend.ps1` through `Apply-ConfiguredMusicDir` and `$Config.MusicDir`, so changing the library in 设置 needs no task change. A source-checkout launcher running against a packaged APP_HOME rewrites the action to that home on the next start, which is why the launcher log shows one re-registration after installing over an older build.
 
 - Installed smoke restart checks the actual APP process exit and then requires all service ports closed. A nonzero taskkill tree result is diagnostic only after confirmed APP exit; it must never bypass the process/port shutdown gates. PS5.1 Tauri tests cover this distinction.
 
@@ -223,7 +250,8 @@ After completing a meaningful task, update this `AGENTS.md` checkpoint when the 
 
 - P0 closed: `music_api.ps1` is PS5.1/BOM-safe and provider direct-candidate fallback no longer leaks into unwanted Bilibili search.
 - P1-A closed: CI has a real `desktop-build` gate on a clean Windows runner.
-- P1-B closed: release runtime is bundled, SQLite and the UI watchdog are included, `CARGO_MANIFEST_DIR` runtime dependency is removed, installed runtime uses a writable APP home, and local checkout builds preserve existing checkout data via runtime path discovery.
+- P1-B closed: release runtime is bundled, SQLite and the UI watchdog are included, `CARGO_MANIFEST_DIR` runtime dependency is removed, installed runtime uses a writable APP home, and checkout builds no longer use repository contents as persistent state.
+- Persistent paths now resolve through `MUSICSERVER_APP_HOME` (or the platform default); configurable `MusicDir` remains independent, and generated Navidrome config lives in APP_HOME. `scripts/migrate_to_app_home.ps1` is fail-closed: Navidrome must be stopped, destinations must be absent, copied files are hash-verified before legacy sources are removed, and repository `Music` is never implicitly moved.
 - `desktop-build` produces an NSIS setup executable and uploads `musicserver-windows-installer`.
 - CI performs an installed-app portability smoke with the checkout runtime disabled; it verifies packaged runtime staging, current UI/API markers, SQLite state creation and owned-service shutdown.
 - GitHub Actions run #74 passed `state`, `api`, and `desktop-build`, including the source-independent installed-APP smoke and installer artifact upload.

@@ -17,8 +17,10 @@ $RuntimeSource = (Resolve-Path -LiteralPath $RuntimeSource).Path
 $fixture = New-MusicServerRuntimeFixture -ProjectRoot $RuntimeSource -Parent (Join-Path $project 'artifacts')
 $oldHome = $env:MUSICSERVER_APP_HOME
 $oldWorker = $env:MUSICSERVER_DISABLE_WORKER
+$oldScheduledTasks = $env:MUSICSERVER_DISABLE_SCHEDULED_TASKS
 $oldTrace = $env:MUSICSERVER_STARTUP_TRACE
 $env:MUSICSERVER_DISABLE_WORKER = '1'
+$env:MUSICSERVER_DISABLE_SCHEDULED_TASKS = '1'
 $child = $null
 $samples = @()
 $traces = @()
@@ -106,6 +108,7 @@ try {
 } finally {
     $env:MUSICSERVER_APP_HOME = $oldHome
     $env:MUSICSERVER_DISABLE_WORKER = $oldWorker
+    $env:MUSICSERVER_DISABLE_SCHEDULED_TASKS = $oldScheduledTasks
     $env:MUSICSERVER_STARTUP_TRACE = $oldTrace
     if ($child -and -not $child.HasExited) { Start-Process -FilePath taskkill.exe -ArgumentList @('/PID', [string]$child.Id, '/T', '/F') -WindowStyle Hidden -Wait | Out-Null }
     Remove-MusicServerRuntimeFixture -Fixture $fixture

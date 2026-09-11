@@ -12,6 +12,7 @@ const storedLibraryOrder = (() => {
 
 const state = {
   items: [],
+  wanted: [],
   library: [],
   librarySequence: [],
   listening: { mostPlayed: [], rediscover: [], loaded: false },
@@ -50,6 +51,396 @@ const itemStatus = (item) => item.wanted?.state || item.local_status || 'REMOTE'
 const statusClass = (status) => status === 'LOCAL' ? 'local' : ['DOWNLOADING', 'RESOLVING', 'VALIDATING'].includes(status) ? 'downloading' : ['RETRY_WAIT', 'CANCEL_REQUESTED'].includes(status) ? 'retry' : '';
 const normalizeLibraryItem = (item) => ({ ...item, title: item?.title || item?.name || '' });
 
+// --- Song name cleaning / formatting ---
+// Library filenames are frequently raw 视频 title dumps such as
+//   【附歌词中字】Roselia-「THRONE OF ROSE」FULL
+//   在百万豪装录音棚大声听 王菲《百年孤寂》【Hi-res】
+// The goal is a readable song title, never a labelled-but-wrong one: when no
+// candidate looks like a song name the original title is kept verbatim, so two
+// different files can never collapse onto the same placeholder row.
+const NOISE_WORDS = [
+  '官方MV', 'OfficialMusicVideo', 'Official Music Video', 'MV', 'PROMO',
+  '百万级装备试听', '百万级高品质试听', '百万级装备', '百级装备试听',
+  '在百万豪装录音棚大声听', '百万豪装录音棚大声听', '百万豪装录音棚', '百万豪装', '录音棚', '大声听',
+  'Hi-Res无损音质', 'Hi-Res无损臻享', 'Hi-Res无损', 'Hi-res无损', 'Hi-Res', 'Hi-res',
+  '无损音质', '无损臻享', '无损', '臻享', '臻品', '高音质', '高品质',
+  '4K60fps', '4K60P', '4K60', '4K', '黑胶', 'BD中字', '中文字幕', '中日字幕', '中英字幕', '中字',
+  '动态歌词排版', '动态水印', '动态歌词', '单曲纯享', '纯享版', '静享版', '试听',
+  '附歌词中字', '附中日歌词', '附歌词', '附中文字幕', '附字幕', 'FULL', '完整版',
+  '完美药药', '完美', '直播', '翻唱', 'Cover', 'cover',
+  '现代战争', '游戏原声', '动漫原声', '动漫', 'OST', 'ost', '原声',
+];
+const SONG_DESC_WORDS = [
+  '德国钢琴家', '百万豪装录音棚', '百万级装备', '金榜提名', '金榜题名', '九周年纪念',
+  '周年纪念', '动态水印', '动态歌词排版', '先约电台', '温柔女声版', '太美啦',
+  '火速翻唱', '静享版', '纯享版', '完整版', '无损音质', '无损臻享', '高音质', '高品质',
+];
+const SONG_DESC_RE = /(知道|好听|好听|流泪|拉满|喜欢|推荐|纪念|祝贺|祝大家|金榜|太好听|震撼|绝了|开口跪|附歌词|动态|完整版|remix|翻唱|cover|mv|live|版本|臻享|臻品)/i;
+const EPISODE_RE = /(?:^|[\s|｜\-–—_/／])(?:p|part|ep|vol|track)\s*\.?\s*0*\d{1,3}\b/gi;
+const LIVE_RE = /(^|[^a-z0-9])(live)(?![a-z0-9])/i;
+const COVER_RE = /(^|[^a-z0-9])(cover|翻唱)(?![a-z0-9])/i;
+const HAN_OR_ALNUM_RE = /[\u3400-\u9fff\uf900-\ufaff\u3040-\u30ffa-z0-9]/i;
+const SONG_BRACKET_RE = /[\u300A\u300B\u300C\u300D\u300E\u300F]/;
+
+function escapeRe(value) { return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+const NOISE_RES = NOISE_WORDS.map((word) => new RegExp(escapeRe(word), 'gi'));
+const DESC_RES = SONG_DESC_WORDS.map((word) => new RegExp(escapeRe(word) + '[^\\s，。！？、|｜]*', 'g'));
+const BRACKET_RES = [
+  [/【[^【】]{0,80}】/g, ' '],
+  [/\[[^\[\]]{0,80}\]/g, ' '],
+  [/（[^（）]{1,40}）/g, ' '],
+  [/\([^()]{1,40}\)/g, ' '],
+  [/《[^《》]{0,60}》/g, ' '],
+  [/「[^「」]{0,60}」/g, ' '],
+  [/『[^『』]{0,60}』/g, ' '],
+  [/[「」『』《》【】\[\]（）()“”‘’]/g, ' '],
+];
+const BRACKET_PAIRS = [
+  { open: '\u300C', close: '\u300D', min: 2, max: 60 }, // 「」
+  { open: '\u300E', close: '\u300F', min: 2, max: 60 }, // 『』
+  { open: '\u300A', close: '\u300B', min: 2, max: 80 }, // 《》
+];
+
+function bracketCandidates(raw) {
+  const found = [];
+  for (const pair of BRACKET_PAIRS) {
+    let from = 0;
+    for (;;) {
+      const start = raw.indexOf(pair.open, from);
+      if (start < 0) break;
+      const end = raw.indexOf(pair.close, start + 1);
+      if (end < 0) break;
+      const content = raw.slice(start + 1, end);
+      if (content.length >= pair.min && content.length <= pair.max) found.push({ content, start, end });
+      from = end + 1;
+    }
+  }
+  return found.sort((a, b) => a.start - b.start);
+}
+
+function stripBrackets(text) {
+  let value = String(text);
+  for (const [re, replacement] of BRACKET_RES) value = value.replace(re, replacement);
+  return value;
+}
+
+function stripNoise(text) {
+  let value = String(text);
+  for (const re of NOISE_RES) value = value.replace(re, ' ');
+  for (const re of DESC_RES) value = value.replace(re, ' ');
+  value = value.replace(EPISODE_RE, ' ');
+  value = value.replace(/\s*[|｜]\s*/g, ' | ');
+  value = value.replace(/^[\s\-–—_/／·、,，。!！?？:：+~～*"'“”‘’]+/, '').replace(/[\s\-–—_/／·、,，!！?？:：+~～*"'“”‘’]+$/, '');
+  return value.replace(/\s+/g, ' ').trim();
+}
+
+function isSongLike(text) {
+  const value = String(text || '').trim();
+  if (value.length < 2 || value.length > 60) return false;
+  return HAN_OR_ALNUM_RE.test(value);
+}
+
+function cutDescriptiveTail(text) {
+  const value = String(text);
+  const parts = value.split(/[,，]|(?:\s+[—–-]{1,2}\s+)/).map((part) => part.trim()).filter(Boolean);
+  if (parts.length < 2) return value;
+  const head = parts[0];
+  if (head.length >= 2 && head.length <= 20 && !/(知道|好听|流泪|喜欢|纪念|金榜|祝)/.test(head)) return head;
+  return value;
+}
+
+// `…｜Divide⧸Unite p02 Ringing Bloom` — inside a multi-track upload the real
+// song name is what follows the episode marker, not the collection title.
+function songAfterEpisode(text) {
+  const value = String(text);
+  EPISODE_RE.lastIndex = 0;
+  const match = EPISODE_RE.exec(value);
+  EPISODE_RE.lastIndex = 0;
+  if (!match) return '';
+  const tail = value.slice(match.index + match[0].length);
+  if (!tail || !/^[\s\-–—:：|｜.]+/.test(tail)) return '';
+  return tail.replace(/^[\s\-–—:：|｜.]+/, '').trim();
+}
+
+// `壱雫空 - MyGO!!!!!｜Divide⧸Unite` / `Tokyo - Owl City`: the song sits on one
+// side of a full-width bar or a spaced dash; `Hi-Res` and `EXO-K` stay whole.
+function splitSongSlot(title) {
+  const bar = /\s*[|｜]\s*/.exec(title);
+  if (bar) {
+    return {
+      before: title.slice(0, bar.index),
+      left: title.slice(0, bar.index),
+      right: title.slice(bar.index + bar[0].length),
+    };
+  }
+  const dash = /\s+[-\u2013\u2014\uFF0D]\s*/.exec(title);
+  if (dash) {
+    return {
+      before: title.slice(0, dash.index),
+      left: title.slice(0, dash.index),
+      right: title.slice(dash.index + dash[0].length),
+    };
+  }
+  return { before: '', left: '', right: '' };
+}
+
+function pickSongName(candidates, raw, episodeName, slotLeft, slotRight, strong) {
+  const rawText = String(raw);
+  let best = '';
+  let bestScore = -Infinity;
+  for (const candidate of candidates) {
+    if (!isSongLike(candidate)) continue;
+    let score = 0;
+    if (candidate.length <= 24) score += 2;
+    if (candidate.length > 30) score -= 2 + (candidate.length - 30) / 10;
+    if (candidate.length <= 3) score -= 1;
+    else if (candidate.length >= 6) score += 1;
+    // `《明日方舟》EP - What an Electromagnetic Night`: a short all-caps token
+    // that sits right before the separator is a release label, not the song.
+    if (/^[A-Z]{2,4}$/.test(candidate) && new RegExp(`(?:^|[\\s|｜\\-\\u2013\\u2014\\uFF0D:：》」』）)])${candidate}\\s*-\\s`).test(rawText)) score -= 6;
+    const isSlotSide = candidate === slotLeft || candidate === slotRight;
+    // A descriptor such as `4K 60 动态水印` is never the song; a real title may
+    // legitimately contain one of these words.
+    if (SONG_DESC_RE.test(candidate) && !(isSlotSide && candidate.length >= 8)) score -= 3;
+    if (/第\s*[0-9一二三四五六七八九十]+\s*[季期部波]/.test(candidate)) score -= 4;
+    if (rawText.includes(candidate)) score += 1;
+    if (candidate === rawText.trim()) score -= 2;
+    if (episodeName && candidate === episodeName) score += 6;
+    if (strong.has(candidate)) score += 4;
+    // In `Tokyo - Owl City` the right side is a title-case artist credit, while
+    // `What an Electromagnetic Night` on the right is the song itself.
+    const artistLike = /^[A-Z][A-Za-z0-9.!'&,-]*(?:\s+[A-Z][A-Za-z0-9.!'&,-]*)+$/.test(candidate);
+    if (isSlotSide && (strong.has(candidate) || (candidate.length >= 6 && !artistLike))) score += 2;
+    // `Tokyo - Owl City`, `ZEAL of proud - Roselia`: with no CJK anywhere, the
+    // left side of the slot is the song and the right side is the artist credit.
+    const bothLatin = slotLeft && slotRight
+      && !/[\u3400-\u9fff\u3040-\u30ff]/.test(slotLeft + slotRight);
+    if (bothLatin && candidate === slotLeft) score += 2;
+    if (bothLatin && artistLike) score -= 4;
+    // `霜雪千年 - 双笙&封茗囧菌`: `X&Y` on one side only is a credit list.
+    if (slotLeft && slotRight && /[&＆]/.test(candidate)) {
+      const other = candidate === slotLeft ? slotRight : slotLeft;
+      if (other && !/[&＆]/.test(other)) score -= 4;
+    }
+    // `「壱雫空」- MyGO!!!!!`: a song in quotation marks outranks the artist
+    // that merely stands in the `Song - Artist` slot.
+    if (!isSlotSide && /[\u300C\u300E]/.test(rawText.split(candidate)[0] || '')) score += 3;
+    // In `Song - Artist` the left side is the song and the right side is the
+    // artist, so the left side wins a tie.
+    if (candidate === slotLeft) score += 2;
+    else if (candidate === slotRight) score += 2;
+    // `What an Electromagnetic Night` is a title; the bare label `EP` is not.
+    if (/[\u3400-\u9fff\u3040-\u30ff]/.test(candidate)) score += 2;
+    if (score > bestScore || (score === bestScore && candidate.length < best.length)) { best = candidate; bestScore = score; }
+  }
+  return best;
+}
+
+// `《明日方舟》EP - Follow Your Heart`, `Roselia 14th single—「Call the shots」`
+// — the bracketed text is the release, not the song, so it must not win.
+// `《画风（《天行九歌》片尾曲）》` keeps its title inside the bracket and only
+// describes it afterwards, so a nested bracket is not a release marker.
+function describeAfter(title, end) {
+  const after = title.slice(end + 1);
+  if (/^\s*[（(]/.test(after)) return true;
+  if (SONG_BRACKET_RE.test(after.slice(0, 2))) return false;
+  return /^\s*(?:ep|album|ost|single|ver|version|remix)\b/i.test(after)
+    || /^\s*[\u3400-\u9fff]{0,4}\s*(?:新歌|专辑|曲目|主题曲|片尾曲|插曲|推广曲)/.test(after);
+}
+
+// `BEYOND《冷雨夜》` / `『倾国』“铁衣踏不过”`: the bracketed run is the song and
+// the text beside it is an artist, a lyric quote or a comment on the track.
+// `「猫头鹰之城」Fireflies 萤火虫 - Owl City` is the opposite: the bracket holds
+// the album, and the Latin title outside it is the song.
+function bracketIsSong(title, bracket, content) {
+  const after = title.slice(bracket.end + 1);
+  if (!after || /^[\s\-–—:：|｜.）)。，,、]*$/.test(after)) return true;
+  const before = stripNoise(stripBrackets(title.slice(0, bracket.start)));
+  // `「猫头鹰之城」Fireflies 萤火虫 - Owl City`: nothing precedes the bracket and a
+  // Latin title follows it, so the bracket holds the album, not the song.
+  if (!before && /^[\s\-–—:：|｜.]*[A-Za-z]{2}/.test(after) && !/[A-Za-z]/.test(content)) return false;
+  return true;
+}
+
+// A bracketed run that contains a book/quotation title is part of the title
+// text itself (`【附歌词中字】【FULL】Roselia-「Always recall.」`), not a label.
+function bracketTitle(content) {
+  if (SONG_BRACKET_RE.test(content)) return '';
+  if (bracketCandidates(content).length) return '';
+  // `《画风（《天行九歌》片尾曲）》` truncates at the first closing bracket, so an
+  // unbalanced run is not a title at all.
+  if ((content.match(/[\u300A\u300C\u300E]/g) || []).length !== (content.match(/[\u300B\u300D\u300F]/g) || []).length) return '';
+  const cleaned = stripNoise(stripBrackets(content));
+  if (!isSongLike(cleaned)) return '';
+  if (!/[\u3400-\u9fff\u3040-\u30ffa-z]/i.test(cleaned)) return '';
+  if (SONG_DESC_RE.test(cleaned) && cleaned.length >= 8) return '';
+  if (/^第\s*[0-9一二三四五六七八九十]+\s*[季期部波]/.test(cleaned)) return '';
+  return cleaned;
+}
+
+// `小树 - 向日葵人生-动漫《我叫MT 第三季》`: a bracket that only names the
+// collection is dropped so the dash segments around it stay adjacent.
+function dropCollection(title) {
+  let value = String(title);
+  for (const pair of BRACKET_PAIRS) {
+    let from = 0;
+    for (;;) {
+      const start = value.indexOf(pair.open, from);
+      if (start < 0) break;
+      const end = value.indexOf(pair.close, start + 1);
+      if (end < 0) break;
+      const content = value.slice(start + 1, end);
+      if (/第\s*[0-9一二三四五六七八九十]+\s*[季期部波]/.test(content)) {
+        value = `${value.slice(0, start)} ${value.slice(end + 1)}`;
+        from = start;
+        continue;
+      }
+      from = end + 1;
+    }
+  }
+  return value.replace(/\s+/g, ' ').trim();
+}
+
+function cleanSongName(raw) {
+  if (!raw) return '';
+  const title = dropCollection(String(raw).trim());
+  const brackets = bracketCandidates(title);
+  const candidates = [];
+  const strong = new Set();
+
+  // `… p02 Ringing Bloom`: inside a multi-track upload the real song name is
+  // what follows the episode marker, and it outranks every bracketed title.
+  const episodeName = stripNoise(stripBrackets(songAfterEpisode(title)));
+  if (episodeName && isSongLike(episodeName)) return episodeName;
+
+  // A quoted song title is the strongest signal in this library, so the
+  // `Song - Artist` split is only consulted when no such title exists.
+  const slot = splitSongSlot(title);
+  const slotLeft = slot.left ? stripNoise(stripBrackets(slot.left)) : '';
+  const slotRight = slot.right ? stripNoise(stripBrackets(slot.right)) : '';
+  // `小树 - 向日葵人生-动漫《我叫MT 第三季》` keeps the song in one dash segment.
+  // A bare `-` glued to words stays whole, so `ZEAL of proud - Roselia` splits
+  // while `Hi-Res`, `EXO-K` and `Hello-Goodbye` do not.
+  const dashParts = title
+    .split(/\s*[|｜]\s*|\s+[-\u2013\u2014\uFF0D]\s*|(?<=[\u3400-\u9fff\uf900-\ufaff])[-\u2013\u2014\uFF0D](?=[\u3400-\u9fff\uf900-\ufaff])/)
+    .map((part) => stripNoise(stripBrackets(part)))
+    .filter((part) => isSongLike(part) && !/^\d+$/.test(part));
+  // `杜婧荧 &王艺翔-雪-动漫《我叫MT 第三季》`: with several dash segments before
+  // the bracket, the song is the segment nearest to it.
+  const localParts = title
+    .slice(0, brackets.length ? brackets[0].start : title.length)
+    .split(/[-\u2013\u2014\uFF0D|｜]/)
+    .map((part) => stripNoise(stripBrackets(part)))
+    .filter((part) => isSongLike(part) && !NOISE_RES.some((re) => re.test(part)));
+  const slotNearest = localParts.length >= 3 ? localParts[localParts.length - 1] : '';
+  let hasQuotedTitle = false;
+
+  // Fallback 1: bracketed titles, in bracket order, skipping release/album runs.
+  for (const bracket of brackets) {
+    // `画风（《天行九歌》片尾曲）`: the title is cut short because a nested bracket
+    // closes first, and what follows it is a description, not the song.
+    const nested = /[\u300A\u300B\u300C\u300D\u300E\u300F]/.exec(bracket.content);
+    if (nested && !bracketCandidates(bracket.content).length) {
+      // `画风（《天行九歌》片尾曲）`: the outer title was cut short because a
+      // nested bracket closed first, and what follows it is a description.
+      const head = stripNoise(stripBrackets(bracket.content.slice(0, nested.index)));
+      if (isSongLike(head)) { candidates.push(head); strong.add(head); }
+      const prefix = stripNoise(stripBrackets(title.slice(0, bracket.start)));
+      if (prefix && isSongLike(prefix)) candidates.push(prefix);
+      const full = stripNoise(stripBrackets(title));
+      if (isSongLike(full)) candidates.push(full);
+      continue;
+    }
+    // `杜婧荧 &王艺翔-雪-动漫《我叫MT 第三季》`: the bracket merely names the
+    // collection; `dropCollection` removed it before this loop began.
+    if (/第\s*[0-9一二三四五六七八九十]+\s*[季期部波]/.test(bracket.content)) continue;
+    if (describeAfter(title, bracket.end)) continue;
+    const content = bracketTitle(bracket.content);
+    if (content && content.length <= 40 && bracketIsSong(title, bracket, content)) {
+      candidates.push(content);
+      strong.add(content);
+      if (/[\u300C\u300E]/.test(title.slice(0, bracket.start))) hasQuotedTitle = true;
+      const head = content.replace(/[（(][^）)]*[）)]/g, ' ').trim();
+      if (head && head !== content) { candidates.push(head); strong.add(head); }
+      continue;
+    }
+    // `壱雫空 - MyGO!!!!!` or `《可惜没如果》德国钢琴家…`: the bracketed text is
+    // not the song, and the preceding segment is where the song lives. A prefix
+    // that still carries `Song - Artist` punctuation is not a title either.
+    const prefix = stripNoise(stripBrackets(title.slice(0, bracket.start)));
+    if (prefix && isSongLike(prefix) && !/\s[-\u2013\u2014\uFF0D]\s/.test(prefix)) candidates.push(prefix);
+    // Only when the bracket itself turned out not to be the title.
+    if (!content && slotNearest && slotNearest !== prefix && isSongLike(slotNearest)) { candidates.push(slotNearest); strong.add(slotNearest); }
+    const full = stripNoise(stripBrackets(title));
+    if (isSongLike(full)) candidates.push(full);
+  }
+
+  // Fallback 2: the segment in the "song slot", i.e. after a `｜` or a dash.
+  if (!hasQuotedTitle) {
+    for (const value of [slotLeft, slotRight]) {
+      if (value && isSongLike(value)) candidates.push(value);
+    }
+  }
+
+  const strippedNoise = stripNoise(stripBrackets(title));
+  if (strippedNoise) {
+    candidates.push(strippedNoise);
+    const cut = cutDescriptiveTail(strippedNoise);
+    if (cut !== strippedNoise) candidates.push(cut);
+    if (strippedNoise.includes(' | ')) {
+      const head = strippedNoise.split(' | ')[0].trim();
+      if (head) candidates.push(head);
+    }
+  }
+  // `小树 - 向日葵人生-动漫《我叫MT 第三季》` keeps the song in one dash segment.
+  // A bare `-` glued to words stays whole, so `ZEAL of proud - Roselia` splits
+  // while `Hi-Res`, `EXO-K` and `Hello-Goodbye` do not.
+  for (const part of title
+    .split(/\s*[|｜]\s*|\s+[-\u2013\u2014\uFF0D]\s*|(?<=[\u3400-\u9fff\uf900-\ufaff])[-\u2013\u2014\uFF0D](?=[\u3400-\u9fff\uf900-\ufaff])/)
+    .map((value) => stripNoise(stripBrackets(value)))) {
+    if (isSongLike(part) && !/^\d+$/.test(part)) candidates.push(part);
+  }
+  // `后弦《画风（《天行九歌》片尾曲）》…`: nested brackets defeat the extraction,
+  // so the cleaned whole title must still be in play.
+  if (!brackets.length) {
+    const whole = stripNoise(stripBrackets(title));
+    if (isSongLike(whole)) candidates.push(whole);
+  }
+
+  // `Fireflies 萤火虫 - Owl City` must not hide the album- and artist-free title
+  // that the filename already offered in one of its segments.
+  const pool = candidates.filter((candidate) => ![...strong].some((other) => other !== candidate
+    && other.length >= 2 && other.length < candidate.length && candidate.includes(other)));
+
+  const chosen = pickSongName(pool, title, episodeName, slotLeft, slotRight, strong);
+  if (chosen) {
+    // `Fireflies 萤火虫 - Owl City`: once the song is known, a trailing Latin
+    // ` - Artist` credit next to CJK text is not part of its name.
+    const trimmed = chosen.replace(/([\u3400-\u9fff\u3040-\u30ff])[\s]*[-\u2013\u2014\uFF0D|｜][\s]*([A-Za-z][A-Za-z0-9 .!&,'-]*)$/, '$1').trim();
+    return isSongLike(trimmed) ? trimmed : chosen;
+  }
+  // Never invent a placeholder: an unreadable title still identifies its file.
+  const fallback = stripNoise(stripBrackets(title));
+  return fallback || title;
+}
+
+function formatTrackDisplay(item) {
+  const rawTitle = item?.title || item?.name || '';
+  const rawArtist = item?.artist || '';
+  const title = cleanSongName(rawTitle) || '未命名歌曲';
+  // Detect Live/Cover tags from the original title, but never from a comment
+  // tail (the `pXX` episode number marks the real track inside a compilation).
+  const tail = EPISODE_RE.test(rawTitle) ? '' : rawTitle.replace(/^.*\uFF5C/, '');
+  EPISODE_RE.lastIndex = 0;
+  const isLive = LIVE_RE.test(tail);
+  const isCover = COVER_RE.test(tail);
+  const isCoverRaw = /翻唱/.test(tail);
+  let displayTitle = title;
+  if (isLive && !LIVE_RE.test(displayTitle)) displayTitle += ' (Live)';
+  if ((isCover || isCoverRaw) && !COVER_RE.test(displayTitle) && !/翻唱/.test(displayTitle)) displayTitle += ' (Cover)';
+  return { title: displayTitle, artist: String(rawArtist || '').trim() };
+}
+
 const PLAYBACK_MIN_SECONDS = 30;
 const PLAYBACK_MIN_RATIO = 0.25;
 
@@ -63,7 +454,13 @@ async function fetchJson(url, options = {}) {
   const timer = setTimeout(cancel, 12000);
   try {
     const response = await fetch(url, { ...options, cache: 'no-store', signal: controller.signal });
-    const payload = await response.json();
+    let payload;
+    try {
+      payload = await response.json();
+    } catch (error) {
+      if (controller.signal.aborted || error?.name === 'AbortError') throw error;
+      throw new Error(`服务返回非 JSON 响应 (${response.status})`);
+    }
     if (!response.ok) throw new Error(payload?.message || `请求失败 (${response.status})`);
     return payload;
   } finally {
@@ -223,16 +620,37 @@ function renderLibrary() {
   list._dirty = false;
   replaceList(list, visible.map((item) => {
     const playing = state.currentKey === keyOf(item);
-    const meta = [item.artist || '未知艺术家', item.album || '未知专辑'].filter(Boolean).join(' · ');
+    const display = formatTrackDisplay(item);
+    const meta = [display.artist, item.album || ''].filter(Boolean).join(' · ');
     return `<article class="track-row library-row ${playing ? 'playing' : ''}" data-library-id="${escapeHtml(item.id)}">
-      <button class="play-button" data-action="play" aria-label="${playing && !$('#audio-player').paused ? '暂停' : '播放'} ${escapeHtml(item.title)}">${playing && !$('#audio-player').paused ? '❚❚' : '▶'}</button>
-      <div class="track-main"><div class="track-title">${escapeHtml(item.title || '未命名歌曲')}</div><div class="track-artist">${escapeHtml(meta)}</div></div>
+      <button class="play-button" data-action="play" aria-label="${playing && !$('#audio-player').paused ? '暂停' : '播放'} ${escapeHtml(display.title)}">${playing && !$('#audio-player').paused ? '❚❚' : '▶'}</button>
+      <div class="track-main"><div class="track-title">${escapeHtml(display.title)}</div><div class="track-artist">${escapeHtml(meta)}</div></div>
       <span class="library-mark">${item.starred ? '♥' : (item.source === 'DailyMix' ? '今日' : '')}</span>
       <span class="track-duration">${duration(item.duration)}</span>
       <button class="lyrics-button" data-action="lyrics" aria-label="查看歌词">词</button>
       <button class="delete-button" data-action="delete" aria-label="删除这首歌" title="删除">✕</button>
     </article>`;
   }).join(''));
+}
+
+// The download panel reflects the whole wanted queue, not just today's
+// recommendations: a failed or waiting download must stay visible even after
+// the daily list is regenerated (the queue entry itself is never dropped).
+function wantedQueueEntries() {
+  const byId = new Map();
+  for (const entry of (Array.isArray(state.wanted) ? state.wanted : [])) {
+    const id = String(entry?.track_id || entry?.id || '');
+    if (!id || !entry?.state || entry.state === 'LOCAL') continue;
+    byId.set(id, entry);
+  }
+  for (const item of state.items) {
+    const id = String(item?.track_id || '');
+    if (!id || !item?.wanted?.state || item.wanted.state === 'LOCAL') continue;
+    const existing = byId.get(id);
+    if (!existing) byId.set(id, { ...item.wanted, track_id: id, title: item.title, artist: item.artist });
+    else if (!existing.title) { existing.title = item.title; existing.artist = existing.artist || item.artist; }
+  }
+  return [...byId.values()];
 }
 
 function renderRecommendations() {
@@ -242,10 +660,16 @@ function renderRecommendations() {
   $('#play-first').disabled = !state.items.length;
   $('#liked-count').textContent = state.items.filter((item) => item.liked).length;
   $('#local-count').textContent = state.library.length;
-  $('#wanted-count').textContent = state.items.filter((item) => item.wanted?.state && item.wanted.state !== 'LOCAL').length;
-  $('#queue-count').textContent = state.items.filter((item) => item.wanted?.state && item.wanted.state !== 'LOCAL').length;
-  const wanted = state.items.filter((item) => item.wanted?.state && item.wanted.state !== 'LOCAL');
-  $('#wanted-list').innerHTML = wanted.length ? wanted.map((item) => `<div class="wanted-row"><span>${escapeHtml(item.title)}</span><span class="status-badge ${statusClass(itemStatus(item))}">${escapeHtml(labels[itemStatus(item)] || itemStatus(item))}</span></div>`).join('') : '当前推荐没有待下载歌曲。';
+  const wanted = wantedQueueEntries();
+  $('#wanted-count').textContent = wanted.length;
+  $('#queue-count').textContent = wanted.length;
+  $('#wanted-list').innerHTML = wanted.length ? wanted.map((entry) => {
+    const retryable = entry.state === 'UNAVAILABLE' || entry.state === 'RETRY_WAIT';
+    const label = escapeHtml([entry.title, entry.artist].filter(Boolean).join(' · ') || entry.track_id || '未知曲目');
+    const badge = `<span class="status-badge ${statusClass(entry.state)}">${escapeHtml(labels[entry.state] || entry.state)}</span>`;
+    const retry = retryable ? `<button class="text-button wanted-retry" type="button" data-action="wanted-retry" data-track-id="${escapeHtml(entry.track_id || '')}">重试</button>` : '';
+    return `<div class="wanted-row"><span>${label}</span>${badge}${retry}</div>`;
+  }).join('') : '当前没有待下载或等待重试的歌曲。';
   if (!state.items.length) { list._sig = null; list.innerHTML = '<div class="empty-state">今天的推荐还在准备中。<br />先从音乐库选一首，或稍后刷新。</div>'; return; }
   const signature = JSON.stringify(state.items.map((item) => [item.track_id, item.liked, itemStatus(item), state.currentKey === keyOf(item), $('#audio-player').paused, item.title, item.artist, item.reason, item.duration, pendingLikes.has(item.track_id)]));
   if (list._sig === signature && !list._dirty) return;
@@ -253,9 +677,11 @@ function renderRecommendations() {
   list._dirty = false;
   replaceList(list, state.items.map((item) => {
     const status = itemStatus(item); const playing = state.currentKey === keyOf(item);
+    const display = formatTrackDisplay(item);
+    const meta = [display.artist, item.reason || '为你推荐'].filter(Boolean).join(' · ');
     return `<article class="track-row ${playing ? 'playing' : ''}" data-track-id="${escapeHtml(item.track_id)}">
-      <button class="play-button" data-action="play" aria-label="${playing && !$('#audio-player').paused ? '暂停' : '播放'} ${escapeHtml(item.title)}">${playing && !$('#audio-player').paused ? '❚❚' : '▶'}</button>
-      <div class="track-main"><div class="track-title">${escapeHtml(item.title)}</div><div class="track-artist">${escapeHtml(item.artist || '未知艺术家')}</div><div class="track-reason">${escapeHtml(item.reason || '为你推荐')}</div></div>
+      <button class="play-button" data-action="play" aria-label="${playing && !$('#audio-player').paused ? '暂停' : '播放'} ${escapeHtml(display.title)}">${playing && !$('#audio-player').paused ? '❚❚' : '▶'}</button>
+      <div class="track-main"><div class="track-title">${escapeHtml(display.title)}</div><div class="track-artist">${escapeHtml(meta)}</div></div>
       <span class="status-badge ${statusClass(status)}">${escapeHtml(labels[status] || status)}</span>
       <span class="track-duration">${duration(item.duration)}</span>
       <button class="heart-button ${item.liked ? 'liked' : ''}" data-action="like" ${pendingLikes.has(item.track_id) ? 'disabled' : ''} aria-label="${item.liked ? '取消喜欢' : '喜欢'}" aria-pressed="${item.liked}">${item.liked ? '♥' : '♡'}</button>
@@ -273,21 +699,27 @@ function renderListening() {
   const rediscover = (state.listening.rediscover || []).filter((item) => !activeLocalId || localIdOf(item) !== activeLocalId);
 
   mostList.innerHTML = most.length
-    ? most.map((item, index) => `<article class="listening-row" data-listening-id="${escapeHtml(item.id || item.library_id || item.identity)}">
-        <span class="listening-rank">${String(index + 1).padStart(2, '0')}</span>
-        <button class="listening-play" data-action="play" type="button" aria-label="播放 ${escapeHtml(item.title)}">▶</button>
-        <div class="listening-main"><div class="listening-title">${escapeHtml(item.title || '未命名歌曲')}</div><div class="listening-artist">${escapeHtml(item.artist || '未知艺术家')}</div></div>
-        <span class="listening-count">${Number(item.play_count || 0)} 次</span>
-      </article>`).join('')
+    ? most.map((item, index) => {
+        const d = formatTrackDisplay(item);
+        return `<article class="listening-row" data-listening-id="${escapeHtml(item.id || item.library_id || item.identity)}">
+          <span class="listening-rank">${String(index + 1).padStart(2, '0')}</span>
+          <button class="listening-play" data-action="play" type="button" aria-label="播放 ${escapeHtml(d.title)}">▶</button>
+          <div class="listening-main"><div class="listening-title">${escapeHtml(d.title)}</div><div class="listening-artist">${escapeHtml(d.artist)}</div></div>
+          <span class="listening-count">${Number(item.play_count || 0)} 次</span>
+        </article>`;
+      }).join('')
     : '<div class="listening-empty">播放满 30 秒后，这里会留下你的常听。</div>';
 
   rediscoverList.innerHTML = rediscover.length
-    ? rediscover.map((item) => `<article class="listening-row rediscover-row" data-listening-id="${escapeHtml(item.id || item.library_id || item.identity)}">
-        <span class="rediscover-mark">✦</span>
-        <button class="listening-play" data-action="play" type="button" aria-label="播放 ${escapeHtml(item.title)}">▶</button>
-        <div class="listening-main"><div class="listening-title">${escapeHtml(item.title || '未命名歌曲')}</div><div class="listening-artist">${escapeHtml(item.artist || '未知艺术家')}</div></div>
-        <span class="listening-count">${Number(item.play_count || 0) ? `${Number(item.play_count)} 次` : '未播放'}</span>
-      </article>`).join('')
+    ? rediscover.map((item) => {
+        const d = formatTrackDisplay(item);
+        return `<article class="listening-row rediscover-row" data-listening-id="${escapeHtml(item.id || item.library_id || item.identity)}">
+          <span class="rediscover-mark">✦</span>
+          <button class="listening-play" data-action="play" type="button" aria-label="播放 ${escapeHtml(d.title)}">▶</button>
+          <div class="listening-main"><div class="listening-title">${escapeHtml(d.title)}</div><div class="listening-artist">${escapeHtml(d.artist)}</div></div>
+          <span class="listening-count">${Number(item.play_count || 0) ? `${Number(item.play_count)} 次` : '未播放'}</span>
+        </article>`;
+      }).join('')
     : '<div class="listening-empty">曲库里的歌都在等你重新发现。</div>';
 }
 
@@ -320,8 +752,9 @@ function renderMode() {
 
 function updatePlayer(item) {
   if (!item) return;
-  $('#player-title').textContent = item.title || '未命名歌曲';
-  $('#player-artist').textContent = item.artist || '未知艺术家';
+  const display = formatTrackDisplay(item);
+  $('#player-title').textContent = display.title;
+  $('#player-artist').textContent = display.artist;
   $('#player-art').textContent = item.local_status === 'LOCAL' || item.stream_url ? '♫' : '♪';
 }
 
@@ -611,6 +1044,7 @@ async function toggleLike(item) {
     }
     item.liked = typeof result?.liked === 'boolean' ? result.liked : next;
     item.wanted = result?.wanted || null;
+    if (!item.wanted) state.wanted = (Array.isArray(state.wanted) ? state.wanted : []).filter((entry) => String(entry?.track_id || entry?.id || '') !== String(item.track_id));
     render();
   } catch (error) {
     item.liked = !next;
@@ -652,6 +1086,18 @@ async function loadRecommendations(silent = false) {
     $('#error-banner').hidden = true; renderRecommendations(); updateNavigationButtons();
     if (!silent && state.items.length) $('#play-first').disabled = false;
   } catch { $('#error-banner').textContent = '推荐暂时同步失败。可以继续播放已有音乐，点击右上角刷新重试。'; $('#error-banner').hidden = false; if (!silent) renderRecommendations(); }
+  });
+}
+
+async function loadWanted(silent = false) {
+  return refreshOnce('wanted', async () => {
+    try {
+      const payload = await fetchJson('/api/wanted');
+      if (!Array.isArray(payload.items)) throw new Error('Invalid wanted response');
+      state.wanted = payload.items;
+      renderRecommendations();
+      updateNavigationButtons();
+    } catch { if (!silent) showToast('下载动态同步失败，请稍后刷新'); }
   });
 }
 
@@ -794,10 +1240,33 @@ $('#shuffle-button').addEventListener('click', reshuffleLibrary);
 $('#refresh-button').addEventListener('click', async () => {
   $('#refresh-button').disabled = true;
   $('#refresh-button').setAttribute('aria-busy', 'true');
-  try { await Promise.all([loadLibrary(), loadRecommendations(), loadListening(), loadProviderStatus()]); }
+  try { await Promise.all([loadLibrary(), loadRecommendations(), loadWanted(), loadListening(), loadProviderStatus()]); }
   finally { $('#refresh-button').disabled = false; $('#refresh-button').setAttribute('aria-busy', 'false'); }
 });
 $('#rediscover-button').addEventListener('click', () => loadListening());
+
+// A failed or retried download stays in the queue until the user acts; give them
+// an explicit way back in instead of making them unlike/re-like the track.
+$('#wanted-list').addEventListener('click', async (event) => {
+  const action = event.target?.getAttribute?.('data-action');
+  if (action !== 'wanted-retry') return;
+  const trackId = event.target.getAttribute('data-track-id');
+  if (!trackId) return;
+  event.target.disabled = true;
+  try {
+    const response = await fetch(`/api/wanted/${encodeURIComponent(trackId)}/retry`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json; charset=utf-8' },
+      body: '{}',
+    });
+    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    showToast('已重新加入下载队列');
+    await loadWanted();
+  } catch (error) {
+    event.target.disabled = false;
+    showToast(`重试失败：${String(error?.message || '未知错误')}`);
+  }
+});
 $('#random-listening-button').addEventListener('click', playRandomListening);
 
 // Listening sidebar collapse / expand.
@@ -938,9 +1407,9 @@ $('#audio-player').addEventListener('waiting', () => setPlaybackStatus('正在�
 $('#audio-player').addEventListener('playing', () => setPlaybackStatus('正在播放'));
 $('#audio-player').addEventListener('error', () => { if (state.currentKey) setPlaybackStatus('播放失败 · 点击播放重试'); });
 
-renderMode(); loadLibrary(); loadRecommendations(); loadListening(); loadProviderStatus();
-setInterval(() => { if (document.hidden) return; loadLibrary(true); loadRecommendations(true); loadProviderStatus(); }, 15000);
-document.addEventListener('visibilitychange', () => { if (!document.hidden) { loadLibrary(true); loadRecommendations(true); loadProviderStatus(); } });
+renderMode(); loadLibrary(); loadRecommendations(); loadWanted(); loadListening(); loadProviderStatus();
+setInterval(() => { if (document.hidden) return; loadLibrary(true); loadRecommendations(true); loadWanted(true); loadProviderStatus(); }, 15000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { loadLibrary(true); loadRecommendations(true); loadWanted(true); loadProviderStatus(); } });
 $('#library-sort').value = state.librarySort;
 
 // Restore listening sidebar collapse preference.
@@ -1005,17 +1474,19 @@ async function loadMusicLibrarySettings() {
 // Native folder picker via Tauri dialog plugin
 $('#music-library-browse').addEventListener('click', async () => {
   try {
-    // tauri-plugin-dialog is loaded via the Tauri IPC bridge
-    const { open } = window.__TAURI__?.dialog || {};
-    if (!open) { showToast('文件夹选择器不可用'); return; }
-    const selected = await open({ directory: true, title: '选择音乐文件夹', multiple: false });
+    // Tauri v2 IPC: invoke the pick_folder command registered in main.rs
+    const invoke = window.__TAURI__?.core?.invoke;
+    if (!invoke) {
+      // Not running in Tauri WebView — fallback to prompt
+      const path = prompt('输入音乐库完整路径（例如 D:\\Music）：', $('#music-library-path').value);
+      if (path) await saveMusicLibraryPath(path);
+      return;
+    }
+    const selected = await invoke('pick_folder');
     if (!selected) return; // user cancelled
-    const path = typeof selected === 'string' ? selected : selected;
-    await saveMusicLibraryPath(path);
+    await saveMusicLibraryPath(selected);
   } catch (e) {
-    // Fallback: prompt the user for a path
-    const path = prompt('输入音乐库完整路径（例如 D:\\Music）：', $('#music-library-path').value);
-    if (path) await saveMusicLibraryPath(path);
+    showToast(`文件夹选择失败：${e}`);
   }
 });
 

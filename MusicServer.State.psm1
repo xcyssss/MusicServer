@@ -8,6 +8,37 @@ Import-Module (Join-Path $PSScriptRoot 'MusicServer.Database.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Core.psm1') -Force
 
 $script:SchemaVersion = 6
+
+# Local files carry uploader tags rather than the singer, so the real artist is
+# resolved once and cached here. Rows are keyed by normalized file path because
+# that is the fact that survives re-indexing; a NOT_FOUND row records that the
+# lookup ran so the next start does not repeat the same network search. Kept as
+# one definition because the launcher bootstraps this table on its own: it
+# connects to an existing database without running the full schema script.
+$script:LocalTrackArtistDdl = @"
+CREATE TABLE IF NOT EXISTS local_track_artists (
+    path_key TEXT PRIMARY KEY,
+    artist TEXT NOT NULL DEFAULT '',
+    album TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_local_track_artists_status ON local_track_artists(status);
+"@
+
+function Initialize-LocalTrackArtistSchema {
+    <#
+    .SYNOPSIS
+      Creates the resolved-artist cache table when it is absent.
+
+      Initialize-MusicServerSchema creates the whole schema, but the launcher
+      binds an existing database with Connect-MusicServerDatabase, which by design
+      changes nothing. The artist backfill runs in the launcher, so it ensures its
+      own table instead of depending on the API process having started first.
+    #>
+    Invoke-MusicServerSqlNonQuery -Query $script:LocalTrackArtistDdl
+}
 $script:LeaseMinutes = 30
 
 # ================================================================
@@ -177,6 +208,12 @@ CREATE TABLE IF NOT EXISTS app_settings (
     value TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL DEFAULT ''
 );
+-- Local files carry uploader tags rather than the singer, so the real artist is
+-- resolved once and cached here. Rows are keyed by normalized file path because
+-- that is the fact that survives re-indexing; a NOT_FOUND row records that the
+-- lookup ran so the next start does not repeat the same network search. The
+-- definition is shared with the launcher, which creates this table on its own.
+$script:LocalTrackArtistDdl
 CREATE INDEX IF NOT EXISTS idx_wanted_state ON wanted_queue(state);
 CREATE INDEX IF NOT EXISTS idx_wanted_lease ON wanted_queue(lease_expires_at);
 CREATE INDEX IF NOT EXISTS idx_wanted_lease_epoch ON wanted_queue(lease_expires_epoch);
@@ -212,6 +249,59 @@ function Get-CanonicalLocalTrackMapDb {
         if ($localSongId) { $map[$localSongId] = $row }
     }
     return $map
+}
+
+# ================================================================
+# Local track artists
+# ================================================================
+
+function Get-LocalTrackArtistMapDb {
+    <#
+    .SYNOPSIS
+      Cached resolved artists keyed by normalized file path.
+    #>
+    $map = @{}
+    foreach ($row in @(Invoke-MusicServerSqlJson -Query 'SELECT path_key, artist, album, status, source, updated_at FROM local_track_artists;')) {
+        $key = [string]$row.path_key
+        if ($key) { $map[$key] = $row }
+    }
+    return $map
+}
+
+function Get-LocalTrackArtistDb {
+    param([Parameter(Mandatory)][string]$PathKey)
+    $rows = @(Invoke-MusicServerParamSql -Template 'SELECT path_key, artist, album, status, source, updated_at FROM local_track_artists WHERE path_key = @path_key LIMIT 1;' -Params @{ path_key = $PathKey })
+    if ($rows.Count -eq 0) { return $null }
+    return $rows[0]
+}
+
+function Save-LocalTrackArtistDb {
+    <#
+    .SYNOPSIS
+      Records the outcome of one artist lookup, including a negative result, so a
+      library that cannot be resolved is not re-queried on every start.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$PathKey,
+        [AllowEmptyString()][string]$Artist = '',
+        [AllowEmptyString()][string]$Album = '',
+        [Parameter(Mandatory)][string]$Status,
+        [AllowEmptyString()][string]$Source = ''
+    )
+    # The template expands parameters as SQL literals, so the timestamp has to be
+    # evaluated here; passing the command name would store it verbatim.
+    $now = Get-NowIso
+    $affected = Invoke-MusicServerParamNonQuery -Template @"
+INSERT INTO local_track_artists (path_key, artist, album, status, source, updated_at)
+VALUES (@path_key, @artist, @album, @status, @source, @updated_at)
+ON CONFLICT(path_key) DO UPDATE SET
+    artist = excluded.artist, album = excluded.album, status = excluded.status,
+    source = excluded.source, updated_at = excluded.updated_at;
+"@ -Params @{
+        path_key = $PathKey; artist = $Artist; album = $Album
+        status = $Status; source = $Source; updated_at = $now
+    }
+    return [int]$affected
 }
 
 function Save-CanonicalTrackDb {
@@ -313,6 +403,55 @@ function Reset-CanonicalTrackToRemoteDb {
         Save-CanonicalTrackDb -Track $track | Out-Null
     }
     return (Get-CanonicalTrackDb -TrackId $TrackId)
+}
+
+function Add-CanonicalTrackIdentifierDb {
+    # Persist a discovered identifier (e.g. a NetEase id found by provider search)
+    # so later download attempts, lyrics and recommendation assembly reuse it
+    # instead of searching again. Idempotent per (type, value).
+    param(
+        [Parameter(Mandatory)][string]$TrackId,
+        [Parameter(Mandatory)][string]$Type,
+        [Parameter(Mandatory)][string]$Value
+    )
+    if (-not $Type -or -not $Value) { return $false }
+    $rows = @(Invoke-MusicServerParamSql -Template 'SELECT identifiers_json FROM canonical_tracks WHERE id = @id LIMIT 1;' -Params @{ id = $TrackId })
+    if ($rows.Count -eq 0) { return $false }
+    # Windows PowerShell 5.1 can hand back a nested array from ConvertFrom-Json
+    # inside a module scope, so flatten defensively instead of trusting the shape.
+    $identifiers = New-Object System.Collections.ArrayList
+    $parsed = $null
+    try { if ($rows[0].identifiers_json) { $parsed = ConvertFrom-Json -InputObject ([string]$rows[0].identifiers_json) } } catch { $parsed = $null }
+    $pending = New-Object System.Collections.Queue
+    foreach ($entry in @($parsed)) { $pending.Enqueue($entry) }
+    while ($pending.Count -gt 0) {
+        $entry = $pending.Dequeue()
+        if ($null -eq $entry) { continue }
+        # PS 5.1 can hand back Object[], ArrayList or List wrappers here, so treat
+        # any non-string enumerable as a container and keep flattening.
+        if (($entry -is [System.Collections.IEnumerable]) -and -not ($entry -is [string])) {
+            foreach ($inner in $entry) { $pending.Enqueue($inner) }
+            continue
+        }
+        # ConvertTo-Json renders a list wrapper as {value:[...],Count:n}; unwrap it
+        # so an already corrupted row still reports its real identifiers.
+        if (-not (Get-OptionalProperty $entry 'type' '') -and $entry.PSObject.Properties['value'] -and ($entry.value -is [System.Collections.IEnumerable]) -and -not ($entry.value -is [string])) {
+            foreach ($inner in $entry.value) { $pending.Enqueue($inner) }
+            continue
+        }
+        [void]$identifiers.Add($entry)
+    }
+    foreach ($existing in $identifiers) {
+        if ([string](Get-OptionalProperty $existing 'type' '') -eq $Type -and [string](Get-OptionalProperty $existing 'value' '') -eq $Value) { return $false }
+    }
+    [void]$identifiers.Add([pscustomobject]@{ type = $Type; value = $Value })
+    $json = ConvertTo-Json -InputObject @($identifiers.ToArray()) -Compress -Depth 10
+    $affected = Invoke-MusicServerParamNonQuery -Template @"
+UPDATE canonical_tracks
+SET identifiers_json = @ident, updated_at = @now, revision = revision + 1
+WHERE id = @id;
+"@ -Params @{ ident = $json; now = (Get-NowIso); id = $TrackId } -ReturnChanges
+    return ([int]$affected -gt 0)
 }
 
 function Set-CanonicalTrackStatusForWantedDb {
@@ -497,6 +636,7 @@ function Get-RecommendationSeedCandidatesDb {
     param(
         [int]$SeedCount = 25,
         [AllowEmptyCollection()][object[]]$NavidromeStars = @(),
+        [AllowEmptyCollection()][object[]]$LibraryFallback = @(),
         [int]$RandomSeed = -1
     )
 
@@ -578,6 +718,30 @@ function Get-RecommendationSeedCandidatesDb {
         if (-not $trackId) { $trackId = Get-CanonicalTrackId -Title $title -Artist $artist }
         $key = "text:$(Normalize-MusicText $title)|$(Normalize-MusicText $artist)"
         $signals[$key] = [pscustomobject]@{ TrackId = $trackId; Title = $title; Artist = $artist; Weight = 5; Source = 'navidrome_star' }
+    }
+
+    # A fresh install has no likes, no stars and no legacy import, so the
+    # preference-only pool is empty and the daily generator would save zero
+    # recommendations every day. The local library is the weakest signal and is
+    # only consulted when nothing stronger exists, so it cannot dilute a pool
+    # that already reflects the user's taste.
+    if ($signals.Count -eq 0) {
+        foreach ($fallback in @($LibraryFallback)) {
+            $title = ''; $artist = ''; $trackId = ''
+            if ($fallback -is [string]) {
+                $parts = [string]$fallback -split ' - ', 2
+                $title = [string]$parts[0]; if ($parts.Count -gt 1) { $artist = [string]$parts[1] }
+            } else {
+                $title = [string](Get-OptionalProperty $fallback 'Title' (Get-OptionalProperty $fallback 'title'))
+                $artist = [string](Get-OptionalProperty $fallback 'Artist' (Get-OptionalProperty $fallback 'artist'))
+                $trackId = [string](Get-OptionalProperty $fallback 'TrackId' (Get-OptionalProperty $fallback 'track_id'))
+            }
+            if (-not $title) { continue }
+            if (-not $trackId) { $trackId = Get-CanonicalTrackId -Title $title -Artist $artist }
+            $key = "text:$(Normalize-MusicText $title)|$(Normalize-MusicText $artist)"
+            if ($signals.ContainsKey($key)) { continue }
+            $signals[$key] = [pscustomobject]@{ TrackId = $trackId; Title = $title; Artist = $artist; Weight = 1; Source = 'library_fallback' }
+        }
     }
 
     $expanded = foreach ($seed in @($signals.Values)) {
@@ -863,6 +1027,9 @@ function Convert-DbWantedRow {
         lease_expires_epoch = if ($null -eq $Row.lease_expires_epoch) { $null } else { [long]$Row.lease_expires_epoch }
         revision = [int]$Row.revision
         created_at = [string]$Row.created_at; updated_at = [string]$Row.updated_at
+        title = if ($Row.PSObject.Properties['track_title']) { [string]$Row.track_title } else { '' }
+        artist = if ($Row.PSObject.Properties['track_artist']) { [string]$Row.track_artist } else { '' }
+        duration = if ($Row.PSObject.Properties['track_duration']) { [int]$Row.track_duration } else { 0 }
     }
 }
 
@@ -895,7 +1062,9 @@ VALUES (@tid, @wid, 'WANTED', 0, @ma, 1, @now, @now);
 function Get-WantedTracksDb {
     param([switch]$EligibleOnly)
     if (-not $EligibleOnly) {
-        $rows = @(Invoke-MusicServerSqlJson -Query 'SELECT * FROM wanted_queue ORDER BY created_at;')
+        # Join the canonical row so the UI can render queue entries that are no
+        # longer part of today's recommendation list.
+        $rows = @(Invoke-MusicServerSqlJson -Query 'SELECT w.*, c.title AS track_title, c.artist AS track_artist, c.duration AS track_duration, c.status AS track_status FROM wanted_queue w LEFT JOIN canonical_tracks c ON c.id = w.track_id ORDER BY w.created_at;')
         return @($rows | ForEach-Object { Convert-DbWantedRow -Row $_ })
     }
     $now = (Get-NowIso)
@@ -1789,7 +1958,7 @@ function Resolve-ConfiguredMusicDir {
     } catch {}
 
     # Priority 3: Default. Config.MusicDir is mutable after Apply-ConfiguredMusicDir.
-    return (Get-DefaultMusicDir -Root $Config.Root)
+    return (Get-DefaultMusicDir -AppHome $Config.AppHome)
 }
 
 function Apply-ConfiguredMusicDir {
@@ -1803,12 +1972,13 @@ function Apply-ConfiguredMusicDir {
     $resolved = Resolve-ConfiguredMusicDir -Config $Config
     $Config.MusicDir = $resolved
     $Config.DailyDir = Join-Path $resolved 'DailyMix'
+    try { Sync-NavidromeMusicFolder -NdConfigPath $Config.NdConfig -NewMusicFolder $resolved | Out-Null } catch {}
     return $resolved
 }
 
 function Get-DefaultMusicDirForConfig {
     param([Parameter(Mandatory)][psobject]$Config)
-    return Get-DefaultMusicDir -Root $Config.Root
+    return Get-DefaultMusicDir -AppHome $Config.AppHome
 }
 
 function Test-MusicLibraryPath {

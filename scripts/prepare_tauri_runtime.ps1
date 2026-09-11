@@ -36,12 +36,15 @@ $runtimeFiles = @(
     'watchdog_ui.ps1',
     'music_api.ps1',
     'wanted_worker.ps1',
+    'daily_recommend.ps1',
+    'register_daily_recommend.ps1',
     'MusicServer.Core.psm1',
     'MusicServer.Database.psm1',
     'MusicServer.Http.psm1',
     'MusicServer.Identity.psm1',
     'MusicServer.State.psm1',
-    'MusicServer.Providers.psm1'
+    'MusicServer.Providers.psm1',
+    'MusicServer.Migration.psm1'
 )
 
 foreach ($relative in $runtimeFiles) {

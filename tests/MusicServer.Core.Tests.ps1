@@ -35,7 +35,7 @@ Describe 'MusicServer canonical state and queue' {
         New-Item -ItemType Directory -Path $TestRoot -Force | Out-Null
         Import-Module (Join-Path $ProjectRoot 'MusicServer.Core.psm1') -Force
         Import-Module (Join-Path $ProjectRoot 'MusicServer.Providers.psm1') -Force
-        $Config = New-MusicServerConfig -Root $TestRoot
+        $Config = New-MusicServerConfig -Root $ProjectRoot -AppHome $TestRoot
         Initialize-MusicServerState -Config $Config
     }
 
@@ -230,7 +230,7 @@ Describe 'MusicServer canonical state and queue' {
         New-Item -ItemType File -Path $fake -Force | Out-Null
         [Environment]::SetEnvironmentVariable('MUSICSERVER_YTDLP', $fake)
 
-        $customConfig = New-MusicServerConfig -Root $TestRoot
+        $customConfig = New-MusicServerConfig -Root $ProjectRoot -AppHome $TestRoot
         $customConfig.YtDlp | Should Be ([IO.Path]::GetFullPath($fake))
     }
 
@@ -257,5 +257,35 @@ Describe 'MusicServer canonical state and queue' {
         $source | Should Match 'CANCEL_REQUESTED'
         $source | Should Match 'Test-WantedCancellation'
         $source | Should Match 'Complete-WantedCancellation'
+    }
+}
+
+Describe 'MusicServer runtime logging' {
+    It 'appends timestamped lines and rotates the log at the size cap' {
+        $logPath = Join-Path $TestDrive 'runtime.log'
+        Write-MusicServerLog -Path $logPath -Message 'first line'
+        (Get-Content -LiteralPath $logPath -Raw) | Should Match 'first line'
+        (Get-Content -LiteralPath $logPath -Raw) | Should Match '\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]'
+
+        # Cap the file at its current size so the next write rotates it.
+        $size = (Get-Item -LiteralPath $logPath).Length
+        Write-MusicServerLog -Path $logPath -Message 'second line' -MaxBytes $size
+        (Test-Path -LiteralPath "$logPath.1" -PathType Leaf) | Should Be $true
+        (Get-Content -LiteralPath "$logPath.1" -Raw) | Should Match 'first line'
+        (Get-Content -LiteralPath $logPath -Raw) | Should Match 'second line'
+        (Get-Content -LiteralPath $logPath -Raw) | Should Not Match 'first line'
+    }
+
+    It 'keeps the rotation count bounded' {
+        $logPath = Join-Path $TestDrive 'bounded.log'
+        foreach ($message in @('one', 'two', 'three', 'four')) {
+            Write-MusicServerLog -Path $logPath -Message $message -MaxBytes 1 -KeepFiles 2
+        }
+        (Test-Path -LiteralPath "$logPath.1" -PathType Leaf) | Should Be $true
+        (Test-Path -LiteralPath "$logPath.2" -PathType Leaf) | Should Be $true
+        (Test-Path -LiteralPath "$logPath.3" -PathType Leaf) | Should Be $false
+        (Get-Content -LiteralPath $logPath -Raw) | Should Match 'four'
+        (Get-Content -LiteralPath "$logPath.1" -Raw) | Should Match 'three'
+        @(Get-ChildItem -LiteralPath $TestDrive -Filter 'bounded.log*').Count | Should Be 3
     }
 }
