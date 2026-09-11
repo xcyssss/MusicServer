@@ -1331,6 +1331,7 @@ try {
     Start-MusicServerWorker
     $startupPhases['worker_start'] = $startupClock.Elapsed.TotalMilliseconds
     Initialize-MusicServerScheduledTasks
+    $startupPhases['scheduled_tasks'] = $startupClock.Elapsed.TotalMilliseconds
 
     $script:Listener = [System.Net.HttpListener]::new()
     $script:Listener.Prefixes.Add($UiPrefix)
@@ -1348,6 +1349,7 @@ try {
     $startupPhases['listener_media_pool'] = $startupClock.Elapsed.TotalMilliseconds
     Initialize-ArtistBackfillPool
     Start-ArtistBackfill
+    $startupPhases['artist_backfill'] = $startupClock.Elapsed.TotalMilliseconds
 
     # External watchdog: watches the heartbeat file this loop writes and
     # restarts the UI if a wedged handler freezes the single-threaded listener.
