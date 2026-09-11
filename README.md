@@ -1,6 +1,17 @@
 # MusicServer
 
-个人音乐服务器：本地音乐库 + 每日推荐 + Wanted 下载队列 + 歌词 + 播放统计，主客户端为 **Tauri v2 Windows 桌面 APP**。
+<p align="center">
+  <img src="src-tauri/icons/icon.png" width="112" alt="MusicServer 应用图标" />
+</p>
+
+<p align="center">
+  个人音乐服务器：本地音乐库 + 每日推荐 + Wanted 下载队列 + 歌词 + 播放统计<br />
+  主客户端为 <b>Tauri v2 Windows 桌面 APP</b>
+</p>
+
+<p align="center">
+  <img src="docs/assets/poster.png" width="720" alt="MusicServer 桌面界面海报" />
+</p>
 
 ## 当前架构
 
@@ -131,7 +142,8 @@ MUSICSERVER_NAVIDROME
 ```text
 MusicServer/
 ├─ .github/workflows/             # CI
-├─ docs/                          # 当前说明 + 历史审计归档
+├─ docs/                          # 当前说明 + 历史审计归档 + 品牌资产
+│  └─ assets/                     # README 海报与仓库社交预览图
 ├─ scripts/                       # 构建/维护脚本
 ├─ src-tauri/                     # Tauri v2 Windows shell
 │  ├─ src/main.rs                 # runtime 部署、服务生命周期、窗口导航
@@ -153,6 +165,8 @@ MusicServer/
 ```
 
 历史架构审计和加固报告已移到 [`docs/archive/`](docs/archive/)。中文详细使用说明见 [`docs/USER_GUIDE.zh-CN.md`](docs/USER_GUIDE.zh-CN.md)。
+
+品牌资产位于 [`docs/assets/`](docs/assets/)：`poster.png` 是 README 顶部的界面海报，`social-preview.png`（1280×640）用于 GitHub **Settings → Social preview** 上传。应用图标为 `src-tauri/icons/icon.ico` 与 `icon.png`；图标在原始方图基础上按 68% 取景重新裁切（保证 16/24/32 px 任务栏尺寸下音符可辨），并加圆角 alpha 蒙版导出为透明磁贴。
 
 ## 启动与日常操作
 
