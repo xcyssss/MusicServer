@@ -43,6 +43,7 @@
             <button id="listening-toggle" class="secondary-button" aria-controls="listening-sidebar" aria-expanded="false">我的常听</button>
             <button id="queue-toggle" class="secondary-button" aria-controls="wanted" aria-expanded="false">下载动态 <b id="queue-count">0</b></button>
             <button id="refresh-button" class="icon-button" aria-label="刷新音乐库与推荐" title="刷新音乐库与推荐">↻</button>
+            <button id="settings-toggle" class="secondary-button" aria-controls="settings-panel" aria-expanded="false">设置</button>
           </div>
         </header>
         <div class="workspace-grid">
@@ -66,7 +67,7 @@
               <div id="error-banner" class="error-banner" role="status" hidden></div>
               <div id="recommendation-list" class="track-list" aria-label="推荐歌曲" tabindex="0"></div>
             </section>
-            <details id="wanted" class="wanted-callout"><summary>本次推荐的下载动态 <span>点红心，喜欢的歌自动加入曲库</span></summary><div id="wanted-list" class="wanted-list" role="status"></div></details>
+            <details id="wanted" class="wanted-callout"><summary>下载动态 <span>整队列进度：点红心，喜欢的歌自动加入曲库</span></summary><div id="wanted-list" class="wanted-list" role="status"></div></details>
           </section>
         </div>
       </main>
@@ -106,6 +107,25 @@
     <aside id="lyrics-panel" class="lyrics-panel" hidden aria-label="歌词">
       <div class="lyrics-heading"><div><span class="section-kicker">NOW PLAYING</span><h2>歌词</h2></div><button id="lyrics-close" class="icon-button" aria-label="关闭歌词">×</button></div>
       <div id="lyrics-content" class="lyrics-content"><span class="muted">播放歌曲后加载歌词</span></div>
+    </aside>
+    <aside id="settings-panel" class="settings-panel" hidden aria-label="设置">
+      <div class="settings-heading"><div><span class="section-kicker">CONFIGURATION</span><h2>设置</h2></div><button id="settings-close" class="icon-button" aria-label="关闭设置">×</button></div>
+      <div class="settings-content">
+        <div class="settings-group">
+          <label>音乐库位置</label>
+          <div id="music-library-status" class="settings-status"></div>
+          <div class="settings-path-row">
+            <input id="music-library-path" type="text" readonly aria-label="音乐库路径" />
+          </div>
+          <div class="settings-path-source"><span id="music-library-source" class="muted"></span></div>
+          <div class="settings-actions">
+            <button id="music-library-browse" class="secondary-button" type="button">选择文件夹</button>
+            <button id="music-library-open" class="secondary-button" type="button">打开文件夹</button>
+            <button id="music-library-reset" class="text-button" type="button">恢复默认</button>
+          </div>
+          <p class="settings-hint">更改音乐库位置只会改变 MusicServer 使用的目录，不会移动、复制或删除现有歌曲和歌词。</p>
+        </div>
+      </div>
     </aside>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
     <script src="/app.js" defer></script>

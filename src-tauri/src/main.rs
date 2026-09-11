@@ -7,19 +7,23 @@
 
 use std::env;
 use std::fs;
-use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Child;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+mod background_process;
+mod runtime_manifest;
+mod startup_probe;
+mod startup_trace;
 
 use tauri::Manager;
 
 const DEFAULT_UI_PORT: u16 = 8790;
 const DEFAULT_API_PORT: u16 = 8787;
 const FALLBACK_PAIRS: &[(u16, u16)] = &[(8791, 8788), (8792, 8789)];
-const BUILD_MARKER: &str = "musicserver-single-page-v3";
+const BUILD_MARKER: &str = env!("MUSICSERVER_BUILD_ID");
 const LAUNCHER: &str = "start_musicserver_ui.ps1";
 const APP_HOME_ENV: &str = "MUSICSERVER_APP_HOME";
 const PACKAGED_APP_HOME_DIR: &str = "com.musicserver.desktop";
@@ -45,24 +49,12 @@ fn endpoint_url(port: u16) -> String {
 /// is only used for startup identity checks, not for normal application API
 /// traffic.
 fn http_contains(port: u16, path: &str, marker: &str) -> bool {
-    let address: std::net::SocketAddr = match format!("127.0.0.1:{port}").parse() {
-        Ok(address) => address,
-        Err(_) => return false,
-    };
-    let mut stream = match TcpStream::connect_timeout(&address, Duration::from_millis(400)) {
-        Ok(stream) => stream,
-        Err(_) => return false,
-    };
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(1200)));
-    let _ = stream.set_write_timeout(Some(Duration::from_millis(1200)));
-    let request =
-        format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
-    if stream.write_all(request.as_bytes()).is_err() {
-        return false;
-    }
-    let mut response = Vec::new();
-    let _ = stream.read_to_end(&mut response);
-    !response.is_empty() && String::from_utf8_lossy(&response).contains(marker)
+    startup_probe::contains(
+        port,
+        path,
+        marker,
+        Instant::now() + Duration::from_millis(1200),
+    )
 }
 
 fn api_is_current(port: u16) -> bool {
@@ -114,35 +106,15 @@ fn resolve_bundled_runtime(resource_dir: Option<PathBuf>) -> Option<PathBuf> {
     None
 }
 
-/// A locally built release executable still lives below
-/// <checkout>/src-tauri/target/... . Discover that checkout from the executable
-/// location at runtime so existing development installs keep using their current
-/// Music/, Navidrome/ and state data without embedding a compile-time path.
-fn find_development_checkout() -> Option<PathBuf> {
-    let executable = env::current_exe().ok()?;
-    for ancestor in executable.ancestors() {
-        if has_launcher(ancestor)
-            && ancestor.join("web").is_dir()
-            && ancestor.join("src-tauri").is_dir()
-        {
-            return Some(ancestor.to_path_buf());
-        }
-    }
-    None
-}
-
-/// Stable writable application home. An explicit environment override wins.
-/// Local checkout builds retain the historical checkout root; installed builds
-/// use an identifier-scoped LOCALAPPDATA directory that cannot collide with the
-/// NSIS installation directory.
+/// Stable writable application home. An explicit environment override wins;
+/// otherwise use the identifier-scoped LOCALAPPDATA directory. The executable
+/// location is deliberately not consulted, so a checkout can be deleted or
+/// replaced without changing persistent state.
 fn resolve_app_home() -> PathBuf {
     if let Some(configured) = env::var_os(APP_HOME_ENV) {
         if !configured.is_empty() {
             return PathBuf::from(configured);
         }
-    }
-    if let Some(checkout) = find_development_checkout() {
-        return checkout;
     }
     if let Some(local_app_data) = env::var_os("LOCALAPPDATA") {
         return PathBuf::from(local_app_data).join(PACKAGED_APP_HOME_DIR);
@@ -151,6 +123,14 @@ fn resolve_app_home() -> PathBuf {
 }
 
 fn copy_runtime_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
+    copy_runtime_tree_into(source, destination, destination)
+}
+
+fn copy_runtime_tree_into(
+    source: &Path,
+    destination: &Path,
+    staging_root: &Path,
+) -> std::io::Result<()> {
     fs::create_dir_all(destination)?;
     for entry in fs::read_dir(source)? {
         let entry = entry?;
@@ -160,21 +140,74 @@ fn copy_runtime_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
         let source_path = entry.path();
         let destination_path = destination.join(entry.file_name());
         if entry.file_type()?.is_dir() {
-            copy_runtime_tree(&source_path, &destination_path)?;
+            copy_runtime_tree_into(&source_path, &destination_path, staging_root)?;
         } else {
             if let Some(parent) = destination_path.parent() {
                 fs::create_dir_all(parent)?;
             }
-            fs::copy(&source_path, &destination_path)?;
+            // Same-version launches must not rewrite every packaged file (and
+            // retrigger antivirus scans). Compare content, not timestamps: a
+            // damaged or same-size upgraded file must still be replaced.
+            if !destination_path.is_file()
+                || fs::metadata(&source_path)?.len() != fs::metadata(&destination_path)?.len()
+                || fs::read(&source_path)? != fs::read(&destination_path)?
+            {
+                replace_runtime_file(&source_path, &destination_path, staging_root)?;
+            }
         }
     }
     Ok(())
 }
 
+fn replace_runtime_file(
+    source: &Path,
+    destination: &Path,
+    staging_root: &Path,
+) -> std::io::Result<()> {
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temporary = staging_root.join(format!(
+        ".musicserver-update-{}-{sequence}",
+        std::process::id()
+    ));
+    let mut input = fs::File::open(source)?;
+    // create_new ensures an existing user file can never be overwritten here.
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    let prepared = std::io::copy(&mut input, &mut output).and_then(|_| output.sync_all());
+    drop(output);
+    let result = prepared.and_then(|_| fs::rename(&temporary, destination));
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
 /// Synchronize only packaged runtime files into the writable APP home. Existing
 /// Music/, DailyMix_data/, Navidrome/, logs/ and user files are not deleted.
+#[cfg(test)]
 fn stage_runtime(bundle_runtime: &Path, app_home: &Path) -> std::io::Result<()> {
+    stage_runtime_traced(
+        bundle_runtime,
+        app_home,
+        &mut startup_trace::Trace::from_env(),
+    )
+}
+
+fn stage_runtime_traced(
+    bundle_runtime: &Path,
+    app_home: &Path,
+    trace: &mut startup_trace::Trace,
+) -> std::io::Result<()> {
+    let started = Instant::now();
+    let files = runtime_manifest::verify(bundle_runtime, BUILD_MARKER)?;
+    runtime_manifest::verify_destination(app_home, &files)?;
+    trace.record("runtime_verify", started);
+    let started = Instant::now();
     copy_runtime_tree(bundle_runtime, app_home)?;
+    trace.record("runtime_sync", started);
     if !has_launcher(app_home) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -182,6 +215,86 @@ fn stage_runtime(bundle_runtime: &Path, app_home: &Path) -> std::io::Result<()> 
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn corrupt_package_never_changes_existing_runtime() {
+        let root = env::temp_dir().join(format!("musicserver-corrupt-{}", std::process::id()));
+        let source = root.join("source");
+        let target = root.join("target");
+        runtime_manifest::fixture(&source, BUILD_MARKER);
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join(LAUNCHER), b"old runtime").unwrap();
+        fs::write(source.join("web/app.js"), b"corruption").unwrap();
+        assert!(stage_runtime(&source, &target).is_err());
+        assert_eq!(fs::read(target.join(LAUNCHER)).unwrap(), b"old runtime");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn locked_destination_preserves_old_bytes_and_removes_temporary_file() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = env::temp_dir().join(format!("musicserver-locked-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("source");
+        let target = root.join("target");
+        fs::write(&source, b"new runtime").unwrap();
+        fs::write(&target, b"old runtime").unwrap();
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&target)
+            .unwrap();
+        assert!(replace_runtime_file(&source, &target, &root).is_err());
+        drop(lock);
+        assert_eq!(fs::read(&target).unwrap(), b"old runtime");
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 2);
+        replace_runtime_file(&source, &target, &root).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"new runtime");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn staging_skips_equal_files_and_repairs_same_size_changes() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            env::temp_dir().join(format!("musicserver-stage-{}-{unique}", std::process::id()));
+        let source = root.join("source");
+        let target = root.join("target");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join(LAUNCHER), b"first").unwrap();
+        runtime_manifest::fixture(&source, BUILD_MARKER);
+        stage_runtime(&source, &target).unwrap();
+        let launcher = target.join(LAUNCHER);
+        let before = fs::metadata(&launcher).unwrap().modified().unwrap();
+        let original_permissions = fs::metadata(&launcher).unwrap().permissions();
+        let mut read_only = original_permissions.clone();
+        read_only.set_readonly(true);
+        fs::set_permissions(&launcher, read_only).unwrap();
+        fs::write(target.join("user-data"), b"preserve").unwrap();
+        runtime_manifest::fixture(&source, BUILD_MARKER);
+        stage_runtime(&source, &target).unwrap();
+        fs::set_permissions(&launcher, original_permissions).unwrap();
+        assert_eq!(before, fs::metadata(&launcher).unwrap().modified().unwrap());
+        fs::write(&launcher, b"wrong").unwrap();
+        runtime_manifest::fixture(&source, BUILD_MARKER);
+        stage_runtime(&source, &target).unwrap();
+        assert_eq!(fs::read(&launcher).unwrap(), b"first");
+        fs::write(source.join(LAUNCHER), b"newer").unwrap();
+        runtime_manifest::fixture(&source, BUILD_MARKER);
+        stage_runtime(&source, &target).unwrap();
+        assert_eq!(fs::read(&launcher).unwrap(), b"newer");
+        assert_eq!(fs::read(target.join("user-data")).unwrap(), b"preserve");
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 
 /// 拉起指定端口的 launcher 并返回子进程。失败返回 None（调用方会继续尝试）。
@@ -195,10 +308,11 @@ fn spawn_launcher(root: &Path, ui_port: u16, api_port: u16) -> Option<Child> {
     let api_prefix = endpoint_url(api_port);
     let sqlite_path = root.join("tools").join("sqlite3.exe");
 
-    let mut command = Command::new("powershell.exe");
+    let mut command = background_process::command("powershell.exe");
     command
         .args([
             "-NoProfile",
+            "-NonInteractive",
             "-WindowStyle",
             "Hidden",
             "-ExecutionPolicy",
@@ -211,10 +325,7 @@ fn spawn_launcher(root: &Path, ui_port: u16, api_port: u16) -> Option<Child> {
         .arg("-UiPrefix")
         .arg(&ui_prefix)
         .arg("-NoBrowser")
-        .current_dir(root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .current_dir(root);
 
     if sqlite_path.is_file() {
         command.env("MUSICSERVER_SQLITE", sqlite_path);
@@ -233,70 +344,163 @@ fn stop_owned_launcher(state: &AppState) {
 /// 确保当前版本的 UI/API 可用。若已有当前版本服务则直接复用，不触碰
 /// runtime 文件；只有需要启动自己的服务树时才把 bundle runtime 同步到
 /// APP home。旧版服务占用默认端口时使用隔离端口。
-fn ensure_ui_ready(bundle_runtime: &Path, app_home: &Path, state: &AppState) -> Option<String> {
+fn ensure_ui_ready(
+    bundle_runtime: &Path,
+    app_home: &Path,
+    state: &AppState,
+    trace: &mut startup_trace::Trace,
+) -> Option<String> {
     let mut pairs = vec![(DEFAULT_UI_PORT, DEFAULT_API_PORT)];
     pairs.extend_from_slice(FALLBACK_PAIRS);
     let mut runtime_staged = false;
 
     for (ui_port, api_port) in pairs {
-        if service_is_current(ui_port, api_port) {
-            return Some(endpoint_url(ui_port));
+        let started = Instant::now();
+        // Probe ownership once. A closed UI needs no HTTP identity request;
+        // repeated closed-port connects on Windows each consume their timeout.
+        let (ui_open, api_open) = std::thread::scope(|scope| {
+            let ui = scope.spawn(|| port_open(ui_port));
+            let api = port_open(api_port);
+            (ui.join().unwrap_or(false), api)
+        });
+        trace.record("port_probe", started);
+        if ui_open {
+            let started = Instant::now();
+            let current = api_open && service_is_current(ui_port, api_port);
+            trace.record("existing_pair_identity", started);
+            if current {
+                return Some(endpoint_url(ui_port));
+            }
+            continue;
         }
 
         // Never compete with a listener we cannot identify. A current API is
         // safe to reuse when only its UI port is free.
-        if port_open(ui_port) || (port_open(api_port) && !api_is_current(api_port)) {
-            continue;
+        if api_open {
+            let started = Instant::now();
+            let current = api_is_current(api_port);
+            trace.record("existing_api_identity", started);
+            if !current {
+                continue;
+            }
         }
 
         if !runtime_staged {
-            if let Err(error) = stage_runtime(bundle_runtime, app_home) {
+            let started = Instant::now();
+            if let Err(error) = stage_runtime_traced(bundle_runtime, app_home, trace) {
+                trace.record("runtime_stage_failed", started);
                 eprintln!("failed to stage MusicServer runtime: {error}");
                 return None;
             }
             runtime_staged = true;
         }
 
+        let started = Instant::now();
         let mut guard = state.child.lock().unwrap();
         if guard.is_none() {
             *guard = spawn_launcher(app_home, ui_port, api_port);
         }
         drop(guard);
+        trace.record("launcher_spawn", started);
 
-        // 轮询最多 ~30s（launcher 启动 API 需要几秒）
-        for _ in 0..60 {
-            if service_is_current(ui_port, api_port) {
+        // Include network time in the per-pair budget, not just sleep time.
+        let started = Instant::now();
+        let deadline = started + Duration::from_secs(30);
+        while Instant::now() < deadline {
+            let probe_deadline = deadline.min(Instant::now() + Duration::from_millis(1200));
+            if startup_probe::contains(ui_port, "/app.js", BUILD_MARKER, probe_deadline)
+                && startup_probe::contains(
+                    api_port,
+                    "/health",
+                    BUILD_MARKER,
+                    deadline.min(Instant::now() + Duration::from_millis(1200)),
+                )
+            {
+                trace.record("services_ready", started);
                 return Some(endpoint_url(ui_port));
             }
-            std::thread::sleep(Duration::from_millis(500));
+            std::thread::sleep(
+                Duration::from_millis(500).min(deadline.saturating_duration_since(Instant::now())),
+            );
         }
+        trace.record("services_timeout", started);
+        let started = Instant::now();
         stop_owned_launcher(state);
+        trace.record("launcher_stop", started);
     }
 
     None
 }
 
+#[tauri::command]
+fn open_folder(path: String) -> Result<(), String> {
+    let p = std::path::Path::new(&path);
+    if !p.is_dir() {
+        return Err(format!("Path is not a directory: {}", path));
+    }
+    #[cfg(windows)]
+    {
+        std::process::Command::new("explorer")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("Failed to open folder: {e}"))?;
+    }
+    #[cfg(not(windows))]
+    {
+        return Err("open_folder is only supported on Windows".to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn pick_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.dialog()
+        .file()
+        .set_title("选择音乐文件夹")
+        .pick_folder(move |result| {
+            let _ = tx.send(result);
+        });
+    let result = rx
+        .recv()
+        .map_err(|e| format!("Dialog channel error: {e}"))?;
+    match result {
+        Some(path) => Ok(Some(path.to_string())),
+        None => Ok(None),
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
+        .invoke_handler(tauri::generate_handler![open_folder, pick_folder])
         .manage(AppState {
             child: Mutex::new(None),
         })
         .setup(|app| {
+            let mut trace = startup_trace::Trace::from_env();
+            let started = Instant::now();
             let state: tauri::State<AppState> = app.state();
             let resource_dir = app.path().resource_dir().ok();
             let bundle_runtime = resolve_bundled_runtime(resource_dir);
             let app_home = resolve_app_home();
+            trace.record("resolve_runtime", started);
 
             let ui_url = bundle_runtime
                 .as_deref()
-                .and_then(|runtime| ensure_ui_ready(runtime, &app_home, &state));
+                .and_then(|runtime| ensure_ui_ready(runtime, &app_home, &state, &mut trace));
+
+            let outcome = if ui_url.is_some() { "services_ready" } else { "startup_failed" };
 
             if let Some(window) = app.get_webview_window("main") {
                 if let Some(ui_url) = ui_url {
+                    let started = Instant::now();
                     let _ = window.navigate(
                         ui_url.parse::<tauri::Url>().expect("invalid ui url"),
                     );
+                    trace.record("navigation_request", started);
                 } else {
                     let app_home_text = app_home.to_string_lossy().replace('\\', "\\\\");
                     let _ = window.eval(&format!(
@@ -304,6 +508,7 @@ fn main() {
                     ));
                 }
             }
+            let _ = trace.finish(BUILD_MARKER, outcome);
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -323,11 +528,8 @@ fn main() {
 
 #[cfg(windows)]
 fn kill_process_tree(pid: u32) -> std::io::Result<()> {
-    Command::new("taskkill")
+    background_process::command("taskkill")
         .args(["/PID", &pid.to_string(), "/T", "/F"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
         .spawn()
         .and_then(|mut c| c.wait())
         .map(|_| ())

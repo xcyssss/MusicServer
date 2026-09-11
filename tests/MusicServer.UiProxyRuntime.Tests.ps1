@@ -8,6 +8,8 @@ Import-Module (Join-Path $ProjectRoot 'MusicServer.State.psm1') -Force
 
 $script:ProxyTest = [pscustomobject]@{
     Root = $null
+    OldAppHome = $null
+    OldBackfill = $null
     Processes = @()
 }
 
@@ -96,15 +98,21 @@ Describe 'MusicServer live UI API proxy' {
         $root = Join-Path ([IO.Path]::GetTempPath()) ('msuiproxy_' + [guid]::NewGuid().ToString('N'))
         $null = New-Item -ItemType Directory -Path (Join-Path $root 'DailyMix_data\state') -Force
         $script:ProxyTest.Root = $root
+        $script:ProxyTest.OldAppHome = [Environment]::GetEnvironmentVariable('MUSICSERVER_APP_HOME', 'Process')
+        [Environment]::SetEnvironmentVariable('MUSICSERVER_APP_HOME', $root)
+        # Hermetic fixture: the launcher's background artist resolution must not
+        # reach the network while these socket regressions run.
+        $script:ProxyTest.OldBackfill = [Environment]::GetEnvironmentVariable('MUSICSERVER_DISABLE_ARTIST_BACKFILL', 'Process')
+        [Environment]::SetEnvironmentVariable('MUSICSERVER_DISABLE_ARTIST_BACKFILL', '1', 'Process')
 
         # Run the gateway from the same isolated home as the API. Launching the
         # checkout gateway would read the user's library and start its worker.
-        foreach ($file in @('start_musicserver_ui.ps1','watchdog_ui.ps1','music_api.ps1','MusicServer.Core.psm1','MusicServer.Database.psm1','MusicServer.State.psm1','MusicServer.Providers.psm1','MusicServer.Http.psm1')) {
+        foreach ($file in @('start_musicserver_ui.ps1','watchdog_ui.ps1','music_api.ps1','MusicServer.Core.psm1','MusicServer.Database.psm1','MusicServer.State.psm1','MusicServer.Providers.psm1','MusicServer.Http.psm1','MusicServer.Identity.psm1')) {
             Copy-Item -LiteralPath (Join-Path $ProjectRoot $file) -Destination (Join-Path $root $file)
         }
         Copy-Item -LiteralPath (Join-Path $ProjectRoot 'web') -Destination (Join-Path $root 'web') -Recurse
 
-        $cfg = New-MusicServerConfig -Root $root
+        $cfg = New-MusicServerConfig -Root $ProjectRoot -AppHome $root
         Initialize-MusicServerState -Config $cfg
         $db = Join-Path $cfg.StateDir 'musicserver.db'
         Initialize-MusicServerDatabase -DbPath $db -SqliteExe $cfg.Sqlite
@@ -113,10 +121,13 @@ Describe 'MusicServer live UI API proxy' {
 
     AfterEach {
         Stop-ProxyTestProcesses
+        [Environment]::SetEnvironmentVariable('MUSICSERVER_APP_HOME', $script:ProxyTest.OldAppHome)
+        [Environment]::SetEnvironmentVariable('MUSICSERVER_DISABLE_ARTIST_BACKFILL', $script:ProxyTest.OldBackfill)
         if ($script:ProxyTest.Root) {
             try { Remove-Item -LiteralPath $script:ProxyTest.Root -Recurse -Force -ErrorAction SilentlyContinue } catch {}
         }
         $script:ProxyTest.Root = $null
+        $script:ProxyTest.OldAppHome = $null
     }
 
     It 'forwards browser-style JSON-body POST like requests through the UI gateway' {

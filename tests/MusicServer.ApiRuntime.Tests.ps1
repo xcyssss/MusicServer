@@ -31,6 +31,7 @@ $script:T = [pscustomobject]@{
     Root      = $null
     Config    = $null
     DbPath    = $null
+    OldAppHome = $null
     TestRoots = @()
     ApiProcs  = @()
 }
@@ -46,13 +47,15 @@ function Invoke-FreePort {
 function New-TestRoot {
     $root = Join-Path ([IO.Path]::GetTempPath()) ('msrt_' + [guid]::NewGuid().ToString('N'))
     $null = New-Item -ItemType Directory -Path (Join-Path $root 'DailyMix_data\state') -Force
+    $script:T.OldAppHome = [Environment]::GetEnvironmentVariable('MUSICSERVER_APP_HOME', 'Process')
+    [Environment]::SetEnvironmentVariable('MUSICSERVER_APP_HOME', $root)
     $script:T.TestRoots += $root
     return $root
 }
 
 function Invoke-DbSetup {
     param([Parameter(Mandatory)][string]$Root)
-    $cfg = New-MusicServerConfig -Root $Root
+    $cfg = New-MusicServerConfig -Root $ProjectRoot -AppHome $Root
     Initialize-MusicServerState -Config $cfg
     $db = Join-Path $cfg.StateDir 'musicserver.db'
     Initialize-MusicServerDatabase -DbPath $db -SqliteExe $cfg.Sqlite
@@ -77,6 +80,8 @@ function Stop-AllApiServers {
 
 function Remove-AllState {
     Stop-AllApiServers
+    [Environment]::SetEnvironmentVariable('MUSICSERVER_APP_HOME', $script:T.OldAppHome)
+    $script:T.OldAppHome = $null
     foreach ($root in @($script:T.TestRoots)) {
         try { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue } catch {}
     }

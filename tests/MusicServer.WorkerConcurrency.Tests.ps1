@@ -57,6 +57,8 @@ function Invoke-WorkerChild {
 Describe 'MusicServer Hardening v2 Phase 2 - Worker Concurrency' {
     BeforeEach {
         $TestRoot = Join-Path ([IO.Path]::GetTempPath()) "msvc_$([guid]::NewGuid().ToString('N'))"
+        $script:WorkerOldAppHome = [Environment]::GetEnvironmentVariable('MUSICSERVER_APP_HOME', 'Process')
+        [Environment]::SetEnvironmentVariable('MUSICSERVER_APP_HOME', $TestRoot)
         New-Item -ItemType Directory -Path $TestRoot -Force | Out-Null
         $StateDir = Join-Path $TestRoot 'DailyMix_data\state'
         New-Item -ItemType Directory -Path $StateDir -Force | Out-Null
@@ -65,7 +67,7 @@ Describe 'MusicServer Hardening v2 Phase 2 - Worker Concurrency' {
         Import-Module $DbPath -Force
         Import-Module $StatePath -Force
 
-        $Config = New-MusicServerConfig -Root $TestRoot
+        $Config = New-MusicServerConfig -Root $ProjectRoot -AppHome $TestRoot
         Initialize-MusicServerState -Config $Config
         $script:DbbPath = Join-Path $Config.StateDir 'musicserver.db'
         Initialize-MusicServerDatabase -DbPath $script:DbbPath -SqliteExe $Config.Sqlite
@@ -73,6 +75,8 @@ Describe 'MusicServer Hardening v2 Phase 2 - Worker Concurrency' {
     }
 
     AfterEach {
+        [Environment]::SetEnvironmentVariable('MUSICSERVER_APP_HOME', $script:WorkerOldAppHome)
+        $script:WorkerOldAppHome = $null
         Remove-Item -LiteralPath $TestRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
 

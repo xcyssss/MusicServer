@@ -43,7 +43,9 @@ function New-RecommendationTestRow {
 
 function Initialize-RecommendationScratchDb {
     $root = Join-Path ([IO.Path]::GetTempPath()) ('musicserver_recommendation_' + [guid]::NewGuid().ToString('N'))
-    $cfg = New-MusicServerConfig -Root $root
+    $script:RecommendationOldAppHome = [Environment]::GetEnvironmentVariable('MUSICSERVER_APP_HOME', 'Process')
+    [Environment]::SetEnvironmentVariable('MUSICSERVER_APP_HOME', $root)
+    $cfg = New-MusicServerConfig -Root $ProjectRoot -AppHome $root
     Initialize-MusicServerState -Config $cfg
     $db = Join-Path $cfg.StateDir 'musicserver.db'
     Initialize-MusicServerDatabase -DbPath $db -SqliteExe $cfg.Sqlite
@@ -137,11 +139,39 @@ Describe 'MusicServer Hardening v2 - Recommendation State' {
 
     AfterEach {
         Stop-RecommendationTestApi
+        [Environment]::SetEnvironmentVariable('MUSICSERVER_APP_HOME', $script:RecommendationOldAppHome)
         if ($script:RecommendationTestRoot -and (Test-Path -LiteralPath $script:RecommendationTestRoot)) {
             Remove-Item -LiteralPath $script:RecommendationTestRoot -Recurse -Force -ErrorAction SilentlyContinue
         }
         $script:RecommendationTestRoot = $null
         $script:RecommendationTestConfig = $null
+        $script:RecommendationOldAppHome = $null
+    }
+
+    It 'assembles recommendations with four reads and preserves latest feedback and missing wanted rows' {
+        $date = Get-TodayDate
+        $tracks = @(); $rows = @()
+        foreach ($rank in 1..25) {
+            $track = New-RecommendationTestTrack -Title "Batch $rank"
+            $row = New-RecommendationTestRow -Track $track -Date $date -Rank $rank
+            $tracks += $track; $rows += $row
+        }
+        Save-DailyRecommendationsDb -Recommendations $rows -Tracks $tracks -Date $date | Out-Null
+        $lastId = [string]$track.id
+        Write-FeedbackDb -TrackId $lastId -FeedbackType 'LIKE'
+        Write-FeedbackDb -TrackId $lastId -FeedbackType 'UNLIKE'
+        Write-FeedbackDb -TrackId $lastId -FeedbackType 'SKIP'
+        $before = Get-MusicServerSqliteInvocationCount
+        $batch = @(Get-TodayRecommendationBatchDb -Date $date)
+        ((Get-MusicServerSqliteInvocationCount) - $before) | Should Be 4
+        $batch.Count | Should Be 25
+        $batch[-1].Feedback | Should Be 'UNLIKE'
+        $batch[-1].Wanted | Should BeNullOrEmpty
+        $batch[-1].Track.title | Should Be 'Batch 25'
+        $batch[-1].Recommendation.rank | Should Be 25
+        $before = Get-MusicServerSqliteInvocationCount
+        @(Get-TodayRecommendationBatchDb -Date '1900-01-01').Count | Should Be 0
+        ((Get-MusicServerSqliteInvocationCount) - $before) | Should Be 1
     }
 
     It 'turns explicit LIKE into a weight 5 positive seed' {
@@ -209,6 +239,22 @@ Describe 'MusicServer Hardening v2 - Recommendation State' {
         $seed = @(Get-RecommendationSeedCandidatesDb -SeedCount 25 -RandomSeed 7 | Where-Object { $_.Title -eq '弱发现种子' }) | Select-Object -First 1
         $seed.Source | Should Be 'library_fallback'
         $seed.Weight | Should Be 1
+    }
+
+    It 'seeds a fresh install from the local library when no preference exists' {
+        $seed = @(Get-RecommendationSeedCandidatesDb -SeedCount 25 -LibraryFallback @('霜雪千年 - 双笙&封茗囧菌') -RandomSeed 7) | Select-Object -First 1
+        $seed.Source | Should Be 'library_fallback'
+        $seed.Weight | Should Be 1
+        $seed.Title | Should Be '霜雪千年'
+        $seed.Artist | Should Be '双笙&封茗囧菌'
+    }
+
+    It 'keeps the local library fallback out of a pool that already has taste signals' {
+        $track = New-RecommendationTestTrack -Title 'Explicit Seed'
+        Save-CanonicalTrackDb -Track $track | Out-Null
+        Add-FeedbackValue -TrackId $track.id -Type 'LIKE' -Value 'true' -Source 'music_api'
+        $seeds = @(Get-RecommendationSeedCandidatesDb -SeedCount 25 -LibraryFallback @('霜雪千年 - 双笙&封茗囧菌') -RandomSeed 7)
+        @($seeds | Where-Object { $_.Source -eq 'library_fallback' }).Count | Should Be 0
     }
 
     It 'does not parse the string False as a positive LIKE' {

@@ -21,28 +21,30 @@ param(
 $ErrorActionPreference = 'Continue'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-$Root      = 'E:\Project\MusicServer'
-$MusicDir  = "$Root\Music"
-$DailyDir  = "$MusicDir\DailyMix"
-$DataDir   = "$Root\DailyMix_data"
-$Blacklist = "$DataDir\rejected.csv"
-$Accepted  = "$DataDir\accepted.csv"
-$NdDb      = "$Root\Navidrome\Data\navidrome.db"
-$Sqlite    = 'sqlite3'
-$TodayM3u  = "$MusicDir\每日推荐.m3u"
-$KeepM3u   = "$MusicDir\日推精选.m3u"
-$NavidromeExe = "$Root\Navidrome\bin\navidrome.exe"
-$NavidromeCfg = "$Root\Navidrome\navidrome.toml"
+$Root = $PSScriptRoot
 
-. "$Root\lib_playlist.ps1"
+. (Join-Path $Root 'lib_playlist.ps1')
 Import-Module (Join-Path $Root 'MusicServer.Core.psm1') -Force
 Import-Module (Join-Path $Root 'MusicServer.Database.psm1') -Force
 Import-Module (Join-Path $Root 'MusicServer.State.psm1') -Force
 $Config = New-MusicServerConfig -Root $Root
-Initialize-MusicServerState -Config $Config
+Initialize-MusicServerState -Config $Config -SkipLibrary
 Initialize-MusicServerDatabase -DbPath (Join-Path $Config.StateDir 'musicserver.db') -SqliteExe $Config.Sqlite
 Initialize-MusicServerSchema
+Apply-ConfiguredMusicDir -Config $Config
+Initialize-MusicServerLibrary -Config $Config | Out-Null
 $Sqlite = $Config.Sqlite
+# Sync local path variables with configured MusicDir
+$MusicDir = $Config.MusicDir
+$DailyDir = $Config.DailyDir
+$DataDir = $Config.DataDir
+$Blacklist = Join-Path $DataDir 'rejected.csv'
+$Accepted = Join-Path $DataDir 'accepted.csv'
+$NdDb = $Config.NdDb
+$NavidromeExe = $Config.NdExe
+$NavidromeCfg = $Config.NdConfig
+$TodayM3u = Join-Path $MusicDir '每日推荐.m3u'
+$KeepM3u  = Join-Path $MusicDir '日推精选.m3u'
 
 function Write-Step($m) { Write-Host "`n>>> $m" -ForegroundColor Cyan }
 

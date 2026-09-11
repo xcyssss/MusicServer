@@ -17,19 +17,21 @@ param(
     [switch]$DryRun,
     [int]$Limit = 0,
     [switch]$Force,
-    [string]$Filter = '*'
+    [string]$Filter = '*',
+    [string]$MusicDir = ''
 )
 
 $ErrorActionPreference = 'Continue'
 $ProgressPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-$MusicDir = 'E:\Project\MusicServer\Music'
-$FFprobe  = 'C:\Users\dell\AppData\Local\Microsoft\WinGet\Links\ffprobe.exe'
-$Report   = 'E:\Project\MusicServer\lyrics_report.csv'
-$StateDb  = 'E:\Project\MusicServer\DailyMix_data\state\musicserver.db'
-$Sqlite   = 'C:\Users\dell\anaconda3\Library\bin\sqlite3.exe'
-if (-not (Test-Path -LiteralPath $Sqlite)) { $Sqlite = 'sqlite3' }
+. (Join-Path $PSScriptRoot 'MusicServer.Maintenance.ps1')
+$Maintenance = Resolve-MusicServerMaintenanceContext -MusicDir $MusicDir
+$MusicDir = $Maintenance.MusicDir
+$FFprobe = $Maintenance.Config.FFprobe
+$Report = $Maintenance.Config.LyricsReport
+$StateDb = $Maintenance.StateDb
+$Sqlite = $Maintenance.Config.Sqlite
 $Headers  = @{
     'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36'
     'Referer'    = 'https://music.163.com/'

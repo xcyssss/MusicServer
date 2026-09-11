@@ -7,11 +7,10 @@ MusicServer 是一个 Windows 本地音乐应用，主客户端为 **Tauri v2 �
 ## 目录结构
 
 ```text
-E:\Project\MusicServer\
-├── Music\                          # 本地音乐
-├── DailyMix_data\                  # MusicServer 状态与兼容数据
-├── Navidrome\                      # Navidrome 配置、程序和数据
+Repository\
+├── 源码、测试、文档和构建 workspace     # 可随时重新 clone
 ├── scripts\maintenance\           # 独立维护工具
+│   ├── MusicServer.Maintenance.ps1    # 维护脚本共享路径解析
 │   ├── download_bilibili_favorites.ps1
 │   ├── fetch_lyrics.ps1
 │   ├── fix_one_lyric.ps1
@@ -25,7 +24,15 @@ E:\Project\MusicServer\
 ├── start_musicserver_ui.bat        # 源码环境便捷启动入口
 ├── web\                            # 桌面 APP WebView2 UI
 └── src-tauri\                      # Tauri 桌面壳与打包
+
+APP_HOME\
+├── DailyMix_data\state\            # SQLite 状态库
+├── Navidrome\Data\                 # Navidrome 持久数据库
+├── logs\、backups\、output\、secrets\ # 运行时持久数据
+└── Music\                           # 默认 MusicDir（可改到其他盘）
 ```
+
+三者边界固定为：`Repository = 源码/构建 workspace`，`APP_HOME = 应用持久化状态`，`MusicDir = 独立音乐库`。删除或清理 repository 不会删除 APP_HOME 或外置 MusicDir。
 
 ---
 
@@ -42,6 +49,37 @@ E:\Project\MusicServer\
 ```
 
 如果设置了环境变量 `MUSICSERVER_APP_HOME`，则以该目录为准。
+
+源码开发时可以在当前 PowerShell 会话指定已有数据目录；程序不会把这个示例路径写入源码：
+
+```powershell
+$env:MUSICSERVER_APP_HOME = 'E:\Project\MusicSever_app'
+```
+## 1.1 配置音乐库位置
+
+安装版默认音乐库：
+
+```text
+%LOCALAPPDATA%\com.musicserver.desktop\Music
+```
+
+在 MusicServer APP 中打开“音乐库设置”，可以：
+
+- **选择文件夹**：使用 Windows 原生目录选择器，例如 `D:\Music`、`E:\MyMusic`；
+- **打开文件夹**：在资源管理器中打开当前有效音乐库；
+- **恢复默认**：重新使用 `<APP_HOME>\Music`。
+
+路径配置保存在 SQLite 中。修改位置不会自动移动、复制或删除任何现有歌曲；切换完成后请重启 MusicServer。如果配置的移动硬盘暂时不存在，APP 会保留原路径并显示“音乐库当前不可用”，不会偷偷切换到新的空目录。
+
+歌曲与歌词使用同名邻接方式：
+
+```text
+Music\
+├─ Song.mp3
+└─ Song.lrc
+```
+
+即 `.lrc` 与音频文件放在同一目录，文件名相同。
 
 ### 从源码运行
 
@@ -71,19 +109,20 @@ Tauri APP 会加载同一套 `web/` UI；浏览器页面不是另一套独立产
 
 Navidrome 用于扫描和提供本地音乐库。
 
-典型位置：
+Navidrome 的持久化配置和数据库位置：
 
 ```text
-E:\Project\MusicServer\Navidrome\bin\navidrome.exe
-E:\Project\MusicServer\Navidrome\navidrome.toml
-E:\Project\MusicServer\Navidrome\Data\
+<APP_HOME>\Navidrome\navidrome.toml
+<APP_HOME>\Navidrome\Data\
 ```
+
+Navidrome binary 属于可重新下载的外部运行时，可通过 PATH 或 `MUSICSERVER_NAVIDROME` 指定；源码中的 `Navidrome\navidrome.toml.template` 只是模板，具体配置由程序写入 APP_HOME。
 
 手动启动：
 
 ```powershell
-E:\Project\MusicServer\Navidrome\bin\navidrome.exe `
-    -c E:\Project\MusicServer\Navidrome\navidrome.toml
+navidrome.exe `
+    -c "$env:MUSICSERVER_APP_HOME\Navidrome\navidrome.toml"
 ```
 
 默认 Web 地址：
@@ -121,7 +160,7 @@ Bilibili 下载功能通常需要有效的 `cookies.txt`。Cookie 属于本地�
 建议放在：
 
 ```text
-E:\Project\MusicServer\cookies.txt
+<APP_HOME>\secrets\cookies.txt
 ```
 
 如果下载出现登录失效、验证失败或无法解析等问题，优先重新从已登录 B站的浏览器导出 Cookie。
@@ -133,7 +172,7 @@ cd E:\Project\MusicServer
 
 .\scripts\maintenance\download_bilibili_favorites.ps1 `
     -FavoritesUrl "https://www.bilibili.com/medialist/detail/ml你的收藏夹编号" `
-    -CookieFile "E:\Project\MusicServer\cookies.txt"
+    -CookieFile "$env:MUSICSERVER_APP_HOME\secrets\cookies.txt"
 ```
 
 B站存在频率限制和 HTTP 412 风控。遇到风控时不要做无界重试；MusicServer 的正式 Provider / Wanted Queue 路径会按 provider health 和退避逻辑处理。
@@ -184,7 +223,7 @@ cd E:\Project\MusicServer
 运行后会生成：
 
 ```text
-E:\Project\MusicServer\lyrics_report.csv
+<APP_HOME>\output\lyrics_report.csv
 ```
 
 常见 `Status`：
@@ -298,7 +337,11 @@ wanted_worker.ps1
 
 异步处理。
 
-Worker 会优先检查本地候选，再解析 provider 候选；需要 Bilibili 下载时会使用 provider health、lease、CAS 和有界重试机制，避免重复 worker、重复下载或无限重试。
+Worker 会优先检查本地候选，再解析 provider 候选；需要 Bilibili 下载时会使用 provider health、lease、CAS 和有界重试机制，避免重复 Worker、重复下载或无限重试。
+
+候选解析顺序：本地匹配 → 已知 NetEase id / `bilibili_direct` → Bilibili 搜索 → **NetEase 发现**。最后一步只针对没有 NetEase id 的曲目，每次解析最多发起一次搜索并计入 `netease` provider 熔断，因此 Bilibili 被 412 风控时仍有机会走 NetEase 通道；发现的 id 会写回 `canonical_tracks.identifiers_json` 供后续复用。设置 `MUSICSERVER_DISABLE_NETEASE_SEARCH=1` 可关闭该发现（测试与离线环境使用）。
+
+界面「下载动态」面板反映整个队列（不再只显示当日推荐里的曲目）：`等待重试`/`暂不可用` 的行带有「重试」按钮，点击后调用 `POST /api/wanted/{track_id}/retry` 重新入队。`UNAVAILABLE` 仍是终态，不会被自动重试，只能由该按钮或重新点红心触发。
 
 手工只执行一轮：
 
@@ -317,6 +360,16 @@ Windows Scheduled Task 的注册入口为：
 ```powershell
 .\register_wanted_worker.ps1
 ```
+
+每日推荐的计划任务入口为：
+
+```powershell
+.\register_daily_recommend.ps1              # 注册 MusicServer_DailyRecommend（每天 07:00）
+.\register_daily_recommend.ps1 -Time 08:30  # 自定义触发时间
+.\register_daily_recommend.ps1 -Unregister  # 移除
+```
+
+安装版桌面 APP 会在启动时自动完成这一步：任务动作绑定当前 APP_HOME（传递 `-AppHome`，不依赖环境变量），并在当天尚未生成推荐时立即触发一次，因此新安装无需手工配置即可得到当日推荐。设置 `MUSICSERVER_DISABLE_SCHEDULED_TASKS=1` 可关闭自动注册与补跑；从源码检出运行时不会注册任务。
 
 ---
 
@@ -343,7 +396,30 @@ Windows Scheduled Task 的注册入口为：
 
 ---
 
-## 9. 常见问题
+## 9. 运行日志
+
+所有运行时组件都把日志写在 APP_HOME 的 `logs\` 目录下（默认 `%LOCALAPPDATA%\com.musicserver.desktop\logs\`，可用 `MUSICSERVER_APP_HOME` 覆盖）：
+
+| 文件 | 内容 |
+|---|---|
+| `musicserver-ui.log` | 启动器：服务启停、端口选择、计划任务注册、Navidrome 查询失败 |
+| `musicserver-api.log` | API：启动信息、每个请求、错误、慢请求（≥ 3 秒）|
+| `musicserver-worker.log` | 下载 Worker：队列轮次、候选选择、下载/校验结果、重试与失败原因 |
+| `musicserver-ui.watchdog.log` | 看门狗：UI 心跳停滞与重启 |
+| `musicserver-api.stdout.log` / `.stderr.log` | API 进程被重定向的原始输出（正常为空）|
+| `musicserver-worker.stdout.log` / `.stderr.log` | Worker 进程被重定向的原始输出（正常为空）|
+
+查看最近的下载日志：
+
+```powershell
+Get-Content "$env:LOCALAPPDATA\com.musicserver.desktop\logs\musicserver-worker.log" -Tail 40
+```
+
+日志按 4 MB 自动轮转，保留 `.1`、`.2` 两个历史文件，不会无限增长；写日志失败也不会影响服务启动。
+
+---
+
+## 10. 常见问题
 
 ### 下载突然大量失败或出现 412
 
@@ -369,7 +445,7 @@ B站风控通常是服务端限制。停止高频重试，等待 provider block 
 
 ### 源码目录和安装版数据在哪
 
-源码 checkout 默认使用项目目录中的本地数据。正式安装版默认使用：
+源码 checkout 只保存代码和可重新生成的构建输出，不承载用户数据。正式安装版默认使用：
 
 ```text
 %LOCALAPPDATA%\com.musicserver.desktop\
@@ -384,13 +460,13 @@ B站风控通常是服务端限制。停止高频重试，等待 provider block 
 以下内容都属于本地数据或敏感内容，不要随意删除，也不要提交 Git：
 
 ```text
-Music\
-DailyMix_data\
-Navidrome\Data\
-cookies.txt
+<APP_HOME>\Music\
+<APP_HOME>\DailyMix_data\
+<APP_HOME>\Navidrome\Data\
+<APP_HOME>\secrets\cookies.txt
 *.db
-logs\
-backups\
+<APP_HOME>\logs\
+<APP_HOME>\backups\
 ```
 
 SQLite 是 MusicServer 唯一运行时状态真源。JSON/CSV 只用于 migration、backup 或兼容输出。

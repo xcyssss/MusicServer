@@ -14,7 +14,8 @@ Tauri APP / WebView2
 127.0.0.1:8787  music_api.ps1
         │
         ├─ SQLite 状态库（唯一运行时真源）
-        ├─ Music/ 本地音乐
+        ├─ APP_HOME 持久化状态
+        ├─ MusicDir 独立音乐库
         ├─ Wanted worker
         └─ Navidrome / yt-dlp / ffmpeg 等本机集成
 ```
@@ -44,15 +45,71 @@ src-tauri/target/release/bundle/nsis/*.exe
 
 ### 可移植运行时
 
-发布版 **不再依赖 `CARGO_MANIFEST_DIR` 或编译机源码路径**。安装后的 APP 从 bundle resources 读取 runtime，并同步到可写目录：
+发布版 **不再依赖 `CARGO_MANIFEST_DIR`、编译机源码路径或可执行文件所在 checkout**。安装后的 APP 从 bundle resources 读取 runtime，并同步到可写目录：
 
 ```text
 %LOCALAPPDATA%\com.musicserver.desktop\
 ```
 
-可通过环境变量 `MUSICSERVER_APP_HOME` 覆盖该位置。为了不破坏现有开发机数据，从源码目录本地构建并直接运行的 EXE 会在运行时识别 checkout，并继续使用该 checkout 下已有的 `Music/`、`DailyMix_data/`、`Navidrome/` 等数据；这里不包含任何编译时绝对路径。
+可通过环境变量 `MUSICSERVER_APP_HOME` 覆盖该位置。无论 APP 从安装目录、源码 checkout 还是临时目录启动，APP_HOME 都只由显式环境变量或 Windows 默认目录决定；repository 中是否存在 `Music/`、`DailyMix_data/`、`Navidrome/` 不会改变数据路径。
 
 安装包内包含 SQLite，因此 UI/API 和状态库启动不要求用户另装 sqlite3。Bilibili 下载、转码和 Navidrome 集成仍分别需要 yt-dlp、ffmpeg/ffprobe、Navidrome；这些大型/外部组件不塞进桌面 runtime。
+## 音乐库位置
+
+安装版默认音乐库为：
+
+```text
+%LOCALAPPDATA%\com.musicserver.desktop\Music
+```
+
+用户可以在 APP 的“音乐库设置”中选择任意本地目录，例如 `D:\Music` 或 `E:\MyMusic`。配置持久化在 SQLite `app_settings` 中；`MUSICSERVER_MUSIC_DIR` 仅作为开发/高级用户 override，优先级高于 SQLite 设置。
+
+更改音乐库位置**只改变 MusicServer 使用的目录，不会移动、复制或删除原有歌曲**。如果配置的是暂时离线的移动硬盘，MusicServer 会保留该设置并显示“不可用”，不会静默切回空的默认目录。恢复默认会重新使用 `<APP_HOME>\Music`。
+
+歌词继续采用邻接文件约定：`Song.mp3` 与 `Song.lrc` 放在同一目录且 basename 相同。修改音乐库后需要重启 APP，让 UI/API/worker/Navidrome 全部使用新的目录。
+
+## 数据与源码的边界
+
+MusicServer 将三个概念严格分开：
+
+```text
+Repository = 源码、测试、文档和可重新生成的 build workspace
+APP_HOME   = SQLite、DailyMix、Navidrome 数据、日志、备份和 secrets
+MusicDir   = 用户可独立配置的音乐库
+```
+
+APP_HOME 下的默认持久化布局为：
+
+```text
+<APP_HOME>\
+├─ DailyMix_data\state\musicserver.db
+├─ Navidrome\Data\navidrome.db
+├─ Navidrome\navidrome.toml
+├─ logs\
+├─ backups\
+├─ output\
+└─ secrets\cookies.txt
+```
+
+路径解析规则是：`MUSICSERVER_APP_HOME` -> `%LOCALAPPDATA%\com.musicserver.desktop`；`MusicDir` 则按 `MUSICSERVER_MUSIC_DIR` -> SQLite `app_settings.music_library_path` -> `<APP_HOME>\Music` 解析。`DailyDir` 始终是 `<MusicDir>\DailyMix`。配置音乐库路径不会移动、复制或删除歌曲；配置的目录暂时不存在时视为不可用。
+
+源码 checkout 可以被 `git clean -fdx` 清空，也可以被删除后重新 clone。开发机若要使用已有持久化数据，请在启动前设置当前 PowerShell 会话：
+
+```powershell
+$env:MUSICSERVER_APP_HOME = 'E:\Project\MusicSever_app'
+```
+
+需要长期保存时可设置 User scope（不会修改 Machine scope）；新开的 PowerShell 才会自动继承：
+
+```powershell
+[Environment]::SetEnvironmentVariable('MUSICSERVER_APP_HOME', 'E:\Project\MusicSever_app', 'User')
+```
+
+如果需要把旧 checkout 中的 `DailyMix_data`、Navidrome 数据、日志、备份、Cookie 和歌词报告迁移到 APP_HOME，可使用安全迁移脚本。它要求 Navidrome 已停止、拒绝非空目标目录，并在逐项校验文件数量/大小/SHA-256 后才删除旧源文件；不会移动 repository `Music` 或外部音乐库：
+
+```powershell
+.\scripts\migrate_to_app_home.ps1 -AppHome $env:MUSICSERVER_APP_HOME
+```
 
 ## 开发环境
 
@@ -64,6 +121,7 @@ MUSICSERVER_YTDLP
 MUSICSERVER_FFMPEG
 MUSICSERVER_FFPROBE
 MUSICSERVER_APP_HOME
+MUSICSERVER_NAVIDROME
 ```
 
 含中文的 `.ps1` / `.psm1` 必须保持 UTF-8 BOM；仓库 `.editorconfig` 已固定这一规则。
@@ -122,14 +180,21 @@ MusicServer/
 .\scripts\maintenance\fix_one_lyric.ps1 -FilePattern "*歌曲名*" -Search "歌曲名"
 ```
 
+安装版桌面 APP 会自动注册每日推荐计划任务（`MusicServer_DailyRecommend`，每天 07:00，动作绑定 APP_HOME），并在启动时补跑当天尚未生成的推荐；如需自定义时间或移除：
+
+```powershell
+.\register_daily_recommend.ps1 -Time 08:30
+.\register_daily_recommend.ps1 -Unregister
+```
+
 ## CI 与发布门禁
 
 `.github/workflows/core-tests.yml` 在 `windows-latest` 上运行三个独立 gate：
 
 | Job | 验证内容 |
 |---|---|
-| `state` | Core / Database / V2 / WorkerConcurrency / Recommendation / LegacyRetirement / Listening / Web / Tauri Pester |
-| `api` | Http / UiProxyRuntime / ApiTransaction / ApiRuntime Pester |
+| `state` | Core / Database / V2 / WorkerConcurrency / Recommendation / LegacyRetirement / Listening / Web / Tauri / ConfigurableLibrary / TestRunner / Identity Pester |
+| `api` | Http / UiProxyRuntime / MediaRuntime / ApiTransaction / ApiRuntime Pester |
 | `desktop-build` | `cargo fmt --check`、`cargo check --locked`、真实 NSIS 构建、安装包脱离源码 runtime 启动 smoke、artifact 上传 |
 
 `desktop-build` 不只检查源码字符串：它会在干净 GitHub runner 上真正生成安装 EXE，然后静默安装到临时目录，临时禁用 checkout 中的 launcher/API/web，再启动已安装 APP。只有 bundle runtime 能自行部署、UI/API build marker 正常、SQLite 状态库建立且 APP 退出后所拥有的服务树全部停止，才算通过。
@@ -143,6 +208,8 @@ musicserver-windows-installer
 的 GitHub Actions artifact。
 
 ## 运行规则
+
+本地正式测试入口和套件索引见 [`tests/README.md`](tests/README.md)。`tests/run_suite.ps1` 固定使用 Pester 3.4.0，默认排除本机运行时测试，并记录具体失败详情与退出码。
 
 - SQLite 是 MusicServer 唯一运行时状态真源；JSON 仅用于迁移输入、备份或兼容输出。
 - 不要在 Navidrome 运行时直接写其 live DB。
@@ -163,3 +230,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/measure_musicser
 `MUSICSERVER_DIAGNOSTICS=1` 可让 API JSON 响应携带 `X-MusicServer-State-Sqlite-Calls`，表示该请求经状态库包装器启动的 sqlite3 进程数；它不包括 Navidrome 只读查询，默认关闭。
 
 API 与 UI 代理的 JSON 控制请求最多 64 KiB，完整请求体须在 5 秒内到达。空请求体继续兼容；非空请求体必须是 UTF-8 JSON 对象。非法/不完整 JSON 返回 400，超时返回 408，chunked 请求返回 411，超限返回 413，不支持的压缩编码返回 415；连接已断开时可能无法返回错误正文。
+
+## Runtime 构建标识与部署校验
+
+桌面端、UI/API 和 smoke 使用 runtime 内容 SHA-256 标识，替代手写版本字符串。标识不包含机器路径或用户数据库；进程启动后保持不变。安装包的 schema 2 清单记录每个应用文件的大小与哈希，部署前检查完整性，再逐文件准备和替换。
+
+此机制可在写入前发现包损坏，并避免单文件复制失败截断旧文件；尚不提供整组文件的原子升级、断电恢复或数据库版本回退。`MUSICSERVER_DISABLE_WORKER=1` 仅用于明确禁用下载 worker 的隔离启动测量，默认不设置。

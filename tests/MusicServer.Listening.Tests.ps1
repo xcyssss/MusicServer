@@ -29,7 +29,7 @@ function New-ListeningTestRoot {
 
 function Initialize-ListeningTestDatabase {
     param([Parameter(Mandatory)][string]$Root)
-    $config = New-MusicServerConfig -Root $Root
+    $config = New-MusicServerConfig -Root $ProjectRoot -AppHome $Root
     Initialize-MusicServerState -Config $config
     $dbPath = Join-Path $config.StateDir 'musicserver.db'
     Initialize-MusicServerDatabase -DbPath $dbPath -SqliteExe $config.Sqlite
@@ -51,7 +51,13 @@ function Start-ListeningApi {
     $outFile = Join-Path $Root 'listening_api.out.log'
     $errFile = Join-Path $Root 'listening_api.err.log'
     $args = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $ProjectRoot 'music_api.ps1'), '-Prefix', $prefix, '-Root', $Root)
-    $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList $args -WindowStyle Hidden -PassThru -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+    $oldAppHome = [Environment]::GetEnvironmentVariable('MUSICSERVER_APP_HOME', 'Process')
+    [Environment]::SetEnvironmentVariable('MUSICSERVER_APP_HOME', $Root, 'Process')
+    try {
+        $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList $args -WindowStyle Hidden -PassThru -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+    } finally {
+        [Environment]::SetEnvironmentVariable('MUSICSERVER_APP_HOME', $oldAppHome, 'Process')
+    }
     $script:T.ApiProcs += $proc
     $deadline = [DateTime]::UtcNow.AddSeconds(30)
     while ([DateTime]::UtcNow -lt $deadline) {
@@ -123,7 +129,7 @@ function Invoke-ListeningHttp {
 
 function New-ListeningNavidromeFixture {
     param([Parameter(Mandatory)][string]$Root)
-    $config = New-MusicServerConfig -Root $Root
+    $config = New-MusicServerConfig -Root $ProjectRoot -AppHome $Root
     $null = New-Item -ItemType Directory -Path (Split-Path -Parent $config.NdDb) -Force
     $null = New-Item -ItemType Directory -Path $config.MusicDir -Force
     $one = Join-Path $config.MusicDir 'One.mp3'

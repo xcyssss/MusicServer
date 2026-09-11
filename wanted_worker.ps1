@@ -28,10 +28,22 @@ Import-Module (Join-Path $PSScriptRoot 'MusicServer.Core.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.State.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Providers.psm1') -Force
 $Config = New-MusicServerConfig -Root $Root
-Initialize-MusicServerState -Config $Config
+Initialize-MusicServerState -Config $Config -SkipLibrary
 Initialize-MusicServerDatabase -DbPath (Join-Path $Config.StateDir 'musicserver.db') -SqliteExe $Config.Sqlite
 Initialize-MusicServerSchema
-$WorkerMutex = [Threading.Mutex]::new($false, 'MusicServer_WantedWorker')
+Apply-ConfiguredMusicDir -Config $Config
+Initialize-MusicServerLibrary -Config $Config | Out-Null
+# The worker is spawned with redirected stdio, so Write-Host output is discarded
+# in production. Messages that matter are mirrored into a bounded log file.
+$WorkerLog = Join-Path $Config.LogDir 'musicserver-worker.log'
+function Write-WorkerLog {
+    param([string]$Message, [string]$Color = '')
+    Write-MusicServerLog -Path $WorkerLog -Message $Message
+    if ($Color) { Write-Host $Message -ForegroundColor $Color } else { Write-Host $Message }
+}
+$workerMutexName = [Environment]::GetEnvironmentVariable('MUSICSERVER_WORKER_MUTEX_NAME', 'Process')
+if ([string]::IsNullOrWhiteSpace($workerMutexName)) { $workerMutexName = 'MusicServer_WantedWorker' }
+$WorkerMutex = [Threading.Mutex]::new($false, $workerMutexName)
 $OwnsWorkerMutex = $false
 try {
     $OwnsWorkerMutex = $WorkerMutex.WaitOne(0)
@@ -39,7 +51,7 @@ try {
     $OwnsWorkerMutex = $true
 }
 if (-not $OwnsWorkerMutex) {
-    Write-Host '已有 Wanted worker 正在运行，本次跳过，避免重复下载。' -ForegroundColor DarkYellow
+    Write-WorkerLog '已有 Wanted worker 正在运行，本次跳过，避免重复下载。' -Color DarkYellow
     $WorkerMutex.Dispose()
     exit 0
 }
@@ -47,7 +59,8 @@ if (-not $OwnsWorkerMutex) {
 # Worker identity used for owned leases and CAS writes in wanted_queue.
 # The INTEGER column lease_expires_epoch is the only machine comparison source
 # for lease validity; TEXT lease_expires_at is diagnostic and never compared here.
-$WorkerId = "wanted_worker_$([Environment]::MachineName)_$$"
+$WorkerId = "wanted_worker_$([Environment]::MachineName)_$PID"
+Write-WorkerLog "worker 启动：id=$WorkerId poll=${PollSeconds}s app_home=$($Config.AppHome) log=$WorkerLog" -Color DarkGray
 $ActiveQueueStates = @('RESOLVING','DOWNLOADING','VALIDATING')
 
 # Hardened helpers: wanted_queue (SQLite) is the concurrency authority. The legacy
@@ -95,7 +108,7 @@ function Complete-CancellationInDb {
         # Finish: remove the queue row and reset the canonical track (guarded to LOCAL).
         Complete-WantedCancellationDb -TrackId $tid -TemporaryPath $TemporaryPath | Out-Null
     } catch {
-        Write-Host "  [warn] DB 取消同步失败：$_" -ForegroundColor DarkYellow
+        Write-WorkerLog "  [warn] DB 取消同步失败：$_" -Color DarkYellow
     }
 }
 
@@ -116,7 +129,7 @@ function Release-WantedLease {
         # let a stale writer force its own terminal state into the canonical track.
         if ($State -ne 'LOCAL') { Reset-CanonicalTrackToRemoteDb -TrackId $tid | Out-Null }
     } catch {
-        Write-Host "  [warn] DB 状态同步失败：$_" -ForegroundColor DarkYellow
+        Write-WorkerLog "  [warn] DB 状态同步失败：$_" -Color DarkYellow
     }
 }
 
@@ -150,7 +163,7 @@ WHERE track_id = @tid AND state = 'RETRY_WAIT' AND claimed_by = ''
         if ([int]$resumed -ne 1) { return }
         Renew-LeaseDb -TrackId $tid -WorkerId $WorkerId -LeaseMinutes 30 | Out-Null
     } catch {
-        Write-Host "  [warn] 租约恢复失败：$_" -ForegroundColor DarkYellow
+        Write-WorkerLog "  [warn] 租约恢复失败：$_" -Color DarkYellow
     }
 }
 
@@ -310,13 +323,13 @@ function Move-LegacyDailyMixToLibrary {
 function Bind-LocalTrack {
     param([psobject]$Track, [psobject]$Wanted, [string]$Path)
     if (Test-WantedCancellation -Wanted $Wanted) { Complete-WantedCancellation -Wanted $Wanted; return }
-    if (-not (Test-OwnsActiveLease -Wanted $Wanted)) { Write-Host "  [abandon] $([string]$Wanted.title)：租约已丢失，放弃本次处理。" -ForegroundColor DarkYellow; return }
+    if (-not (Test-OwnsActiveLease -Wanted $Wanted)) { Write-WorkerLog "  [abandon] $([string]$Wanted.title)：租约已丢失，放弃本次处理。" -Color DarkYellow; return }
     $Path = Move-LegacyDailyMixToLibrary -Path $Path
     $songId = Get-NavidromeSongIdForPath -Config $Config -Path $Path
     $Wanted.selected_candidate = [pscustomobject]@{ provider = 'local'; path = $Path }
     $finResult = Finalize-WantedLocalDb -TrackId $Track.id -WorkerId $WorkerId -ExpectedState 'RESOLVING' -LocalSongId $songId
     if (-not $finResult.Success) {
-        Write-Host "  [error] $([string]$Wanted.title)：LOCAL finalization failed: $($finResult.Reason)" -ForegroundColor Red
+        Write-WorkerLog "  [error] $([string]$Wanted.title)：LOCAL finalization failed: $($finResult.Reason)" -Color Red
         return
     }
     Add-LegacyAcceptedRow -Track $Track -Path $Path
@@ -397,7 +410,7 @@ function Process-WantedTrack {
         return
     }
     if (-not (Test-OwnsActiveLease -Wanted $Wanted)) {
-        Write-Host "  [abandon] $([string]$Wanted.title)：租约已丢失，放弃本次处理。" -ForegroundColor DarkYellow
+        Write-WorkerLog "  [abandon] $([string]$Wanted.title)：租约已丢失，放弃本次处理。" -Color DarkYellow
         return
     }
 
@@ -408,7 +421,7 @@ function Process-WantedTrack {
         return
     }
     if ($DryRun) {
-        Write-Host "  $($Wanted.track_id) | $($track.title) - $($track.artist) | state=$($Wanted.state)" -ForegroundColor DarkGray
+        Write-WorkerLog "  $($Wanted.track_id) | $($track.title) - $($track.artist) | state=$($Wanted.state)" -Color DarkGray
         return
     }
 
@@ -424,7 +437,7 @@ function Process-WantedTrack {
     $ranked = @(Resolve-DownloadCandidates -Config $Config -Track $track)
 
     if (Test-WantedCancellation -Wanted $Wanted) { Complete-WantedCancellation -Wanted $Wanted; return }
-    if (-not (Test-OwnsActiveLease -Wanted $Wanted)) { Write-Host "  [abandon] $([string]$Wanted.title)：候选解析期间租约丢失，放弃本次处理。" -ForegroundColor DarkYellow; return }
+    if (-not (Test-OwnsActiveLease -Wanted $Wanted)) { Write-WorkerLog "  [abandon] $([string]$Wanted.title)：候选解析期间租约丢失，放弃本次处理。" -Color DarkYellow; return }
 
     if ($ranked.Count -eq 0) {
         [void](Increment-WantedAttempt -Wanted $Wanted)
@@ -432,12 +445,15 @@ function Process-WantedTrack {
         if ($blockedUntil) {
             [void](Set-QueueState -Wanted $Wanted -State 'RETRY_WAIT' -Error 'BILIBILI_CIRCUIT_OPEN' -NextRetryAt $blockedUntil)
             Set-CanonicalTrackStatusForWantedDb -TrackId $track.id -WorkerId $WorkerId -WantedState 'RETRY_WAIT' -Status 'RETRY_WAIT' | Out-Null
+            Write-WorkerLog "  [queue] $($track.title)：无候选，Bilibili 熔断中，$($blockedUntil) 后重试。" -Color DarkYellow
         } elseif ([int]$Wanted.attempts -ge [int]$Wanted.max_attempts) {
             [void](Set-QueueState -Wanted $Wanted -State 'UNAVAILABLE' -Error 'NO_CANDIDATE')
             Set-CanonicalTrackStatusForWantedDb -TrackId $track.id -WorkerId $WorkerId -WantedState 'UNAVAILABLE' -Status 'UNAVAILABLE' | Out-Null
+            Write-WorkerLog "  [queue] $($track.title)：无候选且已达重试上限，标记为暂不可用（可在界面点重试）。" -Color Red
         } else {
             [void](Set-QueueState -Wanted $Wanted -State 'RETRY_WAIT' -Error 'NO_CANDIDATE' -NextRetryAt (Get-RetryTime -Wanted $Wanted))
             Set-CanonicalTrackStatusForWantedDb -TrackId $track.id -WorkerId $WorkerId -WantedState 'RETRY_WAIT' -Status 'RETRY_WAIT' | Out-Null
+            Write-WorkerLog "  [queue] $($track.title)：无候选，等待下次重试。" -Color DarkYellow
         }
         return
     }
@@ -449,6 +465,16 @@ function Process-WantedTrack {
         $candidate = $entry.Candidate
         $score = $entry.Score
         $Wanted.selected_candidate = $candidate
+        Write-WorkerLog "  [candidate] $($track.title)：provider=$($candidate.provider) identity=$($score.identity_confidence) duration_diff=$($score.duration_diff) url=$($candidate.url)" -Color DarkGray
+        # A NetEase id discovered by provider search is worth keeping: later
+        # attempts, lyrics and recommendation assembly reuse it.
+        $discoveredNeteaseId = ''
+        if ($candidate.PSObject.Properties['metadata'] -and $candidate.metadata -and $candidate.metadata.PSObject.Properties['netease_id']) {
+            $discoveredNeteaseId = [string]$candidate.metadata.netease_id
+        }
+        if ($candidate.provider -eq 'netease' -and $discoveredNeteaseId) {
+            [void](Add-CanonicalTrackIdentifierDb -TrackId $track.id -Type 'netease' -Value $discoveredNeteaseId)
+        }
         Write-MusicServerEventDb -TrackId $track.id -Provider $candidate.provider -EventType 'CANDIDATE_SELECTED' -Attempt ([int]$Wanted.attempts) -Message "score=$($score.score); identity=$($score.identity_confidence); duration_diff=$($score.duration_diff)"
         if ($candidate.provider -eq 'local') {
             Bind-LocalTrack -Track $track -Wanted $Wanted -Path $candidate.url
@@ -480,15 +506,18 @@ function Process-WantedTrack {
                 # NetEase miss (VIP / not available) is a normal fall-through, not a
                 # circuit event: log it and try the next candidate (Bilibili).
                 Write-MusicServerEventDb -TrackId $track.id -Provider 'netease' -EventType 'DOWNLOAD_FAILED' -Attempt ([int]$Wanted.attempts) -ErrorType $download.Error
+                Write-WorkerLog "  [download] netease 未命中（$($download.Error)）：$($track.title)，尝试下一个候选。" -Color DarkGray
                 continue
             }
             if ($download.Blocked) {
                 [void](Increment-WantedAttempt -Wanted $Wanted)
                 [void](Set-QueueState -Wanted $Wanted -State 'RETRY_WAIT' -Error $download.Error -NextRetryAt (Get-RetryTime -Wanted $Wanted -Provider 'bilibili_download'))
                 Set-CanonicalTrackStatusForWantedDb -TrackId $track.id -WorkerId $WorkerId -WantedState 'RETRY_WAIT' -Status 'RETRY_WAIT' | Out-Null
+                Write-WorkerLog "  [download] $($track.title)：$($download.Error)，等待重试。" -Color DarkYellow
                 return
             }
             Write-MusicServerEventDb -TrackId $track.id -Provider $candidate.provider -EventType 'DOWNLOAD_FAILED' -Attempt ([int]$Wanted.attempts) -ErrorType $download.Error
+            Write-WorkerLog "  [download] $($candidate.provider) 下载失败（$($download.Error)）：$($track.title)" -Color DarkYellow
             continue
         }
 
@@ -509,10 +538,12 @@ function Process-WantedTrack {
         if (-not (Test-OwnsActiveLease -Wanted $Wanted)) { Remove-Item -LiteralPath $download.Path -Force -ErrorAction SilentlyContinue; return }
         if (-not $validation.Valid) {
             Remove-Item -LiteralPath $download.Path -Force -ErrorAction SilentlyContinue
+            Write-WorkerLog "  [validate] $($track.title)：校验未通过（$($validation.Reason)），丢弃本次下载。" -Color DarkYellow
             if ($validation.Reason -eq 'WRONG_DURATION') { continue }
             break
         }
         Complete-DownloadedTrack -Track $track -Wanted $Wanted -Path $download.Path -Validation $validation -Candidate $candidate -Score $score
+        Write-WorkerLog "  [done] $($track.title) - $($track.artist)：已下载并本地化（$($candidate.provider)）-> $($download.Path)" -Color Green
         return
     }
 
@@ -532,7 +563,7 @@ function Invoke-WorkerPass {
     # Crash recovery first: reclaim expired leases (lease_expires_epoch < now) and
     # finish queued CANCEL_REQUESTED cleanups before anyone else touches the queue.
     try { Invoke-CrashRecoveryDb | Out-Null } catch {
-        Write-Host "  [warn] 崩溃恢复跳过：$_" -ForegroundColor DarkYellow
+        Write-WorkerLog "  [warn] 崩溃恢复跳过：$_" -Color DarkYellow
     }
     $queue = @(Get-WantedTracksDb -EligibleOnly)
     if ($queue.Count -eq 0) {
@@ -554,13 +585,13 @@ function Invoke-WorkerPass {
             $claim = Claim-WantedItemDb -TrackId $tid -WorkerId $WorkerId
             $claimed = [bool]$claim.Success
         } catch {
-            Write-Host "  [warn] claim 失败（回退到旧的取消检查保护）：$_" -ForegroundColor DarkYellow
+            Write-WorkerLog "  [warn] claim 失败（回退到旧的取消检查保护）：$_" -Color DarkYellow
         }
         if (-not $claimed) {
             if ($null -ne $claim) {
-                Write-Host "  [skip] $([string]$wanted.title)：claim 竞争失败（$($claim.Reason)），其他 worker 持有活跃租约。" -ForegroundColor DarkYellow
+                Write-WorkerLog "  [skip] $([string]$wanted.title)：claim 竞争失败（$($claim.Reason)），其他 worker 持有活跃租约。" -Color DarkYellow
             } else {
-                Write-Host "  [skip] $([string]$wanted.title)：claim 未取得，本轮跳过。" -ForegroundColor DarkYellow
+                Write-WorkerLog "  [skip] $([string]$wanted.title)：claim 未取得，本轮跳过。" -Color DarkYellow
             }
             continue
         }
@@ -570,7 +601,7 @@ function Invoke-WorkerPass {
         Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Wanted Queue 无可处理条目（全部被其他 worker 持有租约）。" -ForegroundColor DarkGray
         return
     }
-    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] 处理 Wanted Queue：$($selected.Count) 条（worker=$WorkerId）" -ForegroundColor Cyan
+    Write-WorkerLog "[$(Get-Date -Format 'HH:mm:ss')] 处理 Wanted Queue：$($selected.Count) 条（worker=$WorkerId）" -Color Cyan
     foreach ($wanted in $selected) { Process-WantedTrack -Wanted $wanted }
 }
 

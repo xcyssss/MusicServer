@@ -1,12 +1,41 @@
 ﻿$ProjectRoot = Split-Path -Parent $PSScriptRoot
 
+Describe 'Startup diagnostics' {
+    BeforeEach {
+        Import-Module (Join-Path $ProjectRoot 'MusicServer.Core.psm1') -Force
+        $oldTrace = $env:MUSICSERVER_STARTUP_TRACE
+        $traceBase = Join-Path $TestDrive 'startup.json'
+        $env:MUSICSERVER_STARTUP_TRACE = $traceBase
+        Remove-Item -LiteralPath ($traceBase + '.api.json') -ErrorAction SilentlyContinue
+    }
+    AfterEach { $env:MUSICSERVER_STARTUP_TRACE = $oldTrace }
+
+    It 'records phase differences and preserves an existing report' {
+        Write-MusicServerStartupTrace -Role api -Checkpoints ([ordered]@{ imports = 10; schema = 25 })
+        $before = [IO.File]::ReadAllText($traceBase + '.api.json')
+        $report = $before | ConvertFrom-Json
+        $report.events[1].duration_ms | Should Be 15
+        $report.role | Should Be 'api'
+        Write-MusicServerStartupTrace -Role api -Checkpoints ([ordered]@{ changed = 99 })
+        [IO.File]::ReadAllText($traceBase + '.api.json') | Should Be $before
+    }
+
+    It 'does not write when disabled and tolerates an unavailable output directory' {
+        $env:MUSICSERVER_STARTUP_TRACE = ''
+        Write-MusicServerStartupTrace -Role api -Checkpoints ([ordered]@{ imports = 10 })
+        Test-Path -LiteralPath ($traceBase + '.api.json') | Should Be $false
+        $env:MUSICSERVER_STARTUP_TRACE = Join-Path $TestDrive 'missing/startup.json'
+        { Write-MusicServerStartupTrace -Role api -Checkpoints ([ordered]@{ imports = 10 }) } | Should Not Throw
+    }
+}
+
 Describe 'MusicServer canonical state and queue' {
     BeforeEach {
         $TestRoot = Join-Path ([IO.Path]::GetTempPath()) "musicserver_pester_$([guid]::NewGuid().ToString('N'))"
         New-Item -ItemType Directory -Path $TestRoot -Force | Out-Null
         Import-Module (Join-Path $ProjectRoot 'MusicServer.Core.psm1') -Force
         Import-Module (Join-Path $ProjectRoot 'MusicServer.Providers.psm1') -Force
-        $Config = New-MusicServerConfig -Root $TestRoot
+        $Config = New-MusicServerConfig -Root $ProjectRoot -AppHome $TestRoot
         Initialize-MusicServerState -Config $Config
     }
 
@@ -201,7 +230,7 @@ Describe 'MusicServer canonical state and queue' {
         New-Item -ItemType File -Path $fake -Force | Out-Null
         [Environment]::SetEnvironmentVariable('MUSICSERVER_YTDLP', $fake)
 
-        $customConfig = New-MusicServerConfig -Root $TestRoot
+        $customConfig = New-MusicServerConfig -Root $ProjectRoot -AppHome $TestRoot
         $customConfig.YtDlp | Should Be ([IO.Path]::GetFullPath($fake))
     }
 
@@ -228,5 +257,35 @@ Describe 'MusicServer canonical state and queue' {
         $source | Should Match 'CANCEL_REQUESTED'
         $source | Should Match 'Test-WantedCancellation'
         $source | Should Match 'Complete-WantedCancellation'
+    }
+}
+
+Describe 'MusicServer runtime logging' {
+    It 'appends timestamped lines and rotates the log at the size cap' {
+        $logPath = Join-Path $TestDrive 'runtime.log'
+        Write-MusicServerLog -Path $logPath -Message 'first line'
+        (Get-Content -LiteralPath $logPath -Raw) | Should Match 'first line'
+        (Get-Content -LiteralPath $logPath -Raw) | Should Match '\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]'
+
+        # Cap the file at its current size so the next write rotates it.
+        $size = (Get-Item -LiteralPath $logPath).Length
+        Write-MusicServerLog -Path $logPath -Message 'second line' -MaxBytes $size
+        (Test-Path -LiteralPath "$logPath.1" -PathType Leaf) | Should Be $true
+        (Get-Content -LiteralPath "$logPath.1" -Raw) | Should Match 'first line'
+        (Get-Content -LiteralPath $logPath -Raw) | Should Match 'second line'
+        (Get-Content -LiteralPath $logPath -Raw) | Should Not Match 'first line'
+    }
+
+    It 'keeps the rotation count bounded' {
+        $logPath = Join-Path $TestDrive 'bounded.log'
+        foreach ($message in @('one', 'two', 'three', 'four')) {
+            Write-MusicServerLog -Path $logPath -Message $message -MaxBytes 1 -KeepFiles 2
+        }
+        (Test-Path -LiteralPath "$logPath.1" -PathType Leaf) | Should Be $true
+        (Test-Path -LiteralPath "$logPath.2" -PathType Leaf) | Should Be $true
+        (Test-Path -LiteralPath "$logPath.3" -PathType Leaf) | Should Be $false
+        (Get-Content -LiteralPath $logPath -Raw) | Should Match 'four'
+        (Get-Content -LiteralPath "$logPath.1" -Raw) | Should Match 'three'
+        @(Get-ChildItem -LiteralPath $TestDrive -Filter 'bounded.log*').Count | Should Be 3
     }
 }

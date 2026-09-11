@@ -60,13 +60,32 @@ jobs:
           $sqlite = Get-Command sqlite3 -ErrorAction Stop
           Write-Host "sqlite3 -> $($sqlite.Source)"
 
+      - name: PowerShell 5.1 parser preflight
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $files = @(Get-ChildItem -LiteralPath . -Recurse -File | Where-Object {
+            $_.Extension -in '.ps1','.psm1' -and
+            $_.FullName -notmatch '[\\/]src-tauri[\\/]target[\\/]'
+          })
+          foreach ($file in $files) {
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$errors)
+            if ($errors.Count -gt 0) {
+              $errors | ForEach-Object { Write-Host "PARSER: $($file.FullName) :: $($_.Message)" }
+              throw "PowerShell parser failed: $($file.FullName)"
+            }
+          }
+          Write-Host "Parser preflight passed for $($files.Count) PowerShell files."
+
       - name: Run Pester suites
         shell: powershell
         run: |
           Import-Module Pester -RequiredVersion 3.4.0 -Force
           $groups = @{
-            state = @('Core', 'Database', 'V2', 'WorkerConcurrency', 'Recommendation', 'LegacyRetirement', 'Listening', 'Web', 'Tauri')
-            api   = @('Http', 'UiProxyRuntime', 'ApiTransaction', 'ApiRuntime')
+            state = @('Core', 'Database', 'V2', 'WorkerConcurrency', 'Recommendation', 'LegacyRetirement', 'Listening', 'Web', 'Tauri', 'ConfigurableLibrary', 'TestRunner', 'Identity')
+            api   = @('Http', 'UiProxyRuntime', 'MediaRuntime', 'ApiTransaction', 'ApiRuntime')
           }
           $paths = @($groups['${{ matrix.group }}'] | ForEach-Object { ".\tests\MusicServer.$_.Tests.ps1" })
           Write-Host "Suites: $($paths -join ', ')"
@@ -106,6 +125,11 @@ jobs:
         shell: powershell
         run: cargo check --locked
 
+      - name: Runtime staging and startup probe regressions
+        working-directory: src-tauri
+        shell: powershell
+        run: cargo test --locked
+
       - name: Ensure sqlite3 for portable runtime
         shell: powershell
         run: |
@@ -131,18 +155,25 @@ jobs:
           if ($installers.Count -eq 0) { throw 'Tauri NSIS installer was not produced.' }
           $installers | ForEach-Object { Write-Host "installer -> $($_.FullName) ($($_.Length) bytes)" }
 
-      - name: Smoke installed APP without source runtime
+      - name: Smoke installed APP without source runtime and with external library
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $BuildMarker = 'musicserver-single-page-v3'
+          Import-Module .\MusicServer.Identity.psm1 -Force
+          . .\tests\MusicServer.DesktopSmoke.ps1
+          $BuildMarker = Get-MusicServerBuildIdentity -Root (Get-Location).Path
           $installer = Get-ChildItem -LiteralPath '.\src-tauri\target\release\bundle\nsis' -Filter '*.exe' -File | Select-Object -First 1
           if (-not $installer) { throw 'Installer not found for smoke test.' }
 
           $installDir = Join-Path $env:RUNNER_TEMP 'MusicServerInstalled'
           $appHome = Join-Path $env:RUNNER_TEMP 'MusicServerAppHome'
-          Remove-Item -LiteralPath $installDir,$appHome -Recurse -Force -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Force -Path $installDir,$appHome | Out-Null
+          $externalLibrary = Join-Path $env:RUNNER_TEMP 'MusicServerExternalLibrary'
+          Remove-Item -LiteralPath $installDir,$appHome,$externalLibrary -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $installDir,$appHome,$externalLibrary | Out-Null
+          $externalAudio = Join-Path $externalLibrary 'external-test.wav'
+          $streamFixture = [IO.File]::Create($externalAudio)
+          try { $streamFixture.SetLength(4096) } finally { $streamFixture.Dispose() }
+          [IO.File]::WriteAllText((Join-Path $externalLibrary 'external-test.lrc'), '[00:00.00]external smoke', (New-Object Text.UTF8Encoding($false)))
 
           $install = Start-Process -FilePath $installer.FullName -ArgumentList @('/S','/NS',("/D={0}" -f $installDir)) -Wait -PassThru
           if ($install.ExitCode -ne 0) { throw "Silent NSIS install failed with exit code $($install.ExitCode)." }
@@ -169,8 +200,6 @@ jobs:
           $env:MUSICSERVER_APP_HOME = $appHome
           $desktop = $null
           try {
-            $desktop = Start-Process -FilePath $appExe.FullName -WorkingDirectory $installDir -PassThru
-
             function Test-CurrentPair {
               foreach ($pair in @(
                 [pscustomobject]@{ Ui = 8790; Api = 8787 },
@@ -189,15 +218,40 @@ jobs:
               return $null
             }
 
-            $pair = $null
-            $deadline = [DateTime]::UtcNow.AddSeconds(75)
-            do {
-              if ($desktop.HasExited) { throw "Installed APP exited early with code $($desktop.ExitCode)." }
-              $pair = Test-CurrentPair
-              if ($pair) { break }
-              Start-Sleep -Milliseconds 500
-            } while ([DateTime]::UtcNow -lt $deadline)
-            if (-not $pair) { throw 'Installed APP did not expose current UI/API within 75 seconds.' }
+            function Wait-CurrentPair {
+              param([Parameter(Mandatory)][Diagnostics.Process]$Process, [int]$Seconds = 75)
+              $pair = $null
+              $deadline = [DateTime]::UtcNow.AddSeconds($Seconds)
+              do {
+                if ($Process.HasExited) { throw "Installed APP exited early with code $($Process.ExitCode)." }
+                $pair = Test-CurrentPair
+                if ($pair) { return $pair }
+                Start-Sleep -Milliseconds 500
+              } while ([DateTime]::UtcNow -lt $deadline)
+              throw "Installed APP did not expose current UI/API within $Seconds seconds."
+            }
+
+            function Wait-PortsClosed {
+              param([int]$Seconds = 20)
+              $deadline = [DateTime]::UtcNow.AddSeconds($Seconds)
+              do {
+                $stillRunning = $false
+                foreach ($port in @(8787,8788,8789,8790,8791,8792)) {
+                  try {
+                    $client = New-Object Net.Sockets.TcpClient
+                    try {
+                      if ($client.ConnectAsync('127.0.0.1',$port).Wait(250)) { $stillRunning = $true; break }
+                    } finally { $client.Dispose() }
+                  } catch {}
+                }
+                if (-not $stillRunning) { return }
+                Start-Sleep -Milliseconds 500
+              } while ([DateTime]::UtcNow -lt $deadline)
+              throw 'Tauri-owned services did not stop in time.'
+            }
+
+            $desktop = Start-Process -FilePath $appExe.FullName -WorkingDirectory $installDir -PassThru
+            $pair = Wait-CurrentPair -Process $desktop
 
             foreach ($required in @(
               (Join-Path $appHome 'start_musicserver_ui.ps1'),
@@ -211,6 +265,65 @@ jobs:
             }
             Write-Host "portable runtime ready -> $appHome"
             Write-Host "service pair -> UI=$($pair.Ui) API=$($pair.Api)"
+
+            $settingsUri = "http://127.0.0.1:$($pair.Api)/api/settings/music-library"
+            $payload = @{ path = $externalLibrary } | ConvertTo-Json -Compress
+            $setResult = Invoke-RestMethod -Uri $settingsUri -Method Put -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($payload)) -TimeoutSec 15
+            if (-not $setResult.accepted -or -not $setResult.requires_restart) {
+              throw 'Installed APP did not accept external music library setting.'
+            }
+
+            Stop-MusicServerSmokeDesktop -Process $desktop
+            $desktop = $null
+            Wait-PortsClosed
+
+            # The first default startup can create only an empty DailyMix tree.
+            # This is a disposable CI APP_HOME: refuse to remove it if any file
+            # exists, then remove the empty tree to prove custom startup does not
+            # recreate a misleading default Music folder.
+            $defaultMusic = Join-Path $appHome 'Music'
+            if (Test-Path -LiteralPath $defaultMusic -PathType Container) {
+              $defaultFiles = @(Get-ChildItem -LiteralPath $defaultMusic -Recurse -File -Force -ErrorAction SilentlyContinue)
+              if ($defaultFiles.Count -gt 0) { throw 'CI default Music fixture unexpectedly contains files; refusing to delete it.' }
+              Remove-Item -LiteralPath $defaultMusic -Recurse -Force
+            }
+
+            $desktop = Start-Process -FilePath $appExe.FullName -WorkingDirectory $installDir -PassThru
+            $pair = Wait-CurrentPair -Process $desktop
+            $settingsUri = "http://127.0.0.1:$($pair.Api)/api/settings/music-library"
+
+            $settings = Invoke-RestMethod -Uri $settingsUri -Method Get -TimeoutSec 15
+            if ([IO.Path]::GetFullPath([string]$settings.path) -ne [IO.Path]::GetFullPath($externalLibrary)) {
+              throw "Configured library was not restored after restart: $($settings.path)"
+            }
+            if (-not $settings.available) { throw 'Configured external library was reported unavailable.' }
+            if (Test-Path -LiteralPath $defaultMusic) { throw 'Custom-library startup recreated the misleading default Music directory.' }
+
+            $library = Invoke-RestMethod -Uri "http://127.0.0.1:$($pair.Api)/api/library" -Method Get -TimeoutSec 20
+            $items = @($library.items)
+            $item = @($items | Where-Object { [string]$_.title -like '*external-test*' -or [string]$_.file -like '*external-test.wav*' } | Select-Object -First 1)
+            if ($item.Count -ne 1 -or -not $item[0].id) { throw 'External library test track was not discovered.' }
+            $libraryId = [string]$item[0].id
+
+            $stream = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$($pair.Api)/api/library/$libraryId/stream" -TimeoutSec 15
+            if ($stream.StatusCode -ne 200) { throw "External stream failed: $($stream.StatusCode)" }
+            $lyrics = Invoke-RestMethod -Uri "http://127.0.0.1:$($pair.Api)/api/library/$libraryId/lyrics" -TimeoutSec 15
+            if (-not $lyrics.available) { throw 'External adjacent LRC was not available.' }
+            if ([string]$lyrics.text -notmatch 'external smoke') { throw 'External adjacent LRC content was not returned.' }
+            $expectedLrc = [IO.Path]::GetFullPath((Join-Path $externalLibrary 'external-test.lrc'))
+            if ([IO.Path]::GetFullPath([string]$lyrics.path) -ne $expectedLrc) {
+              throw "Lyrics API returned the wrong adjacent file: $($lyrics.path)"
+            }
+
+            $reset = Invoke-RestMethod -Uri $settingsUri -Method Delete -TimeoutSec 15
+            $expectedDefault = [IO.Path]::GetFullPath($defaultMusic)
+            if ([IO.Path]::GetFullPath([string]$reset.path) -ne $expectedDefault) {
+              throw "Reset did not return the immutable default path: $($reset.path)"
+            }
+            if ([IO.Path]::GetFullPath([string]$reset.daily_dir) -ne [IO.Path]::GetFullPath((Join-Path $defaultMusic 'DailyMix'))) {
+              throw "Reset returned the wrong DailyMix path: $($reset.daily_dir)"
+            }
+            Write-Host "external library ready -> $externalLibrary"
           } finally {
             if ($desktop -and -not $desktop.HasExited) {
               $kill = Start-Process -FilePath 'taskkill.exe' `

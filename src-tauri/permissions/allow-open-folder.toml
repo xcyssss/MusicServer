@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-open-folder"
+description = "Enables the open_folder command (reveal a path in Explorer)."
+commands.allow = ["open_folder"]

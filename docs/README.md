@@ -1,5 +1,7 @@
 # Documentation
 
+- [`../tests/README.md`](../tests/README.md) — PS5.1/Pester 3.4 测试入口、退出码和套件索引。
+
 - [`USER_GUIDE.zh-CN.md`](USER_GUIDE.zh-CN.md) — 中文使用说明与日常操作。
 - [`OPTIMIZATION_PLAN.zh-CN.md`](OPTIMIZATION_PLAN.zh-CN.md) — 稳定性、性能、桌面体验及维护与发布的分阶段优化计划。
 - [`archive/`](archive/) — 历史架构审计、加固报告和迁移审计，仅作为项目演进记录；不要把这些旧报告当作当前运行规范。

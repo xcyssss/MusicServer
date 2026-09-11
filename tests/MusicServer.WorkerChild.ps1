@@ -36,7 +36,7 @@ try {
     Import-Module (Join-Path $ProjectRoot 'MusicServer.Core.psm1') -Force
     Import-Module (Join-Path $ProjectRoot 'MusicServer.Database.psm1') -Force
     Import-Module (Join-Path $ProjectRoot 'MusicServer.State.psm1') -Force
-    $cfg = New-MusicServerConfig -Root $Root
+    $cfg = New-MusicServerConfig -Root $ProjectRoot -AppHome $Root
     Initialize-MusicServerState -Config $cfg
     Initialize-MusicServerDatabase -DbPath (Join-Path $cfg.StateDir 'musicserver.db') -SqliteExe $cfg.Sqlite
     Initialize-MusicServerSchema

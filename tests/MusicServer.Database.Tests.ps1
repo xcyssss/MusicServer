@@ -7,6 +7,13 @@ function Get-TestSqliteExecutable {
     return (Get-Command sqlite3.exe -ErrorAction Stop).Source
 }
 
+function Assert-TestThrows {
+    param([Parameter(Mandatory)][scriptblock]$Action)
+    $threw = $false
+    try { & $Action } catch { $threw = $true }
+    $threw | Should Be $true
+}
+
 Describe 'MusicServer SQLite CLI database wrapper' {
     BeforeEach {
         $TestRoot = Join-Path ([IO.Path]::GetTempPath()) "musicserver_db_$([guid]::NewGuid().ToString('N'))"
@@ -116,7 +123,7 @@ SELECT
             if ($reconnect) { Connect-MusicServerDatabase -DbPath $DbPath -SqliteExe (Get-TestSqliteExecutable) }
             $settings = @(Invoke-MusicServerSqlJson -Query 'PRAGMA foreign_keys;')
             [int]$settings[0].foreign_keys | Should Be 1
-            { Invoke-MusicServerSqlNonQuery -Query 'INSERT INTO child(parent_id) VALUES (99);' } | Should Throw
+            Assert-TestThrows { Invoke-MusicServerSqlNonQuery -Query 'INSERT INTO child(parent_id) VALUES (99);' }
         }
         [int](@(Invoke-MusicServerSqlJson -Query 'SELECT count(*) AS n FROM child;')[0].n) | Should Be 0
     }
@@ -127,7 +134,7 @@ SELECT
         foreach ($failure in @('INSERT INTO child VALUES (999)', 'INSERT INTO missing_table VALUES (999)')) {
             foreach ($separator in @(' ', "`n")) {
                 $sql = @('BEGIN;', 'INSERT INTO parent VALUES (2);', ($failure + ';'), 'INSERT INTO parent VALUES (3);', 'COMMIT;') -join $separator
-                { Invoke-MusicServerSqlNonQuery -Query $sql } | Should Throw
+                Assert-TestThrows { Invoke-MusicServerSqlNonQuery -Query $sql }
                 $parents = @(Invoke-MusicServerSqlJson -Query 'SELECT id FROM parent ORDER BY id;')
                 $parents.Count | Should Be 1
                 [int]$parents[0].id | Should Be 1
@@ -138,7 +145,7 @@ SELECT
 
     It 'stops later autocommit statements after the first failure on the same line' {
         Invoke-MusicServerSqlNonQuery -Query 'CREATE TABLE bail_test(id INTEGER PRIMARY KEY);'
-        { Invoke-MusicServerSqlNonQuery -Query 'INSERT INTO bail_test VALUES (1); INSERT INTO bail_test VALUES (1); INSERT INTO bail_test VALUES (2);' } | Should Throw
+        Assert-TestThrows { Invoke-MusicServerSqlNonQuery -Query 'INSERT INTO bail_test VALUES (1); INSERT INTO bail_test VALUES (1); INSERT INTO bail_test VALUES (2);' }
         $rows = @(Invoke-MusicServerSqlJson -Query 'SELECT id FROM bail_test;')
         $rows.Count | Should Be 1
         [int]$rows[0].id | Should Be 1
