@@ -35,7 +35,10 @@ Navidrome/bin/
 *.lnk.*
 
 # Local tool state
+# Agent/editor metadata for this machine: it describes the tooling, not the
+# product, and differs per developer. Never commit it.
 .mimocode/
+.commandcode/
 .DS_Store
 Thumbs.db
 
