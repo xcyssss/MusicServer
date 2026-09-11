@@ -1,4 +1,4 @@
-$runner = Join-Path (Split-Path -Parent $PSScriptRoot) 'tests/run_suite.ps1'
+﻿$runner = Join-Path (Split-Path -Parent $PSScriptRoot) 'tests/run_suite.ps1'
 
 Describe 'PowerShell 5.1 test runner contract' {
     function Invoke-RunnerFixture {
@@ -102,5 +102,59 @@ Describe 'hung suite' { It 'never returns' { Start-Sleep -Seconds 300 } }
                 Where-Object { $_.CommandLine -and $_.CommandLine.Contains($TestDrive) }
         )
         $leaked.Count | Should Be 0
+    }
+}
+
+Describe 'PowerShell source encoding contract' {
+    # AGENTS.md and .editorconfig require UTF-8 BOM for .ps1/.psm1 that carry
+    # non-ASCII text. Windows PowerShell 5.1 is the compatibility baseline and it
+    # decodes a BOM-less script with the ANSI code page, so CJK in a test name,
+    # assertion or fixture turns into mojibake that depends on the machine locale:
+    # CI (CP1252) and a Chinese workstation (CP936) can then disagree about the
+    # same file. That is exactly how a BOM-stripping edit ships unnoticed, so the
+    # rule is asserted here rather than trusted.
+    $repoRoot = Split-Path -Parent $PSScriptRoot
+    # One regex rather than a list of patterns: a bare '\target\' style entry is an
+    # invalid regex (trailing backslash) and throws while the Describe block runs.
+    $skipRegex = '\\(\.git|artifacts|node_modules|target|resources\\runtime)\\'
+
+    function Get-BomFacts {
+        param([string]$Path)
+        $bytes = [IO.File]::ReadAllBytes($Path)
+        $hasBom = ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF)
+        $start = if ($hasBom) { 3 } else { 0 }
+        $nonAscii = 0
+        for ($i = $start; $i -lt $bytes.Length; $i++) { if ($bytes[$i] -gt 127) { $nonAscii++ } }
+        [pscustomobject]@{ Path = $Path; HasBom = $hasBom; NonAscii = $nonAscii }
+    }
+
+    $scripts = @(
+        Get-ChildItem -LiteralPath $repoRoot -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Extension -in @('.ps1', '.psm1') } |
+            Where-Object { $_.FullName -notmatch $skipRegex } |
+            ForEach-Object { Get-BomFacts -Path $_.FullName }
+    )
+
+    It 'discovers the formal PowerShell sources' {
+        # A silently empty enumeration would make every assertion below vacuous.
+        $scripts.Count | Should BeGreaterThan 20
+        @($scripts | Where-Object { $_.Path -match 'run_suite\.ps1$' }).Count | Should Be 1
+    }
+
+    It 'gives every script with non-ASCII text a UTF-8 BOM' {
+        $offenders = @(
+            $scripts | Where-Object { $_.NonAscii -gt 0 -and -not $_.HasBom } |
+                ForEach-Object { "$($_.Path) ($($_.NonAscii) non-ASCII bytes, no BOM)" }
+        )
+        # Reported as a list so the failure names the file to fix.
+        ($offenders -join "`n") | Should Be ''
+    }
+
+    It 'keeps a BOM on the test infrastructure that carries non-ASCII' {
+        foreach ($name in @('tests\run_suite.ps1', 'tests\run_groups.ps1', 'tests\MusicServer.TestRunner.Tests.ps1')) {
+            $f = $scripts | Where-Object { $_.Path -eq (Join-Path $repoRoot $name) }
+            $f | Should Not BeNullOrEmpty
+            $f.HasBom | Should Be $true
+        }
     }
 }

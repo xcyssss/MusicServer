@@ -1,4 +1,4 @@
-# One-shot test runner: writes a summary + failures to -LogFile.
+﻿# One-shot test runner: writes a summary + failures to -LogFile.
 #
 # Every invocation is bounded by -TimeoutSeconds. The api suites really start
 # powershell.exe, music_api.ps1, start_musicserver_ui.ps1, HTTP listeners, SQLite

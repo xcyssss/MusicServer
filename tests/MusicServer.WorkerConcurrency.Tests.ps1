@@ -1,4 +1,4 @@
-$ProjectRoot = Split-Path -Parent $PSScriptRoot
+﻿$ProjectRoot = Split-Path -Parent $PSScriptRoot
 $CorePath  = Join-Path $ProjectRoot 'MusicServer.Core.psm1'
 $DbPath    = Join-Path $ProjectRoot 'MusicServer.Database.psm1'
 $StatePath = Join-Path $ProjectRoot 'MusicServer.State.psm1'

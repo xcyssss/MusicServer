@@ -1,4 +1,4 @@
-Set-StrictMode -Version 3.0
+﻿Set-StrictMode -Version 3.0
 
 # MusicServer.Database.psm1 - SQLite data access layer
 # Provides safe typed SQL-template expansion, transactions, and connection management.

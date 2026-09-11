@@ -1,4 +1,4 @@
-$ProjectRoot = Split-Path -Parent $PSScriptRoot
+﻿$ProjectRoot = Split-Path -Parent $PSScriptRoot
 
 function Get-TestSqliteExecutable {
     if ($env:MUSICSERVER_SQLITE) {
