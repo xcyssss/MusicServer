@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 mod background_process;
 mod runtime_manifest;
 mod startup_probe;
+mod startup_trace;
 
 use tauri::Manager;
 
@@ -186,10 +187,27 @@ fn replace_runtime_file(
 
 /// Synchronize only packaged runtime files into the writable APP home. Existing
 /// Music/, DailyMix_data/, Navidrome/, logs/ and user files are not deleted.
+#[cfg(test)]
 fn stage_runtime(bundle_runtime: &Path, app_home: &Path) -> std::io::Result<()> {
+    stage_runtime_traced(
+        bundle_runtime,
+        app_home,
+        &mut startup_trace::Trace::from_env(),
+    )
+}
+
+fn stage_runtime_traced(
+    bundle_runtime: &Path,
+    app_home: &Path,
+    trace: &mut startup_trace::Trace,
+) -> std::io::Result<()> {
+    let started = Instant::now();
     let files = runtime_manifest::verify(bundle_runtime, BUILD_MARKER)?;
     runtime_manifest::verify_destination(app_home, &files)?;
+    trace.record("runtime_verify", started);
+    let started = Instant::now();
     copy_runtime_tree(bundle_runtime, app_home)?;
+    trace.record("runtime_sync", started);
     if !has_launcher(app_home) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -326,12 +344,18 @@ fn stop_owned_launcher(state: &AppState) {
 /// 确保当前版本的 UI/API 可用。若已有当前版本服务则直接复用，不触碰
 /// runtime 文件；只有需要启动自己的服务树时才把 bundle runtime 同步到
 /// APP home。旧版服务占用默认端口时使用隔离端口。
-fn ensure_ui_ready(bundle_runtime: &Path, app_home: &Path, state: &AppState) -> Option<String> {
+fn ensure_ui_ready(
+    bundle_runtime: &Path,
+    app_home: &Path,
+    state: &AppState,
+    trace: &mut startup_trace::Trace,
+) -> Option<String> {
     let mut pairs = vec![(DEFAULT_UI_PORT, DEFAULT_API_PORT)];
     pairs.extend_from_slice(FALLBACK_PAIRS);
     let mut runtime_staged = false;
 
     for (ui_port, api_port) in pairs {
+        let started = Instant::now();
         // Probe ownership once. A closed UI needs no HTTP identity request;
         // repeated closed-port connects on Windows each consume their timeout.
         let (ui_open, api_open) = std::thread::scope(|scope| {
@@ -339,8 +363,12 @@ fn ensure_ui_ready(bundle_runtime: &Path, app_home: &Path, state: &AppState) -> 
             let api = port_open(api_port);
             (ui.join().unwrap_or(false), api)
         });
+        trace.record("port_probe", started);
         if ui_open {
-            if api_open && service_is_current(ui_port, api_port) {
+            let started = Instant::now();
+            let current = api_open && service_is_current(ui_port, api_port);
+            trace.record("existing_pair_identity", started);
+            if current {
                 return Some(endpoint_url(ui_port));
             }
             continue;
@@ -348,26 +376,36 @@ fn ensure_ui_ready(bundle_runtime: &Path, app_home: &Path, state: &AppState) -> 
 
         // Never compete with a listener we cannot identify. A current API is
         // safe to reuse when only its UI port is free.
-        if api_open && !api_is_current(api_port) {
-            continue;
+        if api_open {
+            let started = Instant::now();
+            let current = api_is_current(api_port);
+            trace.record("existing_api_identity", started);
+            if !current {
+                continue;
+            }
         }
 
         if !runtime_staged {
-            if let Err(error) = stage_runtime(bundle_runtime, app_home) {
+            let started = Instant::now();
+            if let Err(error) = stage_runtime_traced(bundle_runtime, app_home, trace) {
+                trace.record("runtime_stage_failed", started);
                 eprintln!("failed to stage MusicServer runtime: {error}");
                 return None;
             }
             runtime_staged = true;
         }
 
+        let started = Instant::now();
         let mut guard = state.child.lock().unwrap();
         if guard.is_none() {
             *guard = spawn_launcher(app_home, ui_port, api_port);
         }
         drop(guard);
+        trace.record("launcher_spawn", started);
 
         // Include network time in the per-pair budget, not just sleep time.
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let started = Instant::now();
+        let deadline = started + Duration::from_secs(30);
         while Instant::now() < deadline {
             let probe_deadline = deadline.min(Instant::now() + Duration::from_millis(1200));
             if startup_probe::contains(ui_port, "/app.js", BUILD_MARKER, probe_deadline)
@@ -378,13 +416,17 @@ fn ensure_ui_ready(bundle_runtime: &Path, app_home: &Path, state: &AppState) -> 
                     deadline.min(Instant::now() + Duration::from_millis(1200)),
                 )
             {
+                trace.record("services_ready", started);
                 return Some(endpoint_url(ui_port));
             }
             std::thread::sleep(
                 Duration::from_millis(500).min(deadline.saturating_duration_since(Instant::now())),
             );
         }
+        trace.record("services_timeout", started);
+        let started = Instant::now();
         stop_owned_launcher(state);
+        trace.record("launcher_stop", started);
     }
 
     None
@@ -438,20 +480,27 @@ fn main() {
             child: Mutex::new(None),
         })
         .setup(|app| {
+            let mut trace = startup_trace::Trace::from_env();
+            let started = Instant::now();
             let state: tauri::State<AppState> = app.state();
             let resource_dir = app.path().resource_dir().ok();
             let bundle_runtime = resolve_bundled_runtime(resource_dir);
             let app_home = resolve_app_home();
+            trace.record("resolve_runtime", started);
 
             let ui_url = bundle_runtime
                 .as_deref()
-                .and_then(|runtime| ensure_ui_ready(runtime, &app_home, &state));
+                .and_then(|runtime| ensure_ui_ready(runtime, &app_home, &state, &mut trace));
+
+            let outcome = if ui_url.is_some() { "services_ready" } else { "startup_failed" };
 
             if let Some(window) = app.get_webview_window("main") {
                 if let Some(ui_url) = ui_url {
+                    let started = Instant::now();
                     let _ = window.navigate(
                         ui_url.parse::<tauri::Url>().expect("invalid ui url"),
                     );
+                    trace.record("navigation_request", started);
                 } else {
                     let app_home_text = app_home.to_string_lossy().replace('\\', "\\\\");
                     let _ = window.eval(&format!(
@@ -459,6 +508,7 @@ fn main() {
                     ));
                 }
             }
+            let _ = trace.finish(BUILD_MARKER, outcome);
             Ok(())
         })
         .on_window_event(|window, event| {
