@@ -149,6 +149,68 @@ installer artifact upload
 
 Do not replace this with a static grep/Pester-only check.
 
+### Local test strategy — targeted by default, never a serial full run
+
+These are hard constraints, not preferences. The failure mode they exist to prevent is a "thunder test": a local verification run that takes tens of minutes to over an hour and still produces no verdict, because one suite deadlocked and nothing had a bound.
+
+```text
+Default to targeted tests.
+Never run the entire local regression suite during ordinary development.
+Never synchronously wait for GitHub CI with `gh pr checks --watch`.
+Investigate any targeted local test exceeding 5 minutes.
+Full validation is reserved for explicit final/release verification.
+```
+
+**1. Targeted by default.** After an ordinary change, run only the suites that the change can actually break. The full regression is reserved for an explicit request — 全量验证 / release / final verification — and never run "just to be safe". The goal is to catch what this change broke, quickly; it is not release-level validation every time.
+
+**2. Never serialize every suite.** CI already splits the work into the `state` and `api` groups and runs them **in parallel**. Do not rebuild that as a local `foreach` loop over all suites: the api suites really start `powershell.exe`, `music_api.ps1`, `start_musicserver_ui.ps1`, HTTP listeners, SQLite fixtures and TCP sockets, each with a 40-second startup allowance, 15-second socket timeouts and deliberate `Start-Sleep` slow-I/O fixtures, so a serial pass is an hour-class job. When a change genuinely spans both groups, run them once, side by side:
+
+```powershell
+# Both groups in parallel, CI's own suite lists
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\run_groups.ps1
+
+# A targeted subset instead of a whole group
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests\run_groups.ps1 -StateSuites Database,Recommendation -ApiSuites Http
+```
+
+Inside a group the suites stay sequential on purpose: the api suites bind real ports, so starting them concurrently would make the run flaky rather than fast.
+
+**3. Never block a shell on CI.** GitHub Actions runs remotely. Check it once and report the status:
+
+```powershell
+gh pr checks <PR号>
+```
+
+`gh pr checks --watch` and any other long-lived poll are forbidden: they park a shell for tens of minutes and hide nothing useful. If a check is still `pending`, say so and move on.
+
+**4. Hard wall-clock bounds.** `tests/run_suite.ps1` bounds each suite (`-TimeoutSeconds`, default **300**) and reports `TIMEOUT: <suite>` with exit code 3 instead of waiting forever; `run_groups.ps1` bounds each group (`-GroupTimeoutSeconds`, default **900**). Budgets:
+
+| Scope | Budget |
+|---|---|
+| one targeted suite | ≤ 5 minutes |
+| one local group | 10–15 minutes |
+| any background test or CI watcher | ≤ 15 minutes, then stop and report |
+
+A suite past its budget is a finding, not an inconvenience: stop it and investigate **which** test, child process, port, HTTP request or timeout is stuck. Do not "give it a bit longer", and do not re-run the same thing serially to make it look green. A group that completes fewer suites than it was given is a runner error, never a pass — "0 suites ran" must not read as green.
+
+**5. One coherent fix per failure.** Do not loop through failure → tweak an assertion → re-run → tweak again → re-run. Read the failure, find the root cause, make one coherent fix, then re-run only the smallest affected suite. Reach for a bounded child process to isolate *where* something hangs rather than guessing from a stall.
+
+**6. Keep progress visible.** Never pipe a long run through `Select-Object -Last N`: it cannot emit until the pipeline ends, so the run looks identical whether it is progressing or wedged. Use `Tee-Object` to a log file, or write the log and poll it.
+
+**7. Clean up what you start.** Any test that starts a real child process, HTTP service, Tauri app, PowerShell child or temporary port must clean it up on failure and timeout as well as success. The runner kills the whole tree (`taskkill /T`) when a suite overruns, because a leaked listener or worker makes the next suite wait tens of seconds and manufactures a slowdown that looks like a product bug.
+
+**8. What to run for what.** Ordinary business-logic changes must not default to an NSIS build, a full Tauri smoke, or every Pester suite.
+
+| Change | Run |
+|---|---|
+| `web/`, `tests/web-ui.behavior.test.cjs` | `node --test tests/web-ui.behavior.test.cjs`, then `MusicServer.Web.Tests.ps1` |
+| one module (`MusicServer.*.psm1`) | the suites that import it plus their direct neighbours |
+| `music_api.ps1` / HTTP surface | `MusicServer.Http.Tests.ps1`, `MusicServer.ApiRuntime.Tests.ps1` |
+| database / state logic | `MusicServer.Database.Tests.ps1`, `MusicServer.V2.Tests.ps1`, the owning business suite |
+| recommendation scoring | `MusicServer.Recommendation.Tests.ps1` and its direct dependencies |
+| `start_musicserver_ui.ps1` / media | `MusicServer.UiProxyRuntime.Tests.ps1`, `MusicServer.MediaRuntime.Tests.ps1` |
+| `src-tauri/`, runtime staging, installer, startup/lifecycle | the full `desktop-build` gate |
+
 ## Runtime behavior rules
 
 - Default UI/API ports: 8790 / 8787.
@@ -189,9 +251,9 @@ Batch related steps as local commits; after a meaningful stage and local validat
 2. preserve unrelated local/user work;
 3. make the smallest coherent change;
 4. add/update regression coverage;
-5. run the relevant local tests when possible;
+5. run the **targeted** local tests for this change (see *Local test strategy* — not the whole suite);
 6. push to a feature/review branch;
-7. verify GitHub CI rather than assuming it is green;
+7. check GitHub CI **once** with `gh pr checks <PR号>`; report the status rather than watching it;
 8. do not merge unless the user explicitly authorizes merge.
 
 ### Checkpoint rule
@@ -199,6 +261,10 @@ Batch related steps as local commits; after a meaningful stage and local validat
 After completing a meaningful task, update this `AGENTS.md` checkpoint when the task changes architecture, release behavior, test gates, or important operating rules. Keep only current durable facts; do not accumulate transient debugging notes.
 
 ## Current checkpoint — 2026-09-11
+
+- Local verification is **targeted by default**, and the "thunder test" is a named failure mode: a serial pass over every suite is an hour-class job that produces no verdict. The rules live in *Local test strategy* above; the operational summary is: run only the suites the change can break; never serialize every suite locally; check CI with a single `gh pr checks <PR号>` instead of `--watch`; treat a targeted suite past 5 minutes, a group past 15, and any background watcher past 15 minutes as a finding to investigate and stop. Full regression is reserved for an explicit 全量验证 / release / final-verification request. `tests/run_suite.ps1` bounds each suite (`-TimeoutSeconds`, default 300, exit 3 on timeout) and `tests/run_groups.ps1` runs CI's `state` and `api` groups in parallel with a per-group bound (default 900).
+
+- The bounded runner executes the suite in a **child process**, and two PowerShell traps there are load-bearing. (1) `Start-Process -PassThru` without `-Wait` does not keep a process handle, so `.ExitCode` reads as `$null` — and `exit $null` is exit code **0**, which reported a crashed suite as a pass. The runner uses `System.Diagnostics.Process` directly and still treats a `$null` exit code as a runner error rather than a pass. (2) A child started with `CreateNoWindow` has no console, so `[Console]::OutputEncoding` falls back to the ANSI code page and any sqlite `-json` output containing CJK comes back mangled; the worker sets UTF-8 explicitly before running Pester. Killing an overrunning suite uses `taskkill /T` so the tree the suite started (API servers, fixtures, workers) dies with it — a leaked listener makes the next suite wait and manufactures a slowdown that looks like a product bug. A group that completes fewer suites than it was given is a runner error, never a pass: "0 suites ran" must not read as green.
 
 - The displayed release year is NetEase's `album.publishTime` and **never** the local file's `year` tag. For Bilibili downloads that tag holds the upload/encode year: 155 of 185 real rows cluster in 2023–2026, so trusting it would label a 1988 song as 2024. `Get-NeteasePublishYear` converts epoch ms (accepting seconds too) and returns **0 for anything implausible** rather than clamping, because a confidently wrong year is worse than none; 0 renders as nothing. It lives on `canonical_tracks.release_year` (written by `New-CanonicalTrack -ReleaseYear` / `Save-CanonicalTrackDb` / `Save-DailyRecommendationsDb`) and is cached per local file on `local_track_artists.release_year`, resolved by `Select-NeteaseArtistForTitle` (returning `publish_year`) during the launcher's artist backfill. Both overlays (`Add-ResolvedArtist`, `Get-UiLibrary`) attach `year` to **every** row at 0 by default, before the artist decision can `continue` past it, because the year belongs to the track and not to the artist decision. `Save-CanonicalTrackDb`'s UPDATE must not blank a known year: `release_year = CASE WHEN @release_year > 0 THEN @release_year ELSE release_year END`, since a re-save from a source that carries no year would otherwise erase it. A backfill pass re-queries a `netease`-sourced row whose `release_year` is still 0, so installs that predate the column fill in rather than showing no year forever. Both `release_year` columns need the explicit idempotent `PRAGMA table_info` + `ALTER TABLE` upgrade: `CREATE TABLE IF NOT EXISTS` never adds a column to an existing state DB.
 
