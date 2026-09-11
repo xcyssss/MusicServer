@@ -336,19 +336,10 @@ try {
 $localBudget = [Math]::Max(0, [Math]::Min($LocalCount, $Count))
 $localPicks = @()
 if ($localBudget -gt 0 -and $affinity.Count -gt 0) {
-    $localPicks = @(Select-LocalRecommendationTracks -Candidates @($localCandidates) -Affinity $affinity -ExcludedKeys @($localExclude) -Limit $localBudget)
-    # A disliked owned track is demoted the same way an online one is: its affinity
-    # weight is divided down so a non-disliked artist wins the slot, but it is not
-    # excluded outright.
-    if ($dislikedKeys.Count -gt 0) {
-        $localPicks = @($localPicks | ForEach-Object {
-            $blocked = Test-CandidateDisliked -Title ([string]$_.Title) -Artist ([string]$_.Artist) -TrackId ([string]$_.TrackId) -PenaltyKeys $dislikedKeys
-            if ($blocked) {
-                $_ | Add-Member -NotePropertyName 'Weight' -NotePropertyValue ([Math]::Max(1, [int][Math]::Floor([int]$_.Weight / $DislikeWeightDivisor))) -Force
-            }
-            $_
-        } | Sort-Object @{ Expression = { [int]$_.Weight }; Descending = $true })
-    }
+    # The dislike penalty is applied inside the selection so a disliked owned track
+    # loses its slot to a non-disliked one; demoting afterwards would only reorder
+    # the picks already chosen.
+    $localPicks = @(Select-LocalRecommendationTracks -Candidates @($localCandidates) -Affinity $affinity -ExcludedKeys @($localExclude) -Limit $localBudget -DislikeKeys $dislikedKeys -DislikeWeightDivisor $DislikeWeightDivisor)
 }
 Write-Host "  本地重听推荐：$($localPicks.Count) 首（候选 $($localCandidates.Count) 首，歌手亲和度 $($affinity.Count) 个，预算 $localBudget）" -ForegroundColor Yellow
 

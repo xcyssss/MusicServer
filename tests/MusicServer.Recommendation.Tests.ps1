@@ -754,6 +754,15 @@ Describe 'Local library recommendation source' {
 
 Describe 'Disliked tracks and release year' {
 
+    # Carries a TrackId so the dislike matcher has something to key on.
+    function New-DislikeCandidate {
+        param([string]$Title, [string]$Artist, [string]$LibraryId = 'library-A')
+        return [pscustomobject]@{
+            Title = $Title; Artist = $Artist; File = "c:\music\$Title.mp3"
+            LibraryId = $LibraryId; TrackId = "track_$LibraryId"; LastPlayedAt = ''
+        }
+    }
+
     BeforeEach {
         Initialize-RecommendationScratchDb
     }
@@ -873,5 +882,39 @@ Describe 'Disliked tracks and release year' {
         Write-TrackDislikeDb -TrackId $track.id -Title 'On My Way（Live）' -Artist 'Alan Walker' | Out-Null
         $keys = Get-DislikePenaltyKeys -Disliked @(Get-DislikedTrackKeysDb)
         (Test-CandidateDisliked -Title 'On My Way(Live)' -Artist 'Alan Walker' -PenaltyKeys $keys) | Should Be $true
+    }
+
+    It 'lets a non-disliked track win the slot from a disliked one' {
+        # The whole point of the penalty on the LOCAL source: it must change which
+        # tracks get selected, not merely the order of tracks already selected.
+        $favourite = New-DislikeCandidate -Title 'Favourite' -Artist '最爱歌手' -LibraryId 'library-fav'
+        $other = New-DislikeCandidate -Title 'Other' -Artist '还不错歌手' -LibraryId 'library-other'
+        $affinity = Get-LocalArtistAffinity -ListeningStats @(
+            [pscustomobject]@{ artist = '最爱歌手'; play_count = 40 }
+            [pscustomobject]@{ artist = '还不错歌手'; play_count = 3 }
+        ) -PositiveTracks @()
+
+        # Baseline: the much stronger artist wins the single slot.
+        $base = @(Select-LocalRecommendationTracks -Candidates @($favourite, $other) -Affinity $affinity -Limit 1)
+        $base.Count | Should Be 1
+        $base[0].LibraryId | Should Be 'library-fav'
+
+        # Dislike it: the other artist must take the slot instead.
+        $keys = Get-DislikePenaltyKeys -Disliked @([pscustomobject]@{ TrackId = ([string]$favourite.TrackId); Title = 'Favourite'; Artist = '最爱歌手'; NeteaseId = '' })
+        $after = @(Select-LocalRecommendationTracks -Candidates @($favourite, $other) -Affinity $affinity -Limit 1 -DislikeKeys $keys)
+        $after.Count | Should Be 1
+        $after[0].LibraryId | Should Be 'library-other'
+    }
+
+    It 'still recommends a disliked track rather than coming back short' {
+        # A penalty, not an exclusion: with nothing else left to fill the slot the
+        # disliked track must still be returned, with a reduced but nonzero weight.
+        $only = New-DislikeCandidate -Title 'Only One' -Artist '唯一歌手' -LibraryId 'library-only'
+        $affinity = Get-LocalArtistAffinity -ListeningStats @([pscustomobject]@{ artist = '唯一歌手'; play_count = 30 }) -PositiveTracks @()
+        $keys = Get-DislikePenaltyKeys -Disliked @([pscustomobject]@{ TrackId = ([string]$only.TrackId); Title = 'Only One'; Artist = '唯一歌手'; NeteaseId = '' })
+        $picks = @(Select-LocalRecommendationTracks -Candidates @($only) -Affinity $affinity -Limit 1 -DislikeKeys $keys)
+        $picks.Count | Should Be 1
+        $picks[0].LibraryId | Should Be 'library-only'
+        ([int]$picks[0].Weight -gt 0) | Should Be $true
     }
 }

@@ -868,7 +868,9 @@ function Select-LocalRecommendationTracks {
         [Parameter(Mandatory)][hashtable]$Affinity = @{},
         [AllowEmptyCollection()][string[]]$ExcludedKeys = @(),
         [int]$Limit = 6,
-        [double]$RecentlyPlayedDays = 14
+        [double]$RecentlyPlayedDays = 14,
+        [Parameter(Mandatory = $false)][hashtable]$DislikeKeys = @{},
+        [double]$DislikeWeightDivisor = 4
     )
 
     if ($Limit -le 0) { return @() }
@@ -926,6 +928,15 @@ function Select-LocalRecommendationTracks {
         $playedAt = Convert-ToUtcDateTime $lastPlayed
         if ($playedAt -and $playedAt -gt $cutoff) { continue }
 
+        # A disliked owned track sinks within its tier rather than being excluded:
+        # dividing its weight here, before the ordering, is what lets a non-disliked
+        # artist actually win the slot. Demoting after selection would only reorder
+        # the tracks already chosen. "少推荐" is a penalty, not an exclusion, so the
+        # track stays eligible and reappears when nothing better remains.
+        if ($DislikeKeys.Count -gt 0) {
+            $disliked = Test-CandidateDisliked -Title $title -Artist $artist -TrackId $trackId -PenaltyKeys $DislikeKeys
+            if ($disliked) { $best = [Math]::Max(1, [int][Math]::Floor([double]$best / $DislikeWeightDivisor)) }
+        }
 
         [void]$scored.Add([pscustomobject]@{
             Title = $title; Artist = $artist; File = $file; LibraryId = $libraryId
