@@ -200,6 +200,96 @@ function ConvertFrom-MusicServerSqliteJson {
     return ConvertFrom-Json -InputObject $Json
 }
 
+function Get-MusicServerFlatJsonItems {
+    <#
+    .SYNOPSIS
+      Flattens whatever a JSON array column holds into the items it really means.
+
+      Shared by the reader and the writer. Two historical shapes must survive it:
+        * a nested array, from PowerShell 5.1's -InputObject array nesting;
+        * a collection wrapper `{value:[...],Count:n}`, which is how ConvertTo-Json
+          renders an ArrayList/List instead of a true array.
+      A JSON null is not an item, so it is dropped: `New-CanonicalTrack` turned a
+      missing -Identifiers into `@($null)` and stored `[null]` in the column, which
+      the old reader's wrapper bug then hid from every test.
+    #>
+    param([AllowNull()]$Items)
+
+    $flat = New-Object System.Collections.ArrayList
+    $pending = New-Object System.Collections.Queue
+    if ($null -ne $Items) { $pending.Enqueue($Items) }
+    while ($pending.Count -gt 0) {
+        $item = $pending.Dequeue()
+        if ($null -eq $item) { continue }
+        if (($item -is [System.Collections.IEnumerable]) -and -not ($item -is [string])) {
+            foreach ($inner in $item) { $pending.Enqueue($inner) }
+            continue
+        }
+        # A collection wrapper carries the real items in `.value`; unwrap it, but only
+        # when the object is not a legitimate item (those carry their own fields).
+        if (-not $item.PSObject.Properties['type']) {
+            $valueProperty = $item.PSObject.Properties['value']
+            if ($valueProperty -and ($valueProperty.Value -is [System.Collections.IEnumerable]) -and -not ($valueProperty.Value -is [string])) {
+                foreach ($inner in $valueProperty.Value) { $pending.Enqueue($inner) }
+                continue
+            }
+        }
+        [void]$flat.Add($item)
+    }
+    return @($flat.ToArray())
+}
+
+function ConvertFrom-MusicServerJsonArray {
+    <#
+    .SYNOPSIS
+      Parses JSON text holding an array into a flat list of its items.
+
+      PowerShell 5.1's ConvertFrom-Json does not hand back a JSON array
+      consistently through -InputObject: for a one-item array it returns an array
+      whose single element is the whole array again, so `@(ConvertFrom-Json ...)`
+      yields a WRAPPER instead of the items. Scalar reads survived it only because
+      PowerShell member enumeration silently unwraps a one-element array, which is
+      why `identifiers_json` looked fine while `Get-NeteaseIdFromTrack` quietly
+      returned '' for every track read back from the database -- and the same
+      wrapper hit preview_sources_json and download_candidates_json.
+
+      Wrapping the text in an object before parsing makes the shape determinate at
+      every length, which guessing at the nesting cannot.
+    #>
+    param([AllowNull()]$Json)
+
+    if ($null -eq $Json) { return @() }
+    $text = [string]$Json
+    if ([string]::IsNullOrWhiteSpace($text)) { return @() }
+    $text = $text.Trim()
+    # Array-only by contract. A bare object is not a list of items, and the wrapped
+    # parse below could not tell the two apart (both expose a `.items` property), so
+    # the shape is settled from the text rather than guessed after parsing.
+    if (-not $text.StartsWith('[')) { return @() }
+    $wrapped = $null
+    try { $wrapped = ConvertFrom-MusicServerSqliteJson -Json "{`"items`":$text}" } catch { return @() }
+    if ($null -eq $wrapped) { return @() }
+    $items = $wrapped.PSObject.Properties['items']
+    if (-not $items -or $null -eq $items.Value) { return @() }
+    return @(Get-MusicServerFlatJsonItems -Items $items.Value)
+}
+
+function ConvertTo-MusicServerJsonArrayText {
+    <#
+    .SYNOPSIS
+      Serializes items into JSON array text for a canonical JSON column.
+
+      The counterpart of ConvertFrom-MusicServerJsonArray, so a column always holds a
+      real array with no null holes. `@($null)` used to reach disk as `[null]`, which
+      every array reader then had to defend against.
+    #>
+    param([AllowNull()]$Items)
+
+    $flat = @(Get-MusicServerFlatJsonItems -Items $Items)
+    if ($flat.Count -eq 0) { return '[]' }
+    return ConvertTo-Json -InputObject @($flat) -Compress -Depth 10
+}
+
 function Invoke-MusicServerSqliteScript {
     param(
         [Parameter(Mandatory)][string]$Sql,
@@ -305,9 +395,9 @@ function Invoke-MusicServerSqlJson {
     if ([string]::IsNullOrWhiteSpace($stdout)) { return @() }
     $stdout = $stdout.Trim()
     if ($stdout -eq '[]') { return @() }
-    $parsed = ConvertFrom-MusicServerSqliteJson -Json $stdout
-    if ($parsed -is [Array]) { return $parsed }
-    return @($parsed)
+    # Flat rows at every length: a one-row result used to come back as a wrapper
+    # array, which scalar reads hid but property lookups could not.
+    return @(ConvertFrom-MusicServerJsonArray -Json $stdout)
 }
 
 function Invoke-MusicServerParamSql {

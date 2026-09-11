@@ -211,9 +211,7 @@ function Invoke-SqliteJson {
         Remove-Item -LiteralPath $errorFile -Force -ErrorAction SilentlyContinue
     }
     if ([string]::IsNullOrWhiteSpace($text)) { return @() }
-    $parsed = ConvertFrom-Json -InputObject ([string]$text)
-    if (-not $parsed) { return @() }
-    return @($parsed)
+    return @(ConvertFrom-MusicServerJsonArray -Json $text)
 }
 
 function Read-NavidromeLibrary {
@@ -907,12 +905,12 @@ while ($true) {
             } else {
                 # Preference-only: no queue change, no download cancellation, no
                 # file deletion. Disliking says what to recommend, not what to keep.
+                # The album and NetEase id are recorded with it because everything
+                # RELATED to the song is down-weighted too, not just this recording.
                 if ($method -eq 'POST') {
-                    $neteaseId = ''
-                    foreach ($id in @(Get-OptionalProperty $track 'identifiers' @())) {
-                        if ([string](Get-OptionalProperty $id 'type') -eq 'netease') { $neteaseId = [string](Get-OptionalProperty $id 'value'); break }
-                    }
-                    $tx = Write-TrackDislikeDb -TrackId $trackId -Title ([string]$track.title) -Artist ([string]$track.artist) -NeteaseId $neteaseId -Source 'music_api'
+                    $tx = Write-TrackDislikeDb -TrackId $trackId -Title ([string]$track.title) `
+                        -Artist ([string]$track.artist) -Album ([string]$track.album) `
+                        -NeteaseId (Get-NeteaseIdFromTrack -Track $track) -Source 'music_api'
                 } else {
                     $tx = Write-TrackUndislikeDb -TrackId $trackId -Source 'music_api'
                 }
