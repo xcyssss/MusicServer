@@ -87,16 +87,20 @@ Describe 'hung suite' { It 'pretends to be fine' { Start-Sleep -Seconds 300 } }
     }
 
     It 'leaves no child process behind after a timeout' {
-        $before = @(Get-Process powershell -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
         $r = Invoke-RunnerFixture -TimeoutSeconds 5 @'
 Describe 'hung suite' { It 'never returns' { Start-Sleep -Seconds 300 } }
 '@
         $r.Code | Should Be 3
-        # The runner kills the suite's whole tree; an orphan would hold the fixed
-        # API ports and make the next suite wait, manufacturing a fake slowdown.
-        Start-Sleep -Seconds 2
-        $after = @(Get-Process powershell -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
-        $leaked = @($after | Where-Object { $before -notcontains $_ })
+        # Match only THIS run's processes. Comparing every powershell.exe on the
+        # machine would race with unrelated activity; the fixture path is unique to
+        # this test and appears in the command line of both the runner and its
+        # worker. An orphan would hold the fixed API ports and make the next suite
+        # wait, manufacturing a slowdown that looks like a product bug.
+        Start-Sleep -Seconds 3
+        $leaked = @(
+            Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
+                Where-Object { $_.CommandLine -and $_.CommandLine.Contains($TestDrive) }
+        )
         $leaked.Count | Should Be 0
     }
 }
