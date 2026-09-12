@@ -268,6 +268,23 @@ Describe 'MusicServer Hardening v2 - Recommendation State' {
         $seed.Artist | Should Be '许嵩'
     }
 
+    It 'seeds a library row whose artist was never resolved' {
+        # daily_recommend.ps1 hands the launcher's rows straight over, and a row
+        # whose singer is still unresolved carries an empty artist. That shape used
+        # to fail with "an empty string is not allowed" on the artist parameter --
+        # one binding error per unresolved file in every generation run.
+        $rows = @(
+            [pscustomobject]@{ Title = '周杰伦 - 七里香'; Artist = ''; File = 'c:\m\b.mp3'; LibraryId = 'library-B' }
+        )
+        $seed = @(Get-RecommendationSeedCandidatesDb -SeedCount 25 -LibraryFallback $rows -RandomSeed 7 |
+            Where-Object { $_.Source -eq 'library_fallback' }) | Select-Object -First 1
+        $seed.Title | Should Be '周杰伦 - 七里香'
+        $seed.Artist | Should Be ''
+        # The identity the seed carries is the same title-only one the shared
+        # helper derives, rather than nothing at all.
+        $seed.TrackId | Should Be (Get-CanonicalTrackId -Title '周杰伦 - 七里香' -Artist '')
+    }
+
     It 'does not parse the string False as a positive LIKE' {
         $track = New-RecommendationTestTrack -Title 'False Like'
         Save-CanonicalTrackDb -Track $track | Out-Null

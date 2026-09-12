@@ -57,6 +57,16 @@ Describe 'MusicServer canonical state and queue' {
         $studio | Should Not Be $live
     }
 
+    It 'derives a title-only id for a track with no resolved artist' {
+        # The daily generator asks for the id of every library row, including the
+        # ones whose singer was never resolved. Mandatory plus an empty artist was
+        # a parameter binding error for each of those rows.
+        $withoutArtist = Get-CanonicalTrackId -Title 'Test Song' -Artist ''
+        $withoutArtist | Should Match '^track_[0-9a-f]{24}$'
+        $withoutArtist | Should Not Be (Get-CanonicalTrackId -Title 'Test Song' -Artist 'Artist A')
+        (Get-CanonicalTrackId -Title 'Test Song' -Artist '') | Should Be $withoutArtist
+    }
+
     It 'preserves local identity when the same track is recommended again' {
         $first = New-CanonicalTrack -Title 'Stable Song' -Artist 'Artist' -Status 'LOCAL' -LocalSongId 'nav-123' `
             -DownloadCandidates @([pscustomobject]@{ provider = 'bilibili_direct'; bvid = 'BVknown' })
