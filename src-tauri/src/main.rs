@@ -374,18 +374,6 @@ mod tests {
             PathBuf::from(r"C:\local").join(PACKAGED_APP_HOME_DIR)
         );
     }
-
-    #[test]
-    fn minimize_hides_the_window_only_when_a_tray_icon_can_restore_it() {
-        // Minimizing with a tray icon present hides the window to the tray.
-        assert!(should_hide_to_tray(true, true));
-        // Without a tray icon the window must minimize normally: hiding it would
-        // remove it from both the taskbar and the tray, leaving no way back.
-        assert!(!should_hide_to_tray(true, false));
-        // A plain Resized (resize, maximize, restore) is not a minimize.
-        assert!(!should_hide_to_tray(false, true));
-        assert!(!should_hide_to_tray(false, false));
-    }
 }
 
 /// 拉起指定端口的 launcher 并返回子进程。失败返回 None（调用方会继续尝试）。
@@ -569,15 +557,6 @@ async fn pick_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
     }
 }
 
-/// 最小化到托盘是一个判断，不是一个副作用。
-///
-/// Tauri v2 没有“已最小化”窗口事件：最小化只以 `WindowEvent::Resized` 的形式到达，
-/// 所以这里必须自己查一次窗口状态。托盘图标是窗口隐藏之后**唯一**的恢复入口，因此
-/// 托盘不可用时绝不能隐藏窗口——否则窗口会同时从任务栏和托盘消失，用户只能杀进程。
-fn should_hide_to_tray(minimized: bool, tray_available: bool) -> bool {
-    minimized && tray_available
-}
-
 /// 左键点击托盘恢复主窗口。
 ///
 /// 隐藏时窗口仍是 minimized 状态，所以必须先 `unminimize` 再 `show`：只 show 会让
@@ -676,16 +655,7 @@ fn main() {
                         let _ = kill_process_tree(child.id());
                     }
                 }
-                // 最小化到托盘：窗口进入最小化时隐藏它，托盘左键负责恢复。窗口状态在
-                // 事件里查，托盘是否存在也查注册表而不是另存一份状态，两者都不会说谎。
-                tauri::WindowEvent::Resized(_) => {
-                    let app = window.app_handle();
-                    let minimized = window.is_minimized().unwrap_or(false);
-                    let tray_available = app.tray_by_id(TRAY_ID).is_some();
-                    if should_hide_to_tray(minimized, tray_available) {
-                        let _ = window.hide();
-                    }
-                }
+                // Native minimize retains the taskbar entry; the tray stays available.
                 _ => {}
             }
         })

@@ -239,26 +239,61 @@
     focusId = items[nextRecommendationIndex(index, items.length, direction)].track_id;
     paintRecommendations();
   }
-  el('water-discover').addEventListener('click', (event) => {
-    nextRecommendation(1);
+  let waterFrame = null;
+  let pendingTurn = null;
+  function discover(direction, event) {
+    if (pendingTurn != null) return;
     const layer = el('water-ripples');
+    const recList = el('recommendation-list');
+    if (waterFrame != null) cancelAnimationFrame(waterFrame);
     layer.replaceChildren();
-    if (reducedMotion.matches) return;
+    if (reducedMotion.matches) { nextRecommendation(direction); return; }
     const box = layer.getBoundingClientRect();
-    const x = event.detail ? event.clientX - box.left : box.width / 2;
-    const y = event.detail ? event.clientY - box.top : box.height * .6;
-    const size = Math.hypot(box.width, box.height) * 2;
-    for (let i = 0; i < 3; i++) {
-      const ring = document.createElement('span');
-      ring.className = 'discovery-wave';
-      Object.assign(ring.style, { width: `${size}px`, height: `${size}px`, left: `${x - size / 2}px`, top: `${y - size / 2}px` });
-      layer.append(ring);
-      const animation = ring.animate([{ transform: 'scale(0)', opacity: .85 }, { transform: 'scale(1)', opacity: 0 }], { duration: 1050, delay: i * 100, easing: 'cubic-bezier(.1,.5,.3,1)', fill: 'both' });
-      animation.onfinish = () => ring.remove();
+    const x = event?.detail ? event.clientX - box.left : box.width * .5;
+    const y = event?.detail ? event.clientY - box.top : box.height * .66;
+    const ns = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(ns, 'svg');
+    svg.setAttribute('viewBox', `0 0 ${box.width} ${box.height}`);
+    svg.classList.add('discovery-surface');
+    const rings = Array.from({length: 3}, () => {
+      const ring = document.createElementNS(ns, 'circle');
+      ring.setAttribute('cx', x); ring.setAttribute('cy', y); ring.setAttribute('r', '0');
+      ring.setAttribute('fill', 'none'); ring.setAttribute('stroke', '#fff9ce');
+      ring.setAttribute('stroke-width', '3'); ring.classList.add('discovery-wave');
+      svg.append(ring); return ring;
+    });
+    layer.append(svg);
+    recList.classList.add('water-turning');
+    pendingTurn = setTimeout(() => {
+      pendingTurn = null;
+      nextRecommendation(direction);
+      recList.classList.remove('water-turning');
+    }, 240);
+    const began = performance.now();
+    const radius = Math.hypot(box.width, box.height) * .8;
+    function draw(now) {
+      const elapsed = now - began;
+      rings.forEach((ring, i) => {
+        const t = clamp((elapsed - i * 150) / 1550, 0, 1);
+        ring.setAttribute('r', String(radius * (1 - (1 - t) ** 2)));
+        ring.setAttribute('opacity', String((1 - t) * .95));
+      });
+      if (elapsed < 1850) waterFrame = requestAnimationFrame(draw);
+      else { waterFrame = null; layer.replaceChildren(); }
     }
+    waterFrame = requestAnimationFrame(draw);
+  }
+  el('water-discover').addEventListener('click', (event) => discover(1, event));
+  el('rec-previous').addEventListener('click', () => discover(-1));
+  el('rec-next').addEventListener('click', () => discover(1));
+  root.addEventListener('pagehide', () => {
+    clearTimeout(pendingTurn); pendingTurn = null;
+    if (waterFrame != null) cancelAnimationFrame(waterFrame);
+    waterFrame = null;
+    el('water-ripples').replaceChildren();
+    el('recommendation-list').classList.remove('water-turning');
   });
-  el('rec-previous').addEventListener('click', () => nextRecommendation(-1));
-  el('rec-next').addEventListener('click', () => nextRecommendation(1));
+  document.addEventListener('visibilitychange', () => document.body.classList.toggle('water-paused', document.hidden));
   el('tree-player-like').addEventListener('click', () => recommendationView?.likeCurrent());
   const artMarkup = '<svg viewBox="0 0 64 64" aria-hidden="true"><use href="#mark-leaf-plain" /></svg>';
   el('player-art').innerHTML = artMarkup;

@@ -222,3 +222,15 @@
 .ripple-orbit[data-orbit="3"] { left:77%; top:57%; }
 .ripple-orbit[data-orbit="4"] { left:20%; top:79%; }
 .ripple-orbit[data-orbit="5"] { left:60%; top:81%; }
+/* Refracted sunlight: a cached organic light field moves slowly over the water. */
+.tree-page::before { background:radial-gradient(ellipse at 12% 10%,#fffbd5a0,transparent 50%),radial-gradient(ellipse at 85% 85%,#bbcda54d,transparent 45%); }
+.water-light { position:fixed; inset:-5%; pointer-events:none; opacity:.55; mix-blend-mode:screen; overflow:hidden; animation:water-sunlight 14s ease-in-out infinite alternate; will-change:transform,opacity; }
+@keyframes water-sunlight { from { transform:translate(-1%,-1%) scale(1.02); opacity:.38; } to { transform:translate(2%,1.5%) scale(1.09); opacity:.65; } }
+.water-paused .water-light { animation-play-state:paused; }
+.tree-page .topbar,.tree-page .player-bar { background-color:#f5f6e7a0; }
+.water-art { filter:drop-shadow(0 2px 4px #b6aa5966); }
+.discovery-surface { width:100%; height:100%; overflow:visible; filter:drop-shadow(0 2px 2px #557640aa) drop-shadow(0 0 7px #fff4bc); }
+.discovery-wave { position:static; border:0; box-shadow:none; }
+.tree-page #recommendation-list { transition:opacity 320ms ease,filter 320ms ease; }
+.tree-page #recommendation-list.water-turning { opacity:.24; filter:blur(2px); }
+@media (prefers-reduced-motion:reduce) { .water-light { opacity:.35; } }
