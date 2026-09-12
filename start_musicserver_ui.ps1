@@ -1,6 +1,7 @@
 ﻿param(
     [string]$ApiPrefix = 'http://127.0.0.1:8787/',
     [string]$UiPrefix = 'http://127.0.0.1:8790/',
+    [string]$AppHome = '',
     [switch]$NoBrowser,
     [int]$ClientTimeoutSeconds = 90,
     [int]$LastClientGraceSeconds = 8
@@ -179,11 +180,21 @@ function Start-MusicServerWorker {
 # the task for a packaged APP_HOME and backfill the current day while it has no
 # recommendations yet. Failures here must never block the UI/API startup.
 function Test-DailyRecommendTaskCurrent {
-    param([psobject]$Task, [string]$Generator)
+    param([psobject]$Task, [string]$Generator, [string]$AppHome = '')
     if (-not $Task) { return $false }
     $action = @($Task.Actions) | Select-Object -First 1
     if (-not $action) { return $false }
     if (([string]$action.Arguments).IndexOf($Generator, [StringComparison]::OrdinalIgnoreCase) -lt 0) { return $false }
+    # A task whose generator matches but whose -AppHome points somewhere else
+    # writes the day into a database this APP never reads. Repairing only the
+    # script path is what let one home generate recommendations the other home
+    # could not see.
+    if ($AppHome) {
+        $declared = [regex]::Match([string]$action.Arguments, '-AppHome\s+"([^"]*)"')
+        if (-not $declared.Success) { return $false }
+        $declaredHome = $declared.Groups[1].Value.Trim().TrimEnd('\')
+        if (-not $declaredHome.Equals($AppHome.Trim().TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase)) { return $false }
+    }
     $settings = $Task.Settings
     if (-not $settings) { return $false }
     # A task registered before these were set is unusable on a laptop or when the
@@ -228,11 +239,13 @@ function Get-DailyRecommendTaskPreferences {
 }
 
 function Test-DailyRecommendGeneratedToday {
+    param([string]$AppHome = '')
     try {
-        # The task is registered with `-AppHome $Root`, so the health check must
-        # read that same home. `$Config` resolves APP_HOME from the environment,
-        # which can differ from the directory this launcher was installed into.
-        $taskConfig = New-MusicServerConfig -Root $Root -AppHome $Root
+        # The task is registered with `-AppHome`, so the health check must read that
+        # same home. `$Config` resolves APP_HOME from the environment, which can
+        # differ from the directory this launcher was installed into.
+        if (-not $AppHome) { $AppHome = $Config.AppHome }
+        $taskConfig = New-MusicServerConfig -Root $Root -AppHome $AppHome
         $dbPath = Join-Path $taskConfig.StateDir 'musicserver.db'
         if (-not (Test-Path -LiteralPath $dbPath -PathType Leaf)) { return $false }
         # Connecting rebinds the shared Database module, so put the launcher's own
@@ -251,58 +264,118 @@ function Test-DailyRecommendGeneratedToday {
     }
 }
 
+# The scheduled task is the primary generator because the APP is not running when
+# the day rolls over, but it is machine state this process may not be allowed to
+# create, and it can be bound to another APP_HOME. This fallback makes "open the
+# APP and the day is there" independent of Task Scheduler state.
+function Start-MusicServerDailyRecommendBackfill {
+    param([Parameter(Mandatory)][string]$AppHome, [int]$Count = 20)
+    try {
+        $generator = Join-Path $Root 'daily_recommend.ps1'
+        if (-not (Test-Path -LiteralPath $generator -PathType Leaf)) { return }
+        $stateDir = Join-Path $AppHome 'DailyMix_data\state'
+        $logDir = Join-Path $AppHome 'logs'
+        $leaseFile = Join-Path $stateDir 'daily_recommend.lease'
+        # A watchdog restart must not stack generators on the same day.
+        if (Test-Path -LiteralPath $leaseFile -PathType Leaf) {
+            $ageMinutes = ((Get-Date) - (Get-Item -LiteralPath $leaseFile).LastWriteTime).TotalMinutes
+            if ($ageMinutes -lt 15) {
+                Write-UiLog "Daily recommendation generator already started $([int]$ageMinutes) minute(s) ago; not starting another."
+                return
+            }
+        }
+        foreach ($dir in @($stateDir, $logDir)) {
+            if (-not (Test-Path -LiteralPath $dir -PathType Container)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+        }
+        $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$generator`" -Count $Count -AppHome `"$AppHome`""
+        $process = Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -WorkingDirectory $Root -WindowStyle Hidden `
+            -RedirectStandardOutput (Join-Path $logDir 'musicserver-daily.stdout.log') `
+            -RedirectStandardError (Join-Path $logDir 'musicserver-daily.stderr.log') -PassThru
+        [IO.File]::WriteAllText($leaseFile, (Get-NowIso), (New-Object Text.UTF8Encoding($false)))
+        Write-UiLog "Started daily recommendation generator directly (appHome=$AppHome; count=$Count; pid=$($process.Id))"
+    } catch {
+        Write-UiLog "WARN could not start the daily recommendation generator: $($_.Exception.Message)"
+    }
+}
+
 function Initialize-MusicServerScheduledTasks {
+    param([string]$AppHome = '')
     if ($env:MUSICSERVER_DISABLE_SCHEDULED_TASKS -eq '1') { return }
     # A source checkout (or a test fixture) must not register machine state.
     if (Test-Path -LiteralPath (Join-Path $Root '.git')) { return }
+    if (-not $AppHome) { $AppHome = $Config.AppHome }
     $generator = Join-Path $Root 'daily_recommend.ps1'
     $registrar = Join-Path $Root 'register_daily_recommend.ps1'
     if (-not (Test-Path -LiteralPath $generator -PathType Leaf)) {
         Write-UiLog "Scheduled task setup skipped: $generator is missing"
         return
     }
-    if (-not (Test-Path -LiteralPath $registrar -PathType Leaf)) {
-        Write-UiLog "Scheduled task setup skipped: $registrar is missing"
-        return
-    }
 
     $taskName = 'MusicServer_DailyRecommend'
+    $task = $null
+    $taskCurrent = $false
+    $scheduleCount = 20
+    # Registration is its own failure domain. It used to share a try block with the
+    # backfill below, so a denied Register-ScheduledTask (the APP is not elevated)
+    # aborted the whole block: the day stayed empty and the log said only
+    # "setup skipped". A missing registrar is treated the same way -- it is a
+    # reason the task cannot be registered, not a reason to skip the day.
     try {
+        if (-not (Test-Path -LiteralPath $registrar -PathType Leaf)) { throw "registrar is missing: $registrar" }
         $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-        if (-not (Test-DailyRecommendTaskCurrent -Task $task -Generator $generator)) {
+        if (Test-DailyRecommendTaskCurrent -Task $task -Generator $generator -AppHome $AppHome) {
+            $taskCurrent = $true
+            $existing = Get-DailyRecommendTaskPreferences -Task $task
+            if ($existing.Count) { $scheduleCount = $existing.Count }
+        } else {
             # Carry the user's own schedule across the repair (moved install
             # directory, reinstall, or defaults written by an older build).
             $preferences = Get-DailyRecommendTaskPreferences -Task $task
-            $registerArgs = @{ AppHome = $Root }
+            $registerArgs = @{ AppHome = $AppHome }
             $effectiveTime = '07:00'
             $effectiveCount = 20
             if ($preferences.Time) { $registerArgs['Time'] = $preferences.Time; $effectiveTime = $preferences.Time }
             if ($preferences.Count) { $registerArgs['Count'] = $preferences.Count; $effectiveCount = $preferences.Count }
             & $registrar @registerArgs | Out-Null
-            Write-UiLog "Registered scheduled task $taskName (time=$effectiveTime; count=$effectiveCount)"
+            Write-UiLog "Registered scheduled task $taskName (time=$effectiveTime; count=$effectiveCount; appHome=$AppHome)"
+            $scheduleCount = $effectiveCount
             $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+            $taskCurrent = Test-DailyRecommendTaskCurrent -Task $task -Generator $generator -AppHome $AppHome
         }
+    } catch {
+        Write-UiLog "WARN daily recommendation task repair failed: $($_.Exception.Message)"
+        $task = $null
+        $taskCurrent = $false
+    }
 
-        # Backfill while the day still has nothing. Keying off the stored rows
-        # instead of the last run time means a run that failed mid-way (network,
-        # or a library that was still empty) cannot leave the day permanently
-        # without recommendations.
-        $generatedToday = Test-DailyRecommendGeneratedToday
-        $recentRun = $false
+    # Backfill while the day still has nothing. Keying off the stored rows instead
+    # of the last run time means a run that failed mid-way (network, or a library
+    # that was still empty) cannot leave the day permanently without
+    # recommendations.
+    if (Test-DailyRecommendGeneratedToday -AppHome $AppHome) { return }
+    $recentRun = $false
+    $running = $false
+    if ($taskCurrent -and $task) {
+        # LastRunTime belongs to whatever home the task writes to, so it is only
+        # meaningful once the task is known to target this APP_HOME.
         $info = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue
         if ($info -and $info.LastRunTime) {
             $lastRun = [datetime]$info.LastRunTime
             if ($lastRun.Year -gt 1900) { $recentRun = (((Get-Date) - $lastRun).TotalMinutes -lt 15) }
         }
-        $running = $false
-        if ($task) { $running = ([string]$task.State -eq 'Running') }
-        if ((-not $running) -and (-not $generatedToday) -and (-not $recentRun)) {
+        $running = ([string]$task.State -eq 'Running')
+    }
+    if ($running -or $recentRun) { return }
+    if ($taskCurrent) {
+        try {
             Start-ScheduledTask -TaskName $taskName
             Write-UiLog "Started scheduled task $taskName to backfill today's recommendations"
+            return
+        } catch {
+            Write-UiLog "WARN could not start scheduled task ${taskName}: $($_.Exception.Message)"
         }
-    } catch {
-        Write-UiLog "Scheduled task setup skipped: $($_.Exception.Message)"
     }
+    Start-MusicServerDailyRecommendBackfill -AppHome $AppHome -Count $scheduleCount
 }
 
 Import-Module (Join-Path $Root 'MusicServer.Core.psm1') -Force
@@ -314,7 +387,11 @@ Import-Module (Join-Path $Root 'MusicServer.Identity.psm1') -Force
 $startupPhases['module_imports'] = $startupClock.Elapsed.TotalMilliseconds
 $script:BuildMarker = Get-MusicServerBuildIdentity -Root $Root
 $startupPhases['build_identity'] = $startupClock.Elapsed.TotalMilliseconds
-$Config = New-MusicServerConfig -Root $Root
+$Config = New-MusicServerConfig -Root $Root -AppHome $AppHome
+# Every child (API, worker, daily generator) resolves APP_HOME itself, so export
+# what this process resolved. Without this the launcher could serve one home while
+# the API reads another, which shows a working library next to an empty day.
+$env:MUSICSERVER_APP_HOME = $Config.AppHome
 $LogRoot = $Config.LogDir
 $LyricsReportPath = $Config.LyricsReport
 $UiLog = Join-Path $LogRoot 'musicserver-ui.log'

@@ -216,9 +216,16 @@ Describe 'MusicServer Tauri desktop shell' {
         $launcher | Should Match 'Test-DailyRecommendGeneratedToday'
         $launcher | Should Match 'daily_recommendations'
         $launcher | Should Match 'StartWhenAvailable'
-        # The health check must read the home the task is pinned to, not the
-        # environment-resolved APP_HOME, or the two can disagree.
-        $launcher | Should Match 'New-MusicServerConfig -Root \$Root -AppHome \$Root'
+        # The health check and the task registration must use the home this APP
+        # resolved, not the directory the scripts happen to live in: when the two
+        # disagree the day is generated into a database nobody reads.
+        $launcher | Should Match 'Test-DailyRecommendGeneratedToday -AppHome \$AppHome'
+        $launcher | Should Match '\$registerArgs = @\{ AppHome = \$AppHome \}'
+        # One home for the whole tree: children resolve APP_HOME themselves.
+        $launcher | Should Match '\$env:MUSICSERVER_APP_HOME = \$Config\.AppHome'
+        # A denied Register-ScheduledTask must not skip the day's generation.
+        $launcher | Should Match 'Start-MusicServerDailyRecommendBackfill'
+        $launcher | Should Match 'WARN daily recommendation task repair failed'
         # A repair must carry the user's own schedule instead of resetting it.
         $launcher | Should Match 'Get-DailyRecommendTaskPreferences'
         $launcher | Should Match '& \$registrar @registerArgs'
@@ -263,6 +270,19 @@ Describe 'MusicServer Tauri desktop shell' {
         $wrongScript = New-ProbeTask -Arguments '-File "C:\other\daily_recommend.ps1"' -StartWhenAvailable $true -DisallowBattery $false -StopOnBattery $false
         (Test-DailyRecommendTaskCurrent -Task $wrongScript -Generator $generator) | Should Be $false
         (Test-DailyRecommendTaskCurrent -Task $null -Generator $generator) | Should Be $false
+
+        # A task whose generator matches but whose -AppHome points at another home
+        # generates the day into a database this APP never reads.
+        $otherHome = New-ProbeTask -Arguments "-File `"$generator`" -Count 20 -AppHome `"D:\other_home`"" -StartWhenAvailable $true -DisallowBattery $false -StopOnBattery $false
+        (Test-DailyRecommendTaskCurrent -Task $otherHome -Generator $generator -AppHome 'E:\Project\MusicSever_app') | Should Be $false
+        (Test-DailyRecommendTaskCurrent -Task $otherHome -Generator $generator -AppHome 'D:\other_home') | Should Be $true
+        # Windows paths compare case-insensitively: a difference in case is not a
+        # different home.
+        (Test-DailyRecommendTaskCurrent -Task $otherHome -Generator $generator -AppHome 'd:\OTHER_HOME') | Should Be $true
+        # Without a declared home the binding cannot be verified, so it is stale
+        # rather than assumed current.
+        $undeclaredHome = New-ProbeTask -Arguments "-File `"$generator`"" -StartWhenAvailable $true -DisallowBattery $false -StopOnBattery $false
+        (Test-DailyRecommendTaskCurrent -Task $undeclaredHome -Generator $generator -AppHome 'D:\other_home') | Should Be $false
     }
 
     It 'keeps a user-customised daily recommendation schedule across a repair' {

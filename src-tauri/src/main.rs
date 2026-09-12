@@ -111,20 +111,68 @@ fn resolve_bundled_runtime(resource_dir: Option<PathBuf>) -> Option<PathBuf> {
     None
 }
 
-/// Stable writable application home. An explicit environment override wins;
-/// otherwise use the identifier-scoped LOCALAPPDATA directory. The executable
-/// location is deliberately not consulted, so a checkout can be deleted or
-/// replaced without changing persistent state.
-fn resolve_app_home() -> PathBuf {
-    if let Some(configured) = env::var_os(APP_HOME_ENV) {
-        if !configured.is_empty() {
-            return PathBuf::from(configured);
-        }
+/// Registry locator for the machine's chosen APP home. It deliberately sits in a
+/// key of its own: the NSIS uninstaller deletes HKCU\Software\<manufacturer>\
+/// <product> and %APPDATA%\<bundle id>, so a pin stored there would not survive a
+/// reinstall.
+const APP_HOME_PIN_KEY: &str = r"Software\MusicServerRuntime";
+const APP_HOME_PIN_VALUE: &str = "AppHome";
+
+/// Read the machine pin. This is the only locator that does not depend on how the
+/// process was started: the installer's final step launches the APP through
+/// nsis_tauri_utils::RunAsUser, which reaches the app without the invoking
+/// session's environment variables, which is how the default
+/// LOCALAPPDATA\com.musicserver.desktop home came back to life next to a real one.
+#[cfg(windows)]
+fn read_app_home_pin() -> Option<String> {
+    use winreg::enums::HKEY_CURRENT_USER;
+    use winreg::RegKey;
+
+    let key = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey(APP_HOME_PIN_KEY)
+        .ok()?;
+    let value: String = key.get_value(APP_HOME_PIN_VALUE).ok()?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
     }
-    if let Some(local_app_data) = env::var_os("LOCALAPPDATA") {
+    Some(trimmed.to_string())
+}
+
+#[cfg(not(windows))]
+fn read_app_home_pin() -> Option<String> {
+    None
+}
+
+/// Precedence is the whole contract, so it lives in a pure function: an explicit
+/// override wins, then the machine pin, then the platform default. Blank values
+/// never win, because a half-written pin must not move state to an empty path.
+fn pick_app_home(
+    configured: Option<String>,
+    pinned: Option<String>,
+    local_app_data: Option<String>,
+) -> PathBuf {
+    if let Some(configured) = configured.filter(|value| !value.trim().is_empty()) {
+        return PathBuf::from(configured);
+    }
+    if let Some(pinned) = pinned.filter(|value| !value.trim().is_empty()) {
+        return PathBuf::from(pinned);
+    }
+    if let Some(local_app_data) = local_app_data.filter(|value| !value.is_empty()) {
         return PathBuf::from(local_app_data).join(PACKAGED_APP_HOME_DIR);
     }
     env::temp_dir().join(PACKAGED_APP_HOME_DIR)
+}
+
+/// Stable writable application home. An explicit environment override wins;
+/// otherwise use the machine pin; otherwise the identifier-scoped LOCALAPPDATA
+/// directory. The executable location is deliberately not consulted, so a
+/// checkout can be deleted or replaced without changing persistent state.
+fn resolve_app_home() -> PathBuf {
+    let configured = env::var_os(APP_HOME_ENV).map(|value| value.to_string_lossy().into_owned());
+    let local_app_data =
+        env::var_os("LOCALAPPDATA").map(|value| value.to_string_lossy().into_owned());
+    pick_app_home(configured, read_app_home_pin(), local_app_data)
 }
 
 fn copy_runtime_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
@@ -302,6 +350,32 @@ mod tests {
     }
 
     #[test]
+    fn app_home_prefers_override_then_pin_then_platform_default() {
+        let configured = Some(r"E:\configured".to_string());
+        let pinned = Some(r"E:\pinned".to_string());
+        let local = Some(r"C:\local".to_string());
+
+        assert_eq!(
+            pick_app_home(configured.clone(), pinned.clone(), local.clone()),
+            PathBuf::from(r"E:\configured")
+        );
+        assert_eq!(
+            pick_app_home(None, pinned.clone(), local.clone()),
+            PathBuf::from(r"E:\pinned")
+        );
+        assert_eq!(
+            pick_app_home(None, None, local.clone()),
+            PathBuf::from(r"C:\local").join(PACKAGED_APP_HOME_DIR)
+        );
+        // Blank is not a home: a half-written value must never move state away
+        // from the platform default.
+        assert_eq!(
+            pick_app_home(Some("  ".to_string()), Some(String::new()), local.clone()),
+            PathBuf::from(r"C:\local").join(PACKAGED_APP_HOME_DIR)
+        );
+    }
+
+    #[test]
     fn minimize_hides_the_window_only_when_a_tray_icon_can_restore_it() {
         // Minimizing with a tray icon present hides the window to the tray.
         assert!(should_hide_to_tray(true, true));
@@ -337,12 +411,19 @@ fn spawn_launcher(root: &Path, ui_port: u16, api_port: u16) -> Option<Child> {
             "-File",
         ])
         .arg(&launcher_path)
+        .arg("-AppHome")
+        .arg(root)
         .arg("-ApiPrefix")
         .arg(&api_prefix)
         .arg("-UiPrefix")
         .arg(&ui_prefix)
         .arg("-NoBrowser")
         .current_dir(root);
+
+    // Belt and braces: the launcher resolves the home itself when it is started by
+    // hand, but a launch path that lost the environment (installer RunAsUser) must
+    // still hand the API, the worker and the daily generator exactly one home.
+    command.env(APP_HOME_ENV, root);
 
     if sqlite_path.is_file() {
         command.env("MUSICSERVER_SQLITE", sqlite_path);

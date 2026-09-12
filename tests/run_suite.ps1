@@ -68,6 +68,10 @@ if (-not $Worker) {
     $startInfo.Arguments = ConvertTo-ProcessArgumentLine -Arguments $arguments
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
+    # The host machine may carry an APP_HOME pin (its real data home). A suite that
+    # forgets to set MUSICSERVER_APP_HOME must not fall through to live state, so
+    # point the pin lookup at a key that does not exist.
+    $startInfo.EnvironmentVariables['MUSICSERVER_APP_HOME_PIN_KEY'] = 'HKCU:\Software\MusicServerRuntimeTests-Unset'
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $startInfo
     [void]$process.Start()
