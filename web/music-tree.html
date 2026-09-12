@@ -9,7 +9,24 @@
   <link rel="stylesheet" href="/music-tree.css" />
 </head>
 <body class="tree-page">
-  <div class="water-light" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%"><defs><filter id="caustic-light" x="0" y="0" width="100%" height="100%"><feTurbulence type="fractalNoise" baseFrequency=".012 .019" numOctaves="2" seed="8" result="water"/><feSpecularLighting in="water" surfaceScale="7" specularConstant="1.4" specularExponent="22" lighting-color="#ffffe0"><feDistantLight azimuth="225" elevation="42"/></feSpecularLighting></filter></defs><rect width="100%" height="100%" filter="url(#caustic-light)"/></svg></div>
+  <div class="water-light" aria-hidden="true"><svg class="water-caustics" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 960" preserveAspectRatio="xMidYMid slice">
+  <defs>
+    <filter id="refraction" x="-10%" y="-10%" width="120%" height="120%">
+      <feTurbulence type="fractalNoise" baseFrequency=".006 .009" numOctaves="2" seed="19" result="water"/>
+      <feDisplacementMap in="SourceGraphic" in2="water" scale="62" xChannelSelector="R" yChannelSelector="G"/>
+      <feGaussianBlur stdDeviation="1.2"/>
+    </filter>
+    <pattern id="reflections" width="440" height="350" patternUnits="userSpaceOnUse" patternTransform="rotate(-21) scale(1.12 .85)">
+      <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+        <defs><path id="flow" d="M-20 45C48 112 81 3 159 37S222 143 297 95S370 6 464 46M-25 222C46 163 103 249 166 213S246 158 312 202S397 285 459 229M45-25C82 24 64 78 100 118S198 160 166 213S82 291 113 375M303-20C274 27 285 66 297 95S376 125 352 164S292 224 320 271S395 326 374 370" /></defs><use href="#flow" stroke="#71924b" stroke-opacity=".10" stroke-width="15"/>
+        <use href="#flow" stroke="#ffffde" stroke-opacity=".72" stroke-width="6"/>
+        <use href="#flow" stroke="#ffffff" stroke-opacity=".92" stroke-width="1.7"/>
+      </g>
+    </pattern>
+  </defs>
+  <rect x="-100" y="-100" width="1640" height="1160" fill="url(#reflections)" filter="url(#refraction)"/>
+</svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%"><defs><filter id="caustic-light" x="0" y="0" width="100%" height="100%"><feTurbulence type="fractalNoise" baseFrequency=".009 .014" numOctaves="1" seed="8" result="water"/><feSpecularLighting in="water" surfaceScale="12" specularConstant="2.3" specularExponent="13" lighting-color="#ffffe7"><feDistantLight azimuth="225" elevation="46"/></feSpecularLighting><feColorMatrix type="luminanceToAlpha"/><feComponentTransfer result="caustic-mask"><feFuncA type="gamma" amplitude="2" exponent=".65" offset="0"/></feComponentTransfer><feFlood flood-color="#ffffe9"/><feComposite in2="caustic-mask" operator="in"/></filter></defs><rect width="100%" height="100%" filter="url(#caustic-light)"/></svg></div>
   <a class="skip-link" href="#library-search">跳到音乐搜索</a>
   <div id="tree-svg-defs" aria-hidden="true"></div>
   <div class="app-shell listening-collapsed">
@@ -52,7 +69,6 @@
               <path class="trunk-shadow" d="M584 710 C530 656 494 586 520 529 C559 454 452 398 500 347 C534 294 635 208 590 165 C566 119 573 95 567 74" />
               <path class="trunk-main" d="M584 710 C530 656 494 586 520 529 C559 454 452 398 500 347 C534 294 635 208 590 165 C566 119 573 95 567 74" />
               <path class="trunk-edge" d="M581 710 C526 653 490 586 516 529 C555 454 448 398 496 347 C530 294 631 208 586 165 C562 119 569 95 563 74" />
-              <g class="stem-foliage" fill="url(#leafBody)"><path d="M566 97 Q523 67 526 29 Q565 40 566 97Z"/><path d="M565 91 Q566 43 592 17 Q604 58 565 91Z"/><path d="M566 221 Q535 208 524 182 Q552 181 566 221Z"/><path d="M511 310 Q541 284 558 267 Q548 306 511 310Z"/><path d="M510 458 Q539 424 558 416 Q551 451 510 458Z"/><path d="M516 585 Q478 568 470 544 Q503 548 516 585Z"/></g>
             </svg>
             <div id="library-list" class="track-list library-list" aria-label="曲库歌曲"></div>
             <div class="tree-scroll-rail">

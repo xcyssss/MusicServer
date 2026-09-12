@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { LeafWindow, orbitItems, nextRecommendationIndex } = require('../web/music-tree-ui.js');
+const { LeafWindow, orbitItems, nextRecommendationIndex, treeGeometry, playbackFocus } = require('../web/music-tree-ui.js');
 const tracks = Array.from({ length: 30 }, (_, i) => ({ id: `library-${i}`, track_id: `track-${i}` }));
 
 test('the viewport holds seven songs, clamps at either end and keeps the final seven reachable', () => {
@@ -47,4 +47,35 @@ test('recommendation batches advance seven, wrap, and remain usable for short da
   assert.equal(nextRecommendationIndex(0, 30, -1), 23);
   assert.equal(nextRecommendationIndex(0, 7, 1), 1);
   assert.equal(nextRecommendationIndex(0, 0, 1), 0);
+});
+
+test('next, previous and autoplay follow the playing recommendation without resetting manual browsing on pause', () => {
+  const keyOf = item => `rec:${item.track_id}`;
+  let focus = playbackFocus(tracks, keyOf, 'rec:track-5', null, 'track-0');
+  assert.equal(focus, 'track-5');
+  focus = playbackFocus(tracks, keyOf, 'rec:track-6', 'rec:track-5', focus);
+  assert.equal(orbitItems(tracks, focus).focus.track_id, 'track-6');
+  assert.equal(playbackFocus(tracks, keyOf, 'rec:track-5', 'rec:track-6', focus), 'track-5');
+  assert.equal(playbackFocus(tracks, keyOf, 'rec:track-6', 'rec:track-6', 'track-12'), 'track-12');
+  assert.equal(playbackFocus(tracks, keyOf, 'local:song', 'rec:track-6', 'track-12'), 'track-12');
+  assert.equal(playbackFocus([], keyOf, 'rec:removed', null, null), null);
+});
+
+test('the stem flows vertically through library coordinates and every leaf joint stays on its curve', () => {
+  const start = treeGeometry(0), next = treeGeometry(1);
+  assert.notEqual(start.path, next.path);
+  for (let slot = 0; slot < 6; slot++) {
+    assert.equal(start.anchors[slot + 1].x, next.anchors[slot].x);
+    assert.equal(start.anchors[slot + 1].y - next.anchors[slot].y, 91);
+  }
+  for (const scroll of [0, .25, .75, 1, 50, 1000]) {
+    const geometry = treeGeometry(scroll);
+    assert.equal(geometry.anchors.length, 7);
+    geometry.anchors.forEach(anchor => {
+      assert.ok(anchor.x >= 500 && anchor.x <= 604);
+      assert.ok(geometry.path.includes(` ${anchor.x} ${anchor.y}`), 'leaf joins a curve endpoint');
+    });
+    const adjacent = treeGeometry(scroll + .001);
+    assert.ok(Math.abs(geometry.anchors[0].x - adjacent.anchors[0].x) < .06, 'fractional scroll is continuous');
+  }
 });

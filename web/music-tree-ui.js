@@ -36,7 +36,28 @@
     return (index + direction * step + length) % length;
   }
 
-  if (typeof module === 'object' && module.exports) module.exports = { LeafWindow, orbitItems, PAGE_SIZE, nextRecommendationIndex };
+  // A continuous stem in library coordinates: scrolling samples a different
+  // section of the same curve. Leaf joints and the SVG share these anchors.
+  function treeGeometry(scroll) {
+    const x = (index) => 552 + 40 * Math.sin(index * .82 + .3) + 12 * Math.sin(index * 1.53);
+    const slope = (index) => 32.8 * Math.cos(index * .82 + .3) + 18.36 * Math.cos(index * 1.53);
+    const number = (value) => Number(value.toFixed(3));
+    const anchor = (slot) => ({ x: number(x(scroll + slot)), y: number(73.5 + slot * 91) });
+    const first = anchor(-2);
+    let path = `M${first.x} ${first.y}`;
+    for (let slot = -2; slot < 9; slot++) {
+      const a = anchor(slot), b = anchor(slot + 1);
+      path += `C${number(a.x + slope(scroll + slot) / 3)} ${number(a.y + 91 / 3)} ${number(b.x - slope(scroll + slot + 1) / 3)} ${number(b.y - 91 / 3)} ${b.x} ${b.y}`;
+    }
+    return { path, anchors: Array.from({ length: PAGE_SIZE }, (_, slot) => anchor(slot)) };
+  }
+
+  function playbackFocus(items, keyOf, currentKey, previousKey, focusId) {
+    if (currentKey === previousKey) return focusId;
+    return items.find((item) => keyOf(item) === currentKey)?.track_id ?? focusId;
+  }
+
+  if (typeof module === 'object' && module.exports) module.exports = { LeafWindow, orbitItems, PAGE_SIZE, nextRecommendationIndex, treeGeometry, playbackFocus };
   if (typeof document === 'undefined') return;
   const el = (id) => document.getElementById(id);
   if (!el('tree-viewport')) return;
@@ -49,6 +70,7 @@
   let libraryView = null;
   let recommendationView = null;
   let focusId = null;
+  let recommendationSignature = '', orbitMotionDeadline = 0;
   let desiredStart = 0;
   let turnTimer = null;
   let paintFrame = null;
@@ -59,20 +81,43 @@
   let dragPointer = null;
   let touchStart = null;
   let lastPlayingKey = null;
-  let swayAnimation = null;
-  function swayTree() {
-    if (reducedMotion.matches) return;
-    swayAnimation?.cancel();
-    swayAnimation = document.querySelector('.tree-trunk').animate([{transform:'rotate(0deg)'},{transform:'rotate(.65deg)',offset:.3},{transform:'rotate(-.3deg)',offset:.65},{transform:'rotate(0deg)'}], {duration:850,easing:'ease-in-out'});
+  let lastRecommendationKey = null;
+  let stemScroll = 0, stemTarget = 0, stemFrame = null;
+  const trunkPaths = document.querySelectorAll('.tree-trunk > path');
+  function positionLeaves(geometry) {
+    list.querySelectorAll('.tree-leaf').forEach((leaf, slot) => {
+      const joint = geometry.anchors[slot].x / 10;
+      leaf.style.setProperty('--leaf-left', `${slot % 2 ? joint : 0}%`);
+      leaf.style.setProperty('--leaf-width', `${slot % 2 ? 99 - joint : joint}%`);
+    });
+  }
+  function drawTree() {
+    const geometry = treeGeometry(stemScroll);
+    trunkPaths.forEach(path => path.setAttribute('d', geometry.path));
+    positionLeaves(geometry);
+  }
+  function flowTree(target, immediate = false) {
+    if (target === stemTarget && !immediate) return;
+    if (stemFrame != null) cancelAnimationFrame(stemFrame);
+    stemFrame = null; stemTarget = target;
+    if (immediate || reducedMotion.matches) { stemScroll = target; drawTree(); return; }
+    const from = stemScroll, began = performance.now();
+    function frame(now) {
+      const progress = clamp((now - began) / 440, 0, 1);
+      stemScroll = from + (target - from) * (1 - (1 - progress) ** 3);
+      drawTree();
+      stemFrame = progress < 1 ? requestAnimationFrame(frame) : null;
+    }
+    stemFrame = requestAnimationFrame(frame);
   }
 
   el('tree-svg-defs').innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="0" height="0"><defs>
-    <linearGradient id="leafBody" x1="0" y1="0" x2=".8" y2="1"><stop stop-color="#eff3dd" stop-opacity=".48"/><stop offset=".45" stop-color="#d5dfc0" stop-opacity=".42"/><stop offset="1" stop-color="#a9bc91" stop-opacity=".58"/></linearGradient>
-    <radialGradient id="leafActive" cx=".55" cy=".35" r=".8"><stop stop-color="#fffbe0"/><stop offset=".53" stop-color="#e9e8b8"/><stop offset="1" stop-color="#b7c18a"/></radialGradient>
+    <linearGradient id="leafBody" x1="0" y1="0" x2=".8" y2="1"><stop stop-color="#faffef" stop-opacity=".7"/><stop offset=".28" stop-color="#c5dcc0" stop-opacity=".18"/><stop offset=".68" stop-color="#e9f4d9" stop-opacity=".12"/><stop offset="1" stop-color="#7c9e6d" stop-opacity=".38"/></linearGradient>
+    <radialGradient id="leafActive" cx=".55" cy=".35" r=".8"><stop stop-color="#fffedb" stop-opacity=".76"/><stop offset=".53" stop-color="#f3edb7" stop-opacity=".26"/><stop offset="1" stop-color="#a5ba7a" stop-opacity=".46"/></radialGradient>
     <linearGradient id="stemGradient"><stop stop-color="#516d43"/><stop offset=".4" stop-color="#a9b078"/><stop offset=".6" stop-color="#e7deb0"/><stop offset="1" stop-color="#647c4c"/></linearGradient>
     <radialGradient id="goldBead" cx=".3" cy=".2" r=".8"><stop stop-color="#fffde4"/><stop offset=".45" stop-color="#dfcb83"/><stop offset="1" stop-color="#b09b52"/></radialGradient>
     <radialGradient id="dropThumb" cx=".35" cy=".3" r=".8"><stop stop-color="#f7fad9"/><stop offset=".57" stop-color="#d9e5b7"/><stop offset="1" stop-color="#a1b67a"/></radialGradient>
-    <radialGradient id="waterBody" cx=".45" cy=".55" r=".7"><stop stop-color="#edf3d8" stop-opacity=".38"/><stop offset=".55" stop-color="#ceddbc" stop-opacity=".38"/><stop offset="1" stop-color="#a4bd91" stop-opacity=".50"/></radialGradient>
+    <radialGradient id="waterBody" cx=".45" cy=".55" r=".7"><stop stop-color="#f5ffe9" stop-opacity=".08"/><stop offset=".55" stop-color="#b4cea3" stop-opacity=".20"/><stop offset=".9" stop-color="#89a777" stop-opacity=".32"/><stop offset="1" stop-color="#faffdc" stop-opacity=".72"/></radialGradient>
     <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5l11 7-11 7Z" fill="currentColor" stroke="none"/></symbol>
     <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14" stroke-width="3.5"/></symbol>
     <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="7.5"/><path d="m16 16 5 5"/></symbol>
@@ -97,7 +142,6 @@
   function leafSvg() {
     return `<svg class="leaf-surface" viewBox="0 0 500 150" preserveAspectRatio="none" aria-hidden="true"><path class="leaf-body" d="${leafPath}"/><path class="leaf-rim" d="M488 76C377-4 159 22 20 29C101 53 105 118 264 132C365 144 434 107 488 76Z"/><g class="leaf-veins"><path d="M18 30Q219 39 490 77M54 42Q161 62 160 119M84 45Q190 27 283 12M149 48Q241 70 252 135M231 57Q302 22 365 29M288 63Q350 98 369 118M376 70Q413 59 451 62M164 118Q272 68 366 29M252 135Q321 82 413 48"/></g></svg>`;
   }
-  const positions = [[0,56.7],[59,40.5],[0,54],[50,49],[0,49.5],[52,47],[0,53.5]];
 
   function librarySignature() {
     return JSON.stringify([model.start, libraryView.displayMode, libraryView.currentKey, libraryView.paused, model.visible.map((item) => [item.id, item.title, item.artist, item.starred, item.raw_artist, item.release_year, item.album])]);
@@ -121,7 +165,8 @@
       const display = libraryView.display(item);
       const playing = libraryView.keyOf(item) === libraryView.currentKey;
       const isRight = slot % 2 === 1;
-      const [left, width] = positions[slot];
+      const joint = treeGeometry(stemScroll).anchors[slot].x / 10;
+      const [left, width] = isRight ? [joint, 99 - joint] : [0, joint];
       const label = `${display.title}${display.artist ? ` · ${display.artist}` : ''}`;
       return `<article class="tree-leaf ${isRight ? 'is-right' : 'is-left'} ${playing ? 'playing' : ''}" data-library-id="${escape(item.id)}" data-slot="${slot}" style="--slot:${slot};--leaf-left:${left}%;--leaf-width:${width}%" ${playing ? 'aria-current="true"' : ''}>
         ${leafSvg()}<span class="leaf-spectrum" aria-hidden="true">${Array.from({length:24}, () => '<i></i>').join('')}</span><span class="leaf-joint" aria-hidden="true"></span><div class="leaf-content"><button class="leaf-hit" data-action="play" aria-label="${playing && !libraryView.paused ? '暂停' : '播放'} ${escape(label)}" title="${escape(label)}"><span class="leaf-play">${icon(playing && !libraryView.paused ? 'pause' : 'play')}</span><span class="leaf-text"><span class="leaf-title">${escape(display.title)}</span><span class="leaf-artist">${escape(display.artist || '本地音乐')}</span></span></button>${playing ? '<span class="leaf-wave" aria-hidden="true"><i></i><i></i><i></i></span>' : `<button class="leaf-more" data-action="lyrics" aria-label="查看 ${escape(display.title)} 的歌词" title="查看歌词">···</button>`}</div></article>`;
@@ -160,7 +205,7 @@
     desiredStart = Math.round(clamp(next, 0, model.max));
     if (desiredStart === previous) return;
     updateRail();
-    swayTree();
+    flowTree(desiredStart);
     if (source === 'drag' || reducedMotion.matches) {
       clearTimeout(turnTimer); turnTimer = null;
       if (paintFrame == null) paintFrame = requestAnimationFrame(() => { paintFrame = null; commitTurn(); });
@@ -214,10 +259,15 @@
     const { items, display, keyOf, currentKey, paused, pendingLikes, pendingDislikes } = recommendationView;
     const group = orbitItems(items, focusId);
     focusId = group.focus?.track_id || null;
+    const nextSignature = JSON.stringify([focusId, currentKey, paused, items.map(item => [item.track_id, display(item), item.liked, item.disliked, pendingLikes.has(item.track_id), pendingDislikes.has(item.track_id)])]);
+    if (recommendationSignature === nextSignature) return;
+    recommendationSignature = nextSignature;
     el('rec-position').textContent = items.length ? `${group.index + 1} / ${items.length}` : '';
     el('rec-previous').disabled = el('rec-next').disabled = items.length < 2;
     el('water-discover').disabled = items.length < 2;
     const recList = el('recommendation-list');
+    const remainingMotion = orbitMotionDeadline - performance.now();
+    const before = remainingMotion > 0 ? new Map(Array.from(recList.children, row => [row.dataset.trackId, row.getBoundingClientRect()])) : null;
     const active = recList.contains(document.activeElement) ? document.activeElement : null;
     const activeTrack = active?.closest('[data-track-id]')?.dataset.trackId;
     const activeAction = active?.dataset.action;
@@ -229,6 +279,7 @@
       const text = display(entry);
       return `<article class="ripple-orbit" data-orbit="${index}" data-track-id="${escape(entry.track_id)}"><button class="orbit-select" data-action="select" title="${escape(text.title)}" aria-label="选择推荐 ${escape(text.title)}">${escape(text.title)}</button><button class="orbit-play" data-action="play" aria-label="试听 ${escape(text.title)}">${icon('play')}</button></article>`;
     }).join('')}`;
+    if (before && !reducedMotion.matches) animateOrbits(before, remainingMotion);
     if (activeTrack && activeAction) {
       const row = Array.from(recList.querySelectorAll('[data-track-id]')).find((entry) => entry.dataset.trackId === activeTrack);
       row?.querySelector(`[data-action="${activeAction}"]`)?.focus({ preventScroll: true });
@@ -240,7 +291,7 @@
     if (!selectedId || selectedId === focusId) return;
     // Let the shared app click handler consume the original song before replacing its DOM.
     if (event.target.closest('[data-action="play"]')) {
-      queueMicrotask(() => { focusId = selectedId; promoteRecommendation(); });
+      queueMicrotask(() => { if (focusId !== selectedId) { focusId = selectedId; promoteRecommendation(); } });
       return;
     }
     focusId = event.target.closest('[data-track-id]')?.dataset.trackId;
@@ -248,16 +299,17 @@
     el('recommendation-list').querySelector('.focus-play')?.focus({ preventScroll: true });
   });
   function promoteRecommendation() {
-    const before = new Map(Array.from(el('recommendation-list').children, row => [row.dataset.trackId, row.getBoundingClientRect()]));
+    orbitMotionDeadline = performance.now() + 560;
     paintRecommendations();
-    if (reducedMotion.matches) return;
+  }
+  function animateOrbits(before, duration) {
     for (const row of el('recommendation-list').children) {
       const old = before.get(row.dataset.trackId);
       const now = row.getBoundingClientRect();
       if (old && now.width && now.height) row.animate([
         { transform: `translate(${old.x-now.x}px,${old.y-now.y}px) scale(${old.width/now.width},${old.height/now.height})`, opacity:.55 },
         { transform:'none', opacity:1 }
-      ], {duration:560, easing:'cubic-bezier(.2,.75,.2,1)'});
+      ], {duration, easing:'cubic-bezier(.2,.75,.2,1)'});
     }
   }
   function nextRecommendation(direction) {
@@ -388,30 +440,45 @@
     });
   }, {passive:true});
   root.addEventListener('pagehide', () => {
-    stopSpectrum(); swayAnimation?.cancel();
+    stopSpectrum();
+    if (stemFrame != null) cancelAnimationFrame(stemFrame);
+    stemFrame = null;
     if (pointerFrame != null) cancelAnimationFrame(pointerFrame);
     pointerFrame=null;
     resetSpectrum();
   });
 
+  drawTree();
   root.MusicTreeUI = {
     filterLibrary(items) { return el('tree-scope').value === 'lyrics' ? items.filter((item) => !!item.lyrics_url) : items; },
     renderLibrary(view) {
       libraryView = view;
-      if (lastPlayingKey !== view.currentKey) { if (lastPlayingKey != null) swayTree(); lastPlayingKey = view.currentKey; }
+      const changedSong = lastPlayingKey !== view.currentKey;
+      lastPlayingKey = view.currentKey;
       const scope = JSON.stringify([view.searchQuery, view.librarySort, el('tree-scope').value]);
       if (scopeVersion !== scope) { clearTimeout(turnTimer); turnTimer = null; wheelRemainder = 0; viewport.classList.remove('is-turning'); }
       scopeVersion = scope;
       model.setItems(view.items, scope);
+      if (changedSong) {
+        const playingIndex = model.items.findIndex(item => view.keyOf(item) === view.currentKey);
+        if (playingIndex >= 0 && (playingIndex < model.start || playingIndex >= model.start + PAGE_SIZE)) {
+          clearTimeout(turnTimer); turnTimer = null;
+          model.setStart(playingIndex - Math.floor(PAGE_SIZE / 2));
+        }
+      }
       if (turnTimer == null && paintFrame == null) desiredStart = model.start;
       else desiredStart = Math.min(desiredStart, model.max);
+      flowTree(desiredStart);
       el('library-more').hidden = true;
       document.body.dataset.playing = String(!view.paused);
       paintLibrary();
     },
     renderRecommendations(view) {
       recommendationView = view;
-      paintRecommendations();
+      const nextFocus = playbackFocus(view.items, view.keyOf, view.currentKey, lastRecommendationKey, focusId);
+      lastRecommendationKey = view.currentKey;
+      if (nextFocus !== focusId) { focusId = nextFocus; promoteRecommendation(); }
+      else paintRecommendations();
       const item = view.items.find((entry) => view.keyOf(entry) === view.currentKey);
       const like = el('tree-player-like');
       like.hidden = !item;

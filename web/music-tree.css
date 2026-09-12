@@ -2,7 +2,7 @@
 .tree-page {
   --ink: #203d31; --muted: #6e7c63; --accent: #526c45; --line: #c4ccb7;
   --panel: #f2f4e9; --surface: #f2f4e9; --text: #203d31; --subtle: #6e7c63;
-  color: var(--ink); background: #e9edde; font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
+  color-scheme: light; color: var(--ink); background: #e9edde; font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
   overflow: hidden; min-width: 0;
   background-image: radial-gradient(ellipse at 13% 27%, #fbfbefbb, transparent 55%), radial-gradient(ellipse at 79% 69%, #cad3b455, transparent 54%), linear-gradient(130deg,#eff1e5,#e1e7d5);
 }
@@ -57,7 +57,7 @@
 .tree-trunk { position: absolute; width: calc(100% - 49px); height: 100%; inset: 0; overflow: visible; pointer-events: none; }
 .trunk-shadow { fill: none; stroke: #7a86534a; stroke-width: 13; }
 .trunk-main { fill: none; stroke: url(#stemGradient); stroke-width: 8; }
-.trunk-edge { fill: none; stroke: #f2edc2; stroke-width: 1.3; }
+.trunk-edge { fill: none; stroke: #fffce0; stroke-width: 1.3; transform: translateX(-2px); }
 .stem-foliage { stroke: #fbf7d8; stroke-width: 1; opacity: .64; }
 .tree-page #library-list { position: absolute; inset: 0 49px 0 0; min-height: 0; max-height: none; height: 100%; display: block; overflow: visible; padding: 0; background: none; }
 .tree-leaf { position: absolute; top: calc(var(--slot) * 13%); left: var(--leaf-left); width: var(--leaf-width); height: 21%; margin: 0; overflow: visible; isolation: isolate; transition: filter 160ms; }
@@ -103,7 +103,7 @@
 .rail-thumb svg { display: block; width: 100%; height: 100%; }
 .tree-navigation { height: 42px; flex: 0 0 42px; position: relative; display: flex; align-items: center; justify-content: flex-end; padding-right: 58px; }
 .tree-navigation #library-count { position: absolute; left: 18px; bottom: 12px; font-size: 10px; color: #849174; }
-.group-nav { display: flex; gap: 15px; align-items: center; font-size: 11px; color: #657757; }
+.group-nav { position: fixed; left: 50%; bottom: 113px; transform: translateX(-50%); z-index: 25; display: flex; gap: 15px; align-items: center; font-size: 11px; color: #476347; white-space: nowrap; }
 .round-button { width: 32px; height: 32px; padding: 4px; }
 .round-button .ui-icon { width: 18px; height: 18px; }
 .tree-page .recommendation-panel { padding: 0; background: none; border: 0; display: flex; flex-direction: column; min-height: 0; gap: 0; overflow: visible; }
@@ -140,7 +140,7 @@
 .tree-page .wanted-callout summary .ui-icon { width: 17px; height: 17px; }
 .tree-page .wanted-list { position: absolute; bottom: 43px; right: 0; width: min(430px,42vw); max-height: 300px; overflow-y: auto; background: #f5f7eafa; border: 1px solid #c6cfb6; border-radius: 19px; padding: 18px; color: var(--ink); box-shadow: 0 15px 55px #30442430; font-size: 12px; }
 .tree-page .wanted-row { border-color: #dce1d1; padding: 10px 0; }
-.tree-page .player-bar { position: fixed; left: 5px; right: 5px; bottom: 6px; height: 101px; min-height: 0; padding: 9px 28px 9px 18px; display: grid; grid-template-columns: minmax(0,34%) minmax(0,40%) minmax(0,26%); align-items: center; gap: 10px; background: linear-gradient(120deg,#f6f7e7c9,#eef0de99); border: 1px solid #fffdec; border-radius: 35px 35px 24px 24px; box-shadow: 0 0 0 1px #c9cfba44,inset 0 1px 0 #fff,0 -7px 28px #bec9a71a; backdrop-filter: blur(14px); z-index: 30; color: var(--ink); }
+.tree-page .player-bar { position: fixed; left: 5px; right: 5px; bottom: 6px; height: 101px; min-height: 0; padding: 9px 18px; display: grid; grid-template-columns: minmax(0,1fr) minmax(0,40%) minmax(0,1fr); align-items: center; gap: 10px; background: linear-gradient(120deg,#f6f7e7c9,#eef0de99); border: 1px solid #fffdec; border-radius: 35px 35px 24px 24px; box-shadow: 0 0 0 1px #c9cfba44,inset 0 1px 0 #fff,0 -7px 28px #bec9a71a; backdrop-filter: blur(14px); z-index: 30; color: var(--ink); }
 .tree-page .now-playing { display: flex; align-items: center; min-width: 0; gap: 12px; }
 .tree-page .player-art { flex: 0 0 90px; width: 90px; height: 83px; border: none; background: none; border-radius: 0; font-size: 0; display: flex; align-items: center; justify-content: center; box-shadow: none; }
 .player-art svg { width: 100%; height: 100%; }
@@ -155,8 +155,8 @@
 .tree-page .player-controls { display: flex; justify-content: center; align-items: center; gap: 34px; height: 61px; }
 .tree-page .player-nav-button { color: #355b3c; border: 0; padding: 5px; background: none; display: flex; align-items: center; justify-content: center; }
 .tree-page .player-nav-button .ui-icon { width: 24px; height: 24px; }
-.tree-page .play-toggle { position: relative; width: 50px; height: 54px; border: 1px solid #b1b781; border-radius: 58% 55% 56% 55%; background: radial-gradient(ellipse at 36% 37%,#ffffe3,#d9dfaf 58%,#becb91); color: #456443; box-shadow: inset 0 0 0 2px #ffffd6ab,0 2px 5px #6b7b4033; display: flex; align-items: center; justify-content: center; font-size: 20px; padding: 0; }
-.tree-page .play-toggle::before { content: ''; position: absolute; width: 19px; height: 19px; top: -9px; left: 14px; transform: rotate(45deg); border-left: 1px solid #b1b781; border-top: 1px solid #b1b781; background: linear-gradient(135deg,#faffeb,#e0e6bb); border-radius: 0 0 12px 0; z-index: -1; }
+.tree-page .play-toggle { position: relative; flex: 0 0 56px; width: 56px; height: 56px; min-width: 56px; min-height: 56px; aspect-ratio: 1; border: 1px solid #fffde7; border-radius: 50%; background: radial-gradient(circle at 32% 23%,#ffffffed,transparent 38%),linear-gradient(145deg,#f8fbe470,#bbd0a94a 62%,#eff5dca3); color: #234e38; box-shadow: 0 0 0 1px #a5b789a6,inset 0 0 0 3px #fffff280,inset 0 -4px 9px #63845126,0 3px 10px #6b7b4026; display: flex; align-items: center; justify-content: center; font-size: 20px; padding: 0; transition: box-shadow 180ms,background 180ms; }
+.tree-page .play-toggle:hover:not(:disabled),.tree-page .play-toggle:focus-visible { background: radial-gradient(circle at 32% 23%,#fff,transparent 42%),linear-gradient(145deg,#ffffeac9,#d4e2b98c); box-shadow: 0 0 0 1px #a5b789,inset 0 0 0 3px #fffff299,0 0 18px #fcffdc,0 3px 10px #6b7b4026; }
 .tree-page .play-toggle .ui-icon { width: 25px; height: 25px; }
 .tree-page .player-progress { display: flex; align-items: center; gap: 10px; width: 100%; padding-bottom: 2px; }
 .tree-page .time-label { color: #849274; font-size: 9px; min-width: 26px; }
@@ -166,7 +166,8 @@
 .tree-page .player-right { justify-content: flex-end; display: flex; gap: 22px; min-width: 0; }
 .tree-page .volume-control { display: flex; align-items: center; gap: 10px; min-width: 0; color: #355b3c; }
 .tree-page .volume-control input { width: clamp(64px,8vw,130px); accent-color: #bdaf69; height: 5px; }
-.tree-page .lyrics-toggle { display: flex; align-items: center; gap: 7px; background: none; border: none; border-left: 1px solid #b7c3a8; border-radius: 0; color: #365638; padding: 6px 0 6px 18px; font-size: 12px; }
+.tree-page .lyrics-toggle { display: flex; align-items: center; gap: 7px; background: #ffffff18; border: 1px solid transparent; border-radius: 20px; color: #294d38; padding: 9px 12px; font-size: 12px; transition: background 160ms,border-color 160ms; }
+.tree-page .lyrics-toggle:hover:not(:disabled),.tree-page .lyrics-toggle[aria-expanded="true"],.tree-page .lyrics-toggle:focus-visible { color: #23452f; background: #f6fbdcdb; border-color: #a6b987; box-shadow: inset 0 1px 0 #fff; }
 .tree-page .lyrics-toggle .ui-icon { width: 20px; height: 20px; }
 .tree-page .empty-state { position: absolute; inset: 35% 8% auto; padding: 20px; color: #758662; font-size: 13px; text-align: center; line-height: 1.9; background: #f1f5e080; border: 1px solid #ffffe280; border-radius: 20px; }
 .tree-page .error-banner { position: absolute; bottom: 8%; left: 12%; right: 5%; z-index: 6; border: 1px solid #d9c692; color: #87754a; background: #fff5d6f2; border-radius: 12px; padding: 12px; font-size: 11px; }
@@ -193,7 +194,7 @@
   .tree-heading { gap: 5px; flex-basis: 87px; height: 87px; }.tree-title { min-width: 115px; }.title-leaf { width: 24px; }.tree-title h1 { font-size: 29px; }.tree-tools { gap: 5px; }
   .seven-label { display: none; }.tree-page .play-mode { margin-left: 4px; }.select-pill select { padding: 6px 12px 6px 8px; }.soft-button { padding: 6px 10px; }
   .leaf-content { gap: 5px; }.leaf-hit { gap: 7px; }.leaf-play { width: 27px; height: 27px; flex-basis: 27px; }.leaf-more { flex-basis: 13px; }.leaf-wave { flex-basis: 14px; gap: 1px; }
-  .tree-page .player-art { width: 65px; flex-basis: 65px; height: 70px; }.tree-page .player-right { gap: 10px; }.tree-page .player-bar { padding-left: 13px; padding-right: 20px; }
+  .tree-page .player-art { width: 65px; flex-basis: 65px; height: 70px; }.tree-page .player-right { gap: 10px; }.tree-page .player-bar { padding-left: 13px; padding-right: 13px; }
 }
 @media (max-width: 850px) {
   .tree-page .app-shell { padding: 4px 8px 0; }.tree-page .topbar-actions .header-action span { display: none; }.tree-brand { font-size: 18px; }.tree-page .search-box { margin-left: auto; width: 36vw; flex-basis: 36vw; }
@@ -203,7 +204,7 @@
   .tree-scroll-rail { width: 29px; }.tree-trunk { width: calc(100% - 35px); }.tree-page #library-list { right: 35px; }
   .tree-navigation { padding-right: 35px; }.group-nav { gap: 7px; font-size: 9px; }.tree-navigation #library-count { display: none; }
   .focus-title { font-size: 14px; }.focus-artist { display: none; }.focus-play { padding: 5px 8px; font-size: 11px !important; }.focus-feedback { margin-top: 8px; gap: 10px; }.ripple-feedback { width: 25px; height: 25px; }.drop-heading h2 { font-size: 19px; }.drop-heading p { font-size: 9px; }
-  .tree-page .player-bar { grid-template-columns: 34% 41% 25%; gap: 5px; padding: 8px; }.tree-page .player-art { width: 42px; flex-basis: 42px; }.tree-page .now-playing { gap: 5px; }.tree-page #player-title { font-size: 12px; }.tree-page #player-artist { font-size: 10px; }.tree-page .player-heart { display: none; }.tree-page .player-controls { gap: 22px; }.tree-page .lyrics-toggle { font-size: 11px; padding-left: 8px; }.tree-page .volume-control input { width: 47px; }.tree-page .lyrics-toggle .ui-icon { display: none; }
+  .tree-page .player-bar { grid-template-columns: minmax(0,1fr) minmax(0,40%) minmax(0,1fr); gap: 5px; padding: 8px; }.tree-page .player-art { width: 42px; flex-basis: 42px; }.tree-page .now-playing { gap: 5px; }.tree-page #player-title { font-size: 12px; }.tree-page #player-artist { font-size: 10px; }.tree-page .player-heart { display: none; }.tree-page .player-controls { gap: 22px; }.tree-page .lyrics-toggle { font-size: 11px; padding-left: 8px; }.tree-page .volume-control input { width: 47px; }.tree-page .lyrics-toggle .ui-icon { display: none; }
 }
 @media (prefers-reduced-motion: reduce) { .tree-page *, .tree-page *::before, .tree-page *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
 /* Quiet water reflections stay behind every control. */
@@ -224,8 +225,8 @@
 .ripple-orbit[data-orbit="5"] { left:60%; top:81%; }
 /* Refracted sunlight: a cached organic light field moves slowly over the water. */
 .tree-page::before { background:radial-gradient(ellipse at 12% 10%,#fffbd5a0,transparent 50%),radial-gradient(ellipse at 85% 85%,#bbcda54d,transparent 45%); }
-.water-light { position:fixed; inset:-5%; pointer-events:none; opacity:.55; mix-blend-mode:screen; overflow:hidden; animation:water-sunlight 14s ease-in-out infinite alternate; will-change:transform,opacity; }
-@keyframes water-sunlight { from { transform:translate(-1%,-1%) scale(1.02); opacity:.38; } to { transform:translate(2%,1.5%) scale(1.09); opacity:.65; } }
+.water-light { position:fixed; inset:-5%; pointer-events:none; opacity:.72; overflow:hidden; animation:water-sunlight 14s ease-in-out infinite alternate; will-change:transform; mask-image:linear-gradient(110deg,#000e,#0002 47%,#000c); }
+@keyframes water-sunlight { from { transform:translate(-1%,-1%) scale(1.02); opacity:.65; } to { transform:translate(2%,1.5%) scale(1.09); opacity:.88; } }
 .water-paused .water-light { animation-play-state:paused; }
 .tree-page .topbar,.tree-page .player-bar { background-color:#f5f6e7a0; }
 .water-art { filter:drop-shadow(0 2px 4px #b6aa5966); }
@@ -236,12 +237,16 @@
 @media (prefers-reduced-motion:reduce) { .water-light { opacity:.35; } }
 
 /* Clear glass and responsive light; controls remain opaque enough to read. */
-.tree-page { background:radial-gradient(ellipse at 20% 0%,#fffef1,transparent 58%),linear-gradient(125deg,#edf5e9,#f7faf1 52%,#dfeee3); }
+.tree-page { background:radial-gradient(ellipse at 35% 38%,#faffeeea,transparent 53%),radial-gradient(ellipse at 92% 12%,#f9ffe9,transparent 45%),linear-gradient(135deg,#c4d3ad,#edf4dd 48%,#bdd0b2); }
 .tree-page::after { content:''; position:fixed; inset:0; pointer-events:none; background:radial-gradient(ellipse 380px 240px at var(--water-x,50%) var(--water-y,50%),#fffff0aa,transparent 75%); mix-blend-mode:soft-light; }
-.water-light svg { transform:translate(var(--water-drift-x,0px),var(--water-drift-y,0px)); transition:transform 650ms ease-out; }
-.tree-page .topbar,.tree-page .player-bar { background:#fafff05c; backdrop-filter:blur(12px); border-color:#ffffffd9; }
-.tree-trunk { transform-origin:56% 100%; }
-.leaf-body { stroke:#8da890; }.leaf-veins { opacity:.4; }
+.water-light svg { transform:translate(var(--water-drift-x,0px),var(--water-drift-y,0px)); transition:transform 650ms ease-out; opacity:.24; }
+.water-light .water-caustics { position:absolute; inset:-30px; width:calc(100% + 60px); height:calc(100% + 60px); opacity:1; transition:transform 900ms ease-out; }
+.tree-page .topbar,.tree-page .player-bar { background:linear-gradient(112deg,#ffffed73,#f7ffed20 44%,#ffffec52); backdrop-filter:blur(4px); border-color:#fffffff0; box-shadow:inset 0 1px 0 #fff,inset 0 -1px 0 #c1d0a14d,0 1px 10px #6f886118; }
+/* Equal side tracks and symmetric padding keep the control axis at the window midpoint. */
+.tree-page .player-bar { grid-template-columns:minmax(0,1fr) minmax(0,40%) minmax(0,1fr); padding-inline:18px; }
+.leaf-body { stroke:#91a678; }.leaf-veins { opacity:.48; }
+.leaf-rim { stroke:#fffde0; stroke-opacity:.95; }
+.leaf-surface { filter:drop-shadow(0 1px 0 #ffffecbf) drop-shadow(0 3px 3px #68815116); }
 .tree-leaf:hover .leaf-surface { filter:drop-shadow(0 2px 6px #9cbba355) brightness(1.06); }
 .leaf-spectrum { position:absolute; left:22%; right:17%; bottom:23%; height:29%; display:flex; align-items:center; justify-content:center; gap:3px; pointer-events:none; opacity:.22; }
 .leaf-spectrum i { flex:1; max-width:5px; height:100%; border-radius:8px; background:linear-gradient(#719d85,#b7cfa1); transform:scaleY(var(--level,.035)); transition:transform 100ms linear; }
@@ -249,6 +254,8 @@
 .leaf-content { z-index:1; }
 .leaf-text { text-shadow:0 1px 6px #ffffffc9; }
 .playing .leaf-wave { display:none; }
-.ripple-focus,.ripple-orbit { transform-origin:0 0; background-color:#f6ffec42; border-color:#ffffffd4; box-shadow:inset 0 0 14px #ffffff70,0 3px 13px #78967418; }
-.ripple-orbit:hover { background-color:#faffee95; box-shadow:inset 0 0 18px #fff,0 0 17px #d7e8b779; }
+.ripple-focus,.ripple-orbit { transform-origin:0 0; background:radial-gradient(ellipse at 27% 17%,#ffffffb3,transparent 39%),radial-gradient(ellipse at 60% 80%,#ecf7d34d,transparent 65%),linear-gradient(145deg,#eff9de42,#d9e8c118); backdrop-filter:blur(1px); border-color:#ffffe9f0; box-shadow:inset 0 0 0 3px #ffffe940,inset 0 -5px 14px #79975c23,0 0 0 1px #b5c39570,0 3px 13px #78967418; }
+.ripple-focus { box-shadow:0 0 0 4px #ffffe626,0 0 0 6px #ffffd882,inset 0 2px 9px #ffffffb0,inset 0 -8px 16px #8ca76526; }
+.ripple-focus.playing { box-shadow:0 0 0 4px #fff8b735,0 0 0 6px #d9c57b94,inset 0 2px 9px #ffffffb0,inset 0 -8px 16px #8ca76526; }
+.ripple-orbit:hover { background:radial-gradient(ellipse at 27% 17%,#fff,transparent 55%),#effbd445; box-shadow:inset 0 0 0 3px #ffffec80,0 0 17px #f9ffdbb0; }
 @media(prefers-reduced-motion:reduce) { .tree-page::after { display:none; } .water-light svg { transform:none; } }
