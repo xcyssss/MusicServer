@@ -84,6 +84,9 @@ const SONG_DESC_RE = /(知道|好听|好听|流泪|拉满|喜欢|推荐|纪念|�
 const EPISODE_RE = /(?:^|[\s|｜\-–—_/／])(?:p|part|ep|vol|track)\s*\.?\s*0*\d{1,3}\b/gi;
 const LIVE_RE = /(^|[^a-z0-9])(live)(?![a-z0-9])/i;
 const COVER_RE = /(^|[^a-z0-9])(cover|翻唱)(?![a-z0-9])/i;
+// A bare marker word left at the end of a title after its singer credit is cut,
+// with or without brackets: `… for the love of god（上帝的爱）live`.
+const TAIL_MARKER_RE = /[\s\-\u2013\u2014|｜]*[\uFF08(\u3010[]?\s*(?:live|cover|翻唱)\s*[\uFF09)\u3011\]]?\s*$/i;
 const HAN_OR_ALNUM_RE = /[\u3400-\u9fff\uf900-\ufaff\u3040-\u30ffa-z0-9]/i;
 const SONG_BRACKET_RE = /[\u300A\u300B\u300C\u300D\u300E\u300F]/;
 
@@ -454,6 +457,51 @@ function cleanSongName(raw) {
   return fallback || title;
 }
 
+// A row already knows its singer, so a title that carries the credit beside the
+// song can be cut from that fact instead of guessing which side of a dash holds
+// the song. Two real shapes need it: a credit glued with a bare `-`
+// (`光年之外-G.E.M.邓紫棋`, which the CJK/Latin dash rule above deliberately never
+// splits) and a credit in front of a short song name (`周杰伦 - 七里香`, where the
+// song and the singer tie on candidate score and candidate order decides, so the
+// singer sometimes won). Only a whole segment that *is* the singer counts, and the
+// separator that joined it leaves with it, so the remainder keeps the shape
+// cleanSongName() already understands. Returns '' when no segment is that singer,
+// which leaves the title on the existing path.
+// A segment boundary is a full-width bar, a spaced dash, or a dash glued to CJK
+// text or to a bracket: `EXO-K`, `Hi-Res` and `Hello-Goodbye` stay whole, while
+// `光年之外-G.E.M.邓紫棋` and `Steve Vai （史蒂夫 范）- for the love of god` split.
+const SONG_CREDIT_SEPARATOR = /\s*[|｜]\s*|\s+[-\u2013\u2014\uFF0D]\s*|(?<=[\u3400-\u9fff\u3040-\u30ff\uf900-\ufaff\s\uFF09\u3011\u300D\u300F\u300B\]])[-\u2013\u2014\uFF0D]|[-\u2013\u2014\uFF0D](?=[\u3400-\u9fff\u3040-\u30ff\uf900-\ufaff\s\uFF08(\u3010\u300C\u300E\u300A\[])/g;
+
+function stripSingerCredit(rawTitle, singer) {
+  const title = String(rawTitle || '').trim();
+  const name = String(singer || '').trim();
+  if (!title || name.length < 2) return '';
+  const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const target = normalize(name);
+  const separator = new RegExp(SONG_CREDIT_SEPARATOR.source, 'g');
+  const segments = [];
+  let cursor = 0;
+  let match;
+  while ((match = separator.exec(title)) !== null) {
+    segments.push({ start: cursor, end: match.index, separatorEnd: match.index + match[0].length });
+    cursor = match.index + match[0].length;
+  }
+  if (!segments.length) return '';
+  segments.push({ start: cursor, end: title.length, separatorEnd: title.length });
+  for (let index = 0; index < segments.length; index += 1) {
+    const segment = segments[index];
+    const text = title.slice(segment.start, segment.end);
+    if (normalize(stripNoise(stripBrackets(text))) !== target) continue;
+    // A credit in front takes its following separator with it; a credit at the end
+    // takes the preceding one.
+    const from = index === 0 ? segment.start : segments[index - 1].end;
+    const to = index === 0 ? segment.separatorEnd : segment.end;
+    const rest = `${title.slice(0, from)} ${title.slice(to)}`.replace(/\s+/g, ' ').trim();
+    return rest.replace(/^[-\u2013\u2014\uFF0D|｜\s]+|[-\u2013\u2014\uFF0D|｜\s]+$/g, '').trim();
+  }
+  return '';
+}
+
 function formatTrackDisplay(item) {
   const rawTitle = item?.title || item?.name || '';
   const rawArtist = item?.artist || '';
@@ -469,7 +517,14 @@ function formatTrackDisplay(item) {
       year: '',
     };
   }
-  const title = cleanSongName(rawTitle) || '未命名歌曲';
+  // Cut the row's own singer out of the title before regularizing what is left:
+  // `周杰伦 - 七里香` must show `七里香`, not the singer.
+  const credited = stripSingerCredit(rawTitle, rawArtist) || stripSingerCredit(rawTitle, String(item?.raw_artist || ''));
+  // Once the singer is gone, a trailing marker word left over from the file name
+  // (`… - for the love of god（上帝的爱）live`) is re-expressed as the `(Live)` /
+  // `(Cover)` suffix below instead of staying glued to the song name.
+  const cleanedCredit = credited ? credited.replace(TAIL_MARKER_RE, '').trim() : '';
+  const title = cleanSongName(cleanedCredit || credited || rawTitle) || '未命名歌曲';
   // Detect Live/Cover tags from the original title, but never from a comment
   // tail (the `pXX` episode number marks the real track inside a compilation).
   const tail = EPISODE_RE.test(rawTitle) ? '' : rawTitle.replace(/^.*\uFF5C/, '');

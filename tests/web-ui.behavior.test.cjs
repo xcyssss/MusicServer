@@ -284,6 +284,64 @@ test('artist metadata is passed through unchanged for the track row', async () =
   assert.equal(displayOf(a, '光年之外').artist, 'Music');
 });
 
+// A row already knows its singer, and that is the strongest signal for taking a
+// credit out of its title. This is the library that reported the problem: canonical
+// mode showed the singer *as* the song (`周杰伦 - 七里香` -> `周杰伦`, because a
+// three-character song and a three-character singer tie on candidate score) or left
+// the credit glued to the name (`光年之外-G.E.M.邓紫棋`). The singer column already
+// carries the name, so the title must not repeat it.
+const displayOfSinger = (a, title, artist) => a.run(`state.displayMode = 'canonical'; formatTrackDisplay(${JSON.stringify({ title, artist, raw_artist: artist, album: '', year: 0 })})`);
+const creditedTitles = [
+  ['光年之外-G.E.M.邓紫棋', 'G.E.M.邓紫棋', '光年之外'],
+  ['句号-G.E.M.邓紫棋', 'G.E.M.邓紫棋', '句号'],
+  ['多远都要在一起-G.E.M.邓紫棋', 'G.E.M.邓紫棋', '多远都要在一起'],
+  ['泡沫-G.E.M.邓紫棋', 'G.E.M.邓紫棋', '泡沫'],
+  ['周杰伦 - 七里香', '周杰伦', '七里香'],
+  ['周杰伦 - 以父之名', '周杰伦', '以父之名'],
+  ['周杰伦 - 晴天', '周杰伦', '晴天'],
+  ['周杰伦 - 稻香', '周杰伦', '稻香'],
+  ['周杰伦 - 花海', '周杰伦', '花海'],
+  ['周杰伦 - 青花瓷', '周杰伦', '青花瓷'],
+  ['就是爱你 - 陶喆', '陶喆', '就是爱你'],
+  ['普通朋友 - 陶喆', '陶喆', '普通朋友'],
+  ['林俊杰-黑夜问白天', '林俊杰', '黑夜问白天'],
+  ['薛之谦-刚刚好', '薛之谦', '刚刚好'],
+  ['陈奕迅-十年', '陈奕迅', '十年'],
+  ['陈奕迅-富士山下', '陈奕迅', '富士山下'],
+];
+
+test('canonical mode cuts the row singer out of the title', async () => {
+  const a = await app();
+  for (const [raw, artist, expected] of creditedTitles) {
+    const display = displayOfSinger(a, raw, artist);
+    assert.equal(display.title, expected, `raw: ${raw} / singer: ${artist}`);
+    assert.equal(display.artist, artist, `the singer column still carries the name: ${raw}`);
+  }
+});
+
+test('the singer cut removes a whole credit segment, never a lookalike', async () => {
+  const a = await app();
+  // A Latin-Latin hyphen is not a credit separator, so `EXO-K` survives as one word.
+  assert.equal(displayOfSinger(a, 'EXO-K《mama》百万豪装录音棚大声听', 'EXO-K').title, 'mama');
+  // A duet credit is a different segment than the singer, so nothing is cut.
+  assert.equal(displayOfSinger(a, '周杰伦&费玉清 - 千里之外', '周杰伦').title, '千里之外');
+  // The singer named inside a quoted title is not a segment either.
+  assert.equal(displayOfSinger(a, 'Beyond《冷雨夜》百万豪装录音棚大声听', 'Beyond').title, '冷雨夜');
+  // A credit glued behind a closing bracket still splits, and the trailing marker
+  // word becomes the existing `(Live)` suffix instead of staying in the name.
+  assert.equal(displayOfSinger(a, 'steve vai （史蒂夫 范）- for the love of god（上帝的爱）live', 'Steve Vai').title, 'for the love of god (Live)');
+  assert.equal(displayOfSinger(a, '小树-不安的前方-动漫《我叫MT 第三季》', '小树').title, '不安的前方');
+  assert.equal(displayOfSinger(a, 'tokyo - owl city', 'Owl City').title, 'tokyo');
+  assert.equal(displayOfSinger(a, '【中字4K·HiRes】「壱雫空」- MyGO!!!!!｜Divide⧸Unite p01 「壱雫空」', 'MyGO!!!!!').title, '壱雫空');
+  assert.equal(displayOfSinger(a, '【附歌词中字】Roselia -「Dazzle the Destiny」【FULL】', 'Roselia').title, 'Dazzle the Destiny');
+});
+
+test('traditional mode still shows the file name when the singer is known', async () => {
+  const a = await app();
+  const raw = a.run(`state.displayMode = 'raw'; formatTrackDisplay(${JSON.stringify({ title: '周杰伦 - 七里香', artist: '周杰伦', raw_artist: '周杰伦' })}).title`);
+  assert.equal(raw, '周杰伦 - 七里香');
+});
+
 // The two display modes. Traditional is the default and shows what the folder
 // says; canonical (Beta) shows the regularized name plus the resolved singer,
 // album and year. The server sends both sets of values, so switching modes is a
