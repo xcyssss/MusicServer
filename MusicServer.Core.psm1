@@ -253,8 +253,14 @@ function Normalize-MusicText {
     return ($value -replace '[\s\p{P}\p{S}]', '')
 }
 
+# A library row whose singer could not be resolved has no artist at all
+# (local_track_artists.status = 'NOT_FOUND'), and the identity below already
+# degrades to a title-only key for that case. Declaring the parameter Mandatory
+# without AllowEmptyString made every such caller a parameter binding error
+# instead -- one red line per unresolved file in the daily generator's
+# library-fallback seeds.
 function Get-CanonicalTrackId {
-    param([Parameter(Mandatory)][string]$Title, [Parameter(Mandatory)][string]$Artist)
+    param([Parameter(Mandatory)][string]$Title, [Parameter(Mandatory)][AllowEmptyString()][string]$Artist)
     $artistKey = @($Artist -split '[,，、/&]' | ForEach-Object { Normalize-MusicText $_ } | Where-Object { $_ } | Sort-Object) -join ','
     $identity = "$(Normalize-MusicText $Title)|$artistKey"
     $sha = [Security.Cryptography.SHA256]::Create()
