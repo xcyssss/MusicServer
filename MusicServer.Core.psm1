@@ -22,6 +22,37 @@ function Resolve-MusicServerExecutable {
     return [string]$Commands[0]
 }
 
+# The machine pin is the one APP_HOME locator that survives every launch path.
+# The Tauri installer finishes by starting the APP through
+# nsis_tauri_utils::RunAsUser, which does not carry the invoking session's
+# environment, so MUSICSERVER_APP_HOME can be missing on the very first launch
+# after an install or an update and the APP silently falls back to the default
+# home -- a second, empty state home next to the real one. The pin is read from
+# the registry by the process itself, so no launcher can strip it.
+#
+# It deliberately sits in a key of its own: the NSIS uninstaller deletes
+# HKCU\Software\<manufacturer>\<product> and %APPDATA%\<bundle id>, so a pin kept
+# under either of those would not survive a reinstall.
+# MUSICSERVER_APP_HOME_PIN_KEY relocates the key, which is how tests exercise the
+# lookup (and how tests keep the pin of the host machine out of the way).
+function Get-MusicServerAppHomePinKey {
+    $override = [Environment]::GetEnvironmentVariable('MUSICSERVER_APP_HOME_PIN_KEY', 'Process')
+    if (-not [string]::IsNullOrWhiteSpace($override)) { return $override }
+    return 'HKCU:\Software\MusicServerRuntime'
+}
+
+function Get-MusicServerPinnedAppHome {
+    try {
+        $key = Get-MusicServerAppHomePinKey
+        if (-not (Test-Path -LiteralPath $key)) { return '' }
+        $value = (Get-ItemProperty -LiteralPath $key -Name 'AppHome' -ErrorAction Stop).AppHome
+        if ([string]::IsNullOrWhiteSpace($value)) { return '' }
+        return [string]$value
+    } catch {
+        return ''
+    }
+}
+
 function Resolve-MusicServerAppHome {
     param([string]$ConfiguredPath = '')
 
@@ -31,6 +62,11 @@ function Resolve-MusicServerAppHome {
     }
     if (-not [string]::IsNullOrWhiteSpace($candidate)) {
         return [IO.Path]::GetFullPath($candidate)
+    }
+
+    $pinned = Get-MusicServerPinnedAppHome
+    if (-not [string]::IsNullOrWhiteSpace($pinned)) {
+        return [IO.Path]::GetFullPath($pinned)
     }
 
     $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)

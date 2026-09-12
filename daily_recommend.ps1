@@ -16,7 +16,8 @@
 .PARAMETER SeedCount
     使用的种子数量，默认 25。
 .PARAMETER LocalCount
-    从本地库重听推荐的曲目数量上限，默认 6；设为 0 可关闭本地来源。
+    从本地库重听推荐的曲目数量上限，默认 0：每日推荐只包含远程发现，不混入已拥有的歌曲。
+    传正数才启用本地重听来源。
 .PARAMETER Root
     项目根目录；默认当前脚本所在目录，主要用于测试和迁移。
 .PARAMETER AppHome
@@ -28,7 +29,7 @@ param(
     [int]$Count = 20,
     [switch]$DryRun,
     [int]$SeedCount = 25,
-    [int]$LocalCount = 6,
+    [int]$LocalCount = 0,
     [string]$Root = $PSScriptRoot,
     [string]$AppHome = '',
     [int]$RandomSeed = -1,
@@ -356,6 +357,10 @@ if ($disliked.Count -gt 0) {
 # The library-wide exclude set above is deliberately NOT used here: it contains
 # every owned file's basename, which is exactly inverted for this source. Only
 # things already recommended, accepted or rejected are excluded.
+#
+# Off by default (LocalCount = 0): a song the listener already owns is not a
+# discovery, so the daily push stays remote-only unless a caller explicitly asks
+# for local re-listens.
 # ---------------------------------------------------------------------------
 Write-Step '生成本地库重听推荐'
 $listeningRows = @()
