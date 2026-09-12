@@ -58,14 +58,21 @@
   let scopeVersion = '';
   let dragPointer = null;
   let touchStart = null;
+  let lastPlayingKey = null;
+  let swayAnimation = null;
+  function swayTree() {
+    if (reducedMotion.matches) return;
+    swayAnimation?.cancel();
+    swayAnimation = document.querySelector('.tree-trunk').animate([{transform:'rotate(0deg)'},{transform:'rotate(.65deg)',offset:.3},{transform:'rotate(-.3deg)',offset:.65},{transform:'rotate(0deg)'}], {duration:850,easing:'ease-in-out'});
+  }
 
   el('tree-svg-defs').innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="0" height="0"><defs>
-    <linearGradient id="leafBody" x1="0" y1="0" x2=".8" y2="1"><stop stop-color="#eff3dd" stop-opacity=".82"/><stop offset=".45" stop-color="#d5dfc0" stop-opacity=".81"/><stop offset="1" stop-color="#a9bc91" stop-opacity=".88"/></linearGradient>
+    <linearGradient id="leafBody" x1="0" y1="0" x2=".8" y2="1"><stop stop-color="#eff3dd" stop-opacity=".48"/><stop offset=".45" stop-color="#d5dfc0" stop-opacity=".42"/><stop offset="1" stop-color="#a9bc91" stop-opacity=".58"/></linearGradient>
     <radialGradient id="leafActive" cx=".55" cy=".35" r=".8"><stop stop-color="#fffbe0"/><stop offset=".53" stop-color="#e9e8b8"/><stop offset="1" stop-color="#b7c18a"/></radialGradient>
     <linearGradient id="stemGradient"><stop stop-color="#516d43"/><stop offset=".4" stop-color="#a9b078"/><stop offset=".6" stop-color="#e7deb0"/><stop offset="1" stop-color="#647c4c"/></linearGradient>
     <radialGradient id="goldBead" cx=".3" cy=".2" r=".8"><stop stop-color="#fffde4"/><stop offset=".45" stop-color="#dfcb83"/><stop offset="1" stop-color="#b09b52"/></radialGradient>
     <radialGradient id="dropThumb" cx=".35" cy=".3" r=".8"><stop stop-color="#f7fad9"/><stop offset=".57" stop-color="#d9e5b7"/><stop offset="1" stop-color="#a1b67a"/></radialGradient>
-    <radialGradient id="waterBody" cx=".45" cy=".55" r=".7"><stop stop-color="#edf3d8" stop-opacity=".7"/><stop offset=".55" stop-color="#ceddbc" stop-opacity=".7"/><stop offset="1" stop-color="#a4bd91" stop-opacity=".78"/></radialGradient>
+    <radialGradient id="waterBody" cx=".45" cy=".55" r=".7"><stop stop-color="#edf3d8" stop-opacity=".38"/><stop offset=".55" stop-color="#ceddbc" stop-opacity=".38"/><stop offset="1" stop-color="#a4bd91" stop-opacity=".50"/></radialGradient>
     <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5l11 7-11 7Z" fill="currentColor" stroke="none"/></symbol>
     <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14" stroke-width="3.5"/></symbol>
     <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="7.5"/><path d="m16 16 5 5"/></symbol>
@@ -117,7 +124,7 @@
       const [left, width] = positions[slot];
       const label = `${display.title}${display.artist ? ` · ${display.artist}` : ''}`;
       return `<article class="tree-leaf ${isRight ? 'is-right' : 'is-left'} ${playing ? 'playing' : ''}" data-library-id="${escape(item.id)}" data-slot="${slot}" style="--slot:${slot};--leaf-left:${left}%;--leaf-width:${width}%" ${playing ? 'aria-current="true"' : ''}>
-        ${leafSvg()}<span class="leaf-joint" aria-hidden="true"></span><div class="leaf-content"><button class="leaf-hit" data-action="play" aria-label="${playing && !libraryView.paused ? '暂停' : '播放'} ${escape(label)}" title="${escape(label)}"><span class="leaf-play">${icon(playing && !libraryView.paused ? 'pause' : 'play')}</span><span class="leaf-text"><span class="leaf-title">${escape(display.title)}</span><span class="leaf-artist">${escape(display.artist || '本地音乐')}</span></span></button>${playing ? '<span class="leaf-wave" aria-hidden="true"><i></i><i></i><i></i></span>' : `<button class="leaf-more" data-action="lyrics" aria-label="查看 ${escape(display.title)} 的歌词" title="查看歌词">···</button>`}</div></article>`;
+        ${leafSvg()}<span class="leaf-spectrum" aria-hidden="true">${Array.from({length:24}, () => '<i></i>').join('')}</span><span class="leaf-joint" aria-hidden="true"></span><div class="leaf-content"><button class="leaf-hit" data-action="play" aria-label="${playing && !libraryView.paused ? '暂停' : '播放'} ${escape(label)}" title="${escape(label)}"><span class="leaf-play">${icon(playing && !libraryView.paused ? 'pause' : 'play')}</span><span class="leaf-text"><span class="leaf-title">${escape(display.title)}</span><span class="leaf-artist">${escape(display.artist || '本地音乐')}</span></span></button>${playing ? '<span class="leaf-wave" aria-hidden="true"><i></i><i></i><i></i></span>' : `<button class="leaf-more" data-action="lyrics" aria-label="查看 ${escape(display.title)} 的歌词" title="查看歌词">···</button>`}</div></article>`;
     }).join('');
     if (focusId && focusAction) {
       const row = Array.from(list.querySelectorAll('[data-library-id]')).find((item) => item.dataset.libraryId === focusId);
@@ -153,6 +160,7 @@
     desiredStart = Math.round(clamp(next, 0, model.max));
     if (desiredStart === previous) return;
     updateRail();
+    swayTree();
     if (source === 'drag' || reducedMotion.matches) {
       clearTimeout(turnTimer); turnTimer = null;
       if (paintFrame == null) paintFrame = requestAnimationFrame(() => { paintFrame = null; commitTurn(); });
@@ -227,11 +235,31 @@
     }
   }
   el('recommendation-list').addEventListener('click', (event) => {
-    if (!event.target.closest('[data-action="select"]')) return;
+    if (!event.target.closest('[data-action="select"],[data-action="play"]')) return;
+    const selectedId = event.target.closest('[data-track-id]')?.dataset.trackId;
+    if (!selectedId || selectedId === focusId) return;
+    // Let the shared app click handler consume the original song before replacing its DOM.
+    if (event.target.closest('[data-action="play"]')) {
+      queueMicrotask(() => { focusId = selectedId; promoteRecommendation(); });
+      return;
+    }
     focusId = event.target.closest('[data-track-id]')?.dataset.trackId;
-    paintRecommendations();
+    promoteRecommendation();
     el('recommendation-list').querySelector('.focus-play')?.focus({ preventScroll: true });
   });
+  function promoteRecommendation() {
+    const before = new Map(Array.from(el('recommendation-list').children, row => [row.dataset.trackId, row.getBoundingClientRect()]));
+    paintRecommendations();
+    if (reducedMotion.matches) return;
+    for (const row of el('recommendation-list').children) {
+      const old = before.get(row.dataset.trackId);
+      const now = row.getBoundingClientRect();
+      if (old && now.width && now.height) row.animate([
+        { transform: `translate(${old.x-now.x}px,${old.y-now.y}px) scale(${old.width/now.width},${old.height/now.height})`, opacity:.55 },
+        { transform:'none', opacity:1 }
+      ], {duration:560, easing:'cubic-bezier(.2,.75,.2,1)'});
+    }
+  }
   function nextRecommendation(direction) {
     const items = recommendationView?.items || [];
     if (!items.length) return;
@@ -298,10 +326,79 @@
   const artMarkup = '<svg viewBox="0 0 64 64" aria-hidden="true"><use href="#mark-leaf-plain" /></svg>';
   el('player-art').innerHTML = artMarkup;
 
+
+  const audio = el('audio-player');
+  let spectrumContext = null, analyser = null, capture = null, bins = null, spectrumFrame = null, spectrumLast = 0;
+  function stopSpectrum() {
+    if (spectrumFrame != null) cancelAnimationFrame(spectrumFrame);
+    spectrumFrame = null;
+    list.querySelectorAll('.leaf-spectrum i').forEach(bar => bar.style.removeProperty('--level'));
+  }
+  function drawSpectrum(now) {
+    if (audio.paused || document.hidden || reducedMotion.matches) { stopSpectrum(); return; }
+    if (now - spectrumLast > 45) {
+      spectrumLast = now;
+      analyser.getByteFrequencyData(bins);
+      list.querySelectorAll('.playing .leaf-spectrum i').forEach((bar,i) => {
+        const bin = Math.min(bins.length-1, Math.floor(2 * Math.pow(1.22,i)));
+        bar.style.setProperty('--level', String(.05 + bins[bin]/255 * .95));
+      });
+    }
+    spectrumFrame = requestAnimationFrame(drawSpectrum);
+  }
+  async function startSpectrum() {
+    if (audio.paused || document.hidden || reducedMotion.matches) return;
+    try {
+      if (!analyser) {
+        const captureAudio = audio.captureStream || audio.mozCaptureStream;
+        if (!captureAudio || !root.AudioContext) return;
+        capture = captureAudio.call(audio);
+        if (!capture.getAudioTracks().length) { capture.getTracks().forEach(track => track.stop()); capture=null; return; }
+        spectrumContext = new root.AudioContext();
+        analyser = spectrumContext.createAnalyser(); analyser.fftSize = 1024; analyser.smoothingTimeConstant=.82;
+        spectrumContext.createMediaStreamSource(capture).connect(analyser);
+        bins = new Uint8Array(analyser.frequencyBinCount);
+      }
+      const context = spectrumContext;
+      await context.resume();
+      if (context !== spectrumContext || !analyser) return;
+      if (spectrumFrame == null && !audio.paused && !document.hidden) spectrumFrame=requestAnimationFrame(drawSpectrum);
+    } catch { stopSpectrum(); } // Visual enhancement must never interfere with playback.
+  }
+  function resetSpectrum() {
+    stopSpectrum(); capture?.getTracks().forEach(track => track.stop()); capture=null;
+    void spectrumContext?.close(); spectrumContext=null; analyser=null;
+  }
+  audio.addEventListener('emptied', resetSpectrum);
+  audio.addEventListener('playing', startSpectrum);
+  audio.addEventListener('pause', stopSpectrum);
+  audio.addEventListener('ended', stopSpectrum);
+  document.addEventListener('pointerdown', () => { if (spectrumContext?.state === 'suspended') void startSpectrum(); }, {passive:true});
+  document.addEventListener('visibilitychange', () => document.hidden ? stopSpectrum() : void startSpectrum());
+  let pointerFrame = null, pointerX = .5, pointerY = .5;
+  document.addEventListener('pointermove', event => {
+    if (reducedMotion.matches || event.pointerType === 'touch') return;
+    pointerX=event.clientX/root.innerWidth; pointerY=event.clientY/root.innerHeight;
+    if (pointerFrame == null) pointerFrame=requestAnimationFrame(() => {
+      pointerFrame=null;
+      document.body.style.setProperty('--water-x', `${pointerX*100}%`);
+      document.body.style.setProperty('--water-y', `${pointerY*100}%`);
+      document.body.style.setProperty('--water-drift-x', `${(pointerX-.5)*18}px`);
+      document.body.style.setProperty('--water-drift-y', `${(pointerY-.5)*12}px`);
+    });
+  }, {passive:true});
+  root.addEventListener('pagehide', () => {
+    stopSpectrum(); swayAnimation?.cancel();
+    if (pointerFrame != null) cancelAnimationFrame(pointerFrame);
+    pointerFrame=null;
+    resetSpectrum();
+  });
+
   root.MusicTreeUI = {
     filterLibrary(items) { return el('tree-scope').value === 'lyrics' ? items.filter((item) => !!item.lyrics_url) : items; },
     renderLibrary(view) {
       libraryView = view;
+      if (lastPlayingKey !== view.currentKey) { if (lastPlayingKey != null) swayTree(); lastPlayingKey = view.currentKey; }
       const scope = JSON.stringify([view.searchQuery, view.librarySort, el('tree-scope').value]);
       if (scopeVersion !== scope) { clearTimeout(turnTimer); turnTimer = null; wheelRemainder = 0; viewport.classList.remove('is-turning'); }
       scopeVersion = scope;

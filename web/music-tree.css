@@ -234,3 +234,21 @@
 .tree-page #recommendation-list { transition:opacity 320ms ease,filter 320ms ease; }
 .tree-page #recommendation-list.water-turning { opacity:.24; filter:blur(2px); }
 @media (prefers-reduced-motion:reduce) { .water-light { opacity:.35; } }
+
+/* Clear glass and responsive light; controls remain opaque enough to read. */
+.tree-page { background:radial-gradient(ellipse at 20% 0%,#fffef1,transparent 58%),linear-gradient(125deg,#edf5e9,#f7faf1 52%,#dfeee3); }
+.tree-page::after { content:''; position:fixed; inset:0; pointer-events:none; background:radial-gradient(ellipse 380px 240px at var(--water-x,50%) var(--water-y,50%),#fffff0aa,transparent 75%); mix-blend-mode:soft-light; }
+.water-light svg { transform:translate(var(--water-drift-x,0px),var(--water-drift-y,0px)); transition:transform 650ms ease-out; }
+.tree-page .topbar,.tree-page .player-bar { background:#fafff05c; backdrop-filter:blur(12px); border-color:#ffffffd9; }
+.tree-trunk { transform-origin:56% 100%; }
+.leaf-body { stroke:#8da890; }.leaf-veins { opacity:.4; }
+.tree-leaf:hover .leaf-surface { filter:drop-shadow(0 2px 6px #9cbba355) brightness(1.06); }
+.leaf-spectrum { position:absolute; left:22%; right:17%; bottom:23%; height:29%; display:flex; align-items:center; justify-content:center; gap:3px; pointer-events:none; opacity:.22; }
+.leaf-spectrum i { flex:1; max-width:5px; height:100%; border-radius:8px; background:linear-gradient(#719d85,#b7cfa1); transform:scaleY(var(--level,.035)); transition:transform 100ms linear; }
+.playing .leaf-spectrum { opacity:.52; }
+.leaf-content { z-index:1; }
+.leaf-text { text-shadow:0 1px 6px #ffffffc9; }
+.playing .leaf-wave { display:none; }
+.ripple-focus,.ripple-orbit { transform-origin:0 0; background-color:#f6ffec42; border-color:#ffffffd4; box-shadow:inset 0 0 14px #ffffff70,0 3px 13px #78967418; }
+.ripple-orbit:hover { background-color:#faffee95; box-shadow:inset 0 0 18px #fff,0 0 17px #d7e8b779; }
+@media(prefers-reduced-motion:reduce) { .tree-page::after { display:none; } .water-light svg { transform:none; } }

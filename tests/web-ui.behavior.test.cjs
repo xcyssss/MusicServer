@@ -413,3 +413,12 @@ test('an unreadable display-mode setting keeps the traditional names', async () 
   assert.equal(a.run('state.displayMode'), 'raw');
 });
 
+
+
+test('download diagnostics explain exhausted retries without promising another automatic attempt', async () => {
+  const a = await app();
+  const text = a.run("downloadExplanation({state:'UNAVAILABLE',last_error:'WRONG_DURATION',attempt_count:5,max_attempts:5})");
+  assert.match(text, /时长不符/);
+  assert.match(text, /5\/5/);
+  assert.match(text, /停止自动重试/);
+});

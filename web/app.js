@@ -757,6 +757,18 @@ function renderLibrary() {
 // The download panel reflects the whole wanted queue, not just today's
 // recommendations: a failed or waiting download must stay visible even after
 // the daily list is regenerated (the queue entry itself is never dropped).
+function downloadExplanation(entry) {
+  const reasons = { HTTP_412:'来源限流，冷却后重试', CIRCUIT_OPEN:'来源暂时冷却', BILIBILI_CIRCUIT_OPEN:'Bilibili 暂时冷却', NETEASE_NOT_AVAILABLE:'网易云未提供完整音源', NETEASE_REQUEST_FAILED:'网易云请求失败', NO_CANDIDATE:'未找到身份匹配的音源', ALL_CANDIDATES_FAILED:'本轮音源均未通过', WRONG_DURATION:'音源时长不符，已拒绝入库', WORKER_EXCEPTION:'处理异常，详见下载日志', DOWNLOAD_FAILED:'下载失败', NETEASE_DOWNLOAD_EMPTY:'音源为空或不完整' };
+  const reason = reasons[entry.last_error] || entry.last_error || '';
+  const attempts = Number(entry.attempt_count ?? entry.attempts ?? 0);
+  const limit = Number(entry.max_attempts || 5);
+  const parts = [reason, attempts > 0 ? `尝试 ${attempts}/${limit}` : ''];
+  const retry = Date.parse(entry.next_retry_at || '');
+  if (entry.state === 'RETRY_WAIT' && Number.isFinite(retry)) parts.push(`下次 ${new Date(retry).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}`);
+  if (entry.state === 'UNAVAILABLE') parts.push('已停止自动重试，可手动重试');
+  return parts.filter(Boolean).join(' · ');
+}
+
 function wantedQueueEntries() {
   const byId = new Map();
   for (const entry of (Array.isArray(state.wanted) ? state.wanted : [])) {
@@ -789,7 +801,7 @@ function renderRecommendations() {
     const label = escapeHtml([entry.title, entry.artist].filter(Boolean).join(' · ') || entry.track_id || '未知曲目');
     const badge = `<span class="status-badge ${statusClass(entry.state)}">${escapeHtml(labels[entry.state] || entry.state)}</span>`;
     const retry = retryable ? `<button class="text-button wanted-retry" type="button" data-action="wanted-retry" data-track-id="${escapeHtml(entry.track_id || '')}">重试</button>` : '';
-    return `<div class="wanted-row"><span>${label}</span>${badge}${retry}</div>`;
+    return `<div class="wanted-row"><span>${label}<small class="download-explanation">${escapeHtml(downloadExplanation(entry))}</small></span>${badge}${retry}</div>`;
   }).join('') : '当前没有待下载或等待重试的歌曲。';
   if (globalThis.MusicTreeUI) {
     globalThis.MusicTreeUI.renderRecommendations({ items: state.items, display: formatTrackDisplay, keyOf,

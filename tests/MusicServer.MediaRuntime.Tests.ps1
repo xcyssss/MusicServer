@@ -36,6 +36,11 @@ function Get-NetEaseLyricsById {
         $stream = [IO.File]::Create($file)
         try { $stream.SetLength(32MB) } finally { $stream.Dispose() }
         [IO.File]::WriteAllText((Join-Path $cfg.MusicDir 'test.lrc'), '[00:00.00]local lyric')
+        # Indexed media must also resolve in a cold isolated media runspace.
+        New-Item -ItemType Directory -Path (Split-Path -Parent $cfg.NdDb) -Force | Out-Null
+        $sql = "CREATE TABLE IF NOT EXISTS media_file (id TEXT PRIMARY KEY,title TEXT,artist TEXT,album TEXT,path TEXT,duration REAL,track_number INTEGER,created_at TEXT,updated_at TEXT); INSERT INTO media_file VALUES ('cold-fixture','Cold fixture','Artist','','test.wav',90,1,'','');"
+        & $cfg.Sqlite $cfg.NdDb $sql
+        if ($LASTEXITCODE -ne 0) { throw 'Cold indexed-media fixture failed.' }
         Start-MusicServerFixtureServices -Fixture $script:MediaFixture -WithUi
         $script:MediaBase = "http://127.0.0.1:$($script:MediaFixture.UiPort)"
     }
@@ -44,6 +49,14 @@ function Get-NetEaseLyricsById {
         Get-Content (Join-Path $script:MediaFixture.Root 'ui.err.log') -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
         foreach ($request in $script:MediaRequests) { try { $request.Abort() } catch {} }
         Remove-MusicServerRuntimeFixture -Fixture $script:MediaFixture
+    }
+
+    It 'streams an indexed song before any library cache is warmed' {
+        $request=[Net.HttpWebRequest]::Create($script:MediaBase + '/api/library/library-cold-fixture/stream')
+        $request.Timeout=10000
+        $request.AddRange(0,99)
+        $response=$request.GetResponse()
+        try { [int]$response.StatusCode | Should Be 206; $response.ContentLength | Should Be 100 } finally { $response.Dispose() }
     }
 
     It 'keeps health and heartbeat responsive during slow lyrics and bounds admission' {

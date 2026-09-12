@@ -212,7 +212,7 @@ function Test-DownloadCandidateIdentity {
     $titleEvidence = ($candidateTitle -eq $titleKey) -or $candidateTitle.Contains($titleKey) -or $titleKey.Contains($candidateTitle)
     if (-not $titleEvidence) { return $false }
 
-    $artistKeys = @([string]$Track.artist -split '[,，、/&]' | ForEach-Object { Normalize-MusicText $_ } | Where-Object { $_ })
+    $artistKeys = @([string]$Track.artist -split '[,，、/＆&×;；]|\s+feat\.?\s+|\s+ft\.?\s+' | ForEach-Object { Normalize-MusicText $_ } | Where-Object { $_ })
     if ($artistKeys.Count -eq 0) { return $true }
     $candidateArtist = Normalize-MusicText ([string]$Candidate.artist)
     $artistEvidence = $false
@@ -226,7 +226,7 @@ function Test-DownloadCandidateIdentity {
 
     # Some clean music uploads use an exact song title but the uploader is not the artist.
     # Only accept that fallback when duration is also extremely close.
-    if ($candidateTitle -eq $titleKey -and $expectedDuration -gt 0 -and $candidateDuration -gt 0) {
+    if ([string]$Candidate.provider -like 'bilibili*' -and $candidateTitle -eq $titleKey -and $expectedDuration -gt 0 -and $candidateDuration -gt 0) {
         return ([Math]::Abs($expectedDuration - $candidateDuration) -le 5)
     }
     return $false
@@ -244,7 +244,7 @@ function Search-BilibiliCandidates {
     if (-not (Claim-ProviderRequest -Config $Config -Provider 'bilibili_search')) {
         return [pscustomobject]@{ Candidates = @(); Blocked = $true; Error = 'CIRCUIT_OPEN'; HttpStatus = 0 }
     }
-    $keyword = "$($Track.title) $(($Track.artist -split '[,，、]')[0])".Trim()
+    $keyword = [string](@(Get-SongSearchQueries -Title $Track.title -Artist $Track.artist -Max 1) | Select-Object -First 1)
     $args = @(
         "bilisearch10:$keyword", '--flat-playlist', '--dump-single-json', '--playlist-end', '10',
         '--no-warnings', '--skip-download', '--socket-timeout', '20'
@@ -299,7 +299,7 @@ function Get-DirectCandidates {
 }
 
 function Resolve-DownloadCandidates {
-    param([Parameter(Mandatory)][psobject]$Config, [Parameter(Mandatory)][psobject]$Track)
+    param([Parameter(Mandatory)][psobject]$Config, [Parameter(Mandatory)][psobject]$Track, [switch]$SearchFallbackOnly)
     $candidates = @()
     $local = Find-LocalTrack -Config $Config -Title $Track.title -Artist $Track.artist
     if ($local) {
@@ -309,29 +309,28 @@ function Resolve-DownloadCandidates {
 
     # NetEase direct download first when the track has a NetEase id: free songs
     # are served as full 320kbps audio without Bilibili's 412 risk control.
-    $neteaseCandidate = Get-NeteaseCandidate -Config $Config -Track $Track
+    $neteaseCandidate = if (-not $SearchFallbackOnly) { Get-NeteaseCandidate -Config $Config -Track $Track } else { $null }
     if ($neteaseCandidate) { $candidates += $neteaseCandidate }
 
     # Direct candidates are known resources. Resolving them must stay metadata-only:
     # do not consume a search request, require yt-dlp, or claim a download probe yet.
-    $direct = @(Get-DirectCandidates -Track $Track)
+    $direct = @(); if (-not $SearchFallbackOnly) { $direct = @(Get-DirectCandidates -Track $Track) }
     $hasDirectCandidates = ($direct.Count -gt 0)
     if ($hasDirectCandidates) {
-        if (-not (Test-ProviderRequestAvailable -Config $Config -Provider 'bilibili_download')) { return @() }
-        $candidates += $direct
+        if (Test-ProviderRequestAvailable -Config $Config -Provider 'bilibili_download') { $candidates += $direct }
     }
 
     # Search is a fallback only when no known direct Bilibili candidate exists.
     # A NetEase candidate is still only a try (VIP/paid tracks can have no URL),
     # so pair it with search when the search circuit is available.
     if (-not $hasDirectCandidates) {
-        if (Test-ProviderRequestAvailable -Config $Config -Provider 'bilibili_search') {
+        if ((Test-ProviderRequestAvailable -Config $Config -Provider 'bilibili_download') -and (Test-ProviderRequestAvailable -Config $Config -Provider 'bilibili_search')) {
             $search = Search-BilibiliCandidates -Config $Config -Track $Track
             if (-not $search.Blocked) { $candidates += $search.Candidates }
         }
         # Only reach for NetEase discovery when the healthy path has nothing to
         # offer yet; a track that already carries a NetEase id never searches.
-        if ($candidates.Count -eq 0) {
+        if ($candidates.Count -eq 0 -and -not $SearchFallbackOnly) {
             $discovered = Search-NeteaseCandidate -Config $Config -Track $Track
             if ($discovered) { $candidates += $discovered; $neteaseCandidate = $discovered }
         }
@@ -463,7 +462,7 @@ function Search-NeteaseCandidate {
 
     if ($env:MUSICSERVER_DISABLE_NETEASE_SEARCH -eq '1') { return $null }
     if (Get-NeteaseIdFromTrack -Track $Track) { return $null }
-    $keyword = "$($Track.title) $(($Track.artist -split '[,，、/&]')[0])".Trim()
+    $keyword = [string](@(Get-SongSearchQueries -Title $Track.title -Artist $Track.artist -Max 1) | Select-Object -First 1)
     if (-not $keyword) { return $null }
     if (-not (Test-ProviderRequestAvailable -Config $Config -Provider 'netease')) { return $null }
     if (-not (Claim-ProviderRequest -Config $Config -Provider 'netease')) { return $null }
@@ -778,7 +777,7 @@ function Get-SongSearchQueries {
     # makes the query too specific to match.
     $leadArtist = ''
     if (-not [string]::IsNullOrWhiteSpace($Artist)) {
-        $leadArtist = ([string](@($Artist -split '[,，、/&;；]|\s+feat\.?\s+|\s+ft\.?\s+' | Where-Object { $_.Trim() })[0])).Trim()
+        $leadArtist = ([string](@($Artist -split '[,，、/＆&×;；]|\s+feat\.?\s+|\s+ft\.?\s+' | Where-Object { $_.Trim() })[0])).Trim()
     }
     $keywords = @(Get-TitleSearchKeywords -Title $Title)
     $artistKey = ConvertTo-MusicServerKey -Value $leadArtist
@@ -813,7 +812,7 @@ function Test-FileVouchesForArtist {
 
     if ([string]::IsNullOrWhiteSpace($Artist)) { return $false }
     $fileKey = ConvertTo-MusicServerKey -Value $Title
-    $names = @($Artist -split '[,，、/&;；]|\s+feat\.?\s+|\s+ft\.?\s+' | ForEach-Object { $_.Trim() } | Where-Object { $_.Length -ge 2 })
+    $names = @($Artist -split '[,，、/＆&×;；]|\s+feat\.?\s+|\s+ft\.?\s+' | ForEach-Object { $_.Trim() } | Where-Object { $_.Length -ge 2 })
     if ($names.Count -eq 0) { return $false }
     foreach ($name in $names) {
         if (-not $fileKey.Contains((ConvertTo-MusicServerKey -Value $name))) { return $false }

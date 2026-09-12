@@ -1197,7 +1197,7 @@ function Handle-Request {
 # the boundary, never the main loop's mutable script context or client registry.
 function Initialize-MediaPool {
     $initial = [Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
-    $initial.ImportPSModule(@((Join-Path $Root 'MusicServer.Core.psm1')))
+    $initial.ImportPSModule(@((Join-Path $Root 'MusicServer.Core.psm1'), (Join-Path $Root 'MusicServer.Database.psm1')))
     # Get-UiLibrary is only used here to fill this runspace's file map, so the
     # artist overlay it applies needs neither the state DB nor the providers; its
     # lookups fail soft in this runspace and the map is unaffected.

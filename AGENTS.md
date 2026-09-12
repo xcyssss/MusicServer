@@ -128,7 +128,7 @@ CI: `.github/workflows/core-tests.yml` on `windows-latest`.
 
 | Job | Responsibility |
 |---|---|
-| `state` | Core, Database, V2, WorkerConcurrency, Recommendation, LegacyRetirement, Listening, Web, Tauri, ConfigurableLibrary, TestRunner, Identity |
+| `state` | Core, Database, V2, WorkerConcurrency, DownloadPipeline, Recommendation, LegacyRetirement, Listening, Web, Tauri, ConfigurableLibrary, TestRunner, Identity |
 | `api` | Http, UiProxyRuntime, MediaRuntime, ApiTransaction, ApiRuntime |
 | `desktop-build` | real Rust/Tauri compile, NSIS installer, installed-app portability smoke, installer artifact |
 
@@ -261,6 +261,11 @@ Batch related steps as local commits; after a meaningful stage and local validat
 After completing a meaningful task, update this `AGENTS.md` checkpoint when the task changes architecture, release behavior, test gates, or important operating rules. Keep only current durable facts; do not accumulate transient debugging notes.
 
 ## Current checkpoint — 2026-09-12
+
+- The isolated media pool imports the Database module for `ConvertFrom-MusicServerJsonArray` and its parsing dependencies; cold indexed streams resolve Navidrome paths there before any owner library cache exists. MediaRuntime tests must include a Range request before warming `/api/library`.
+- DownloadPipeline regression executes the actual LIKE transaction and leased worker functions with deterministic network doubles. It runs in the CI state group. A Bilibili circuit must never discard a NetEase candidate. Failed known resources allow one explicit `SearchFallbackOnly` pass; attempted URLs are not downloaded twice in the same pass, identity/duration checks remain mandatory, and every retry path respects max_attempts. Queue diagnostics expose last_error, attempts and next_retry_at; worker logs correlate transitions/fallback/elapsed time by worker and track, without writing candidate URLs.
+- Music-tree spectrum reads a captured copy of the audio into an analyser, never reroutes the playback element. Missing capture support leaves it quiet. Pause, hidden pages and reduced-motion stop drawing; source replacement releases the capture. Water-drop promotion lets the shared song click handler finish before replacing its DOM. Recommendation diversity respects taste ranking and the per-artist cap across all credited singers.
+
 
 - The APP root route opens `web/music-tree.html`; `/index.html` retains the classic view. The renderer shares `web/app.js` and existing APIs. Library and recommendations each display up to seven tracks. Recommendation arrows and the water-surface button share batch navigation; song controls do not trigger it. Water animations respect reduced motion. `tests/music-tree.behavior.test.cjs` is included in the Web test gate.
 
