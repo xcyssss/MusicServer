@@ -18,6 +18,7 @@ mod runtime_manifest;
 mod startup_probe;
 mod startup_trace;
 
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::Manager;
 
 const DEFAULT_UI_PORT: u16 = 8790;
@@ -27,6 +28,10 @@ const BUILD_MARKER: &str = env!("MUSICSERVER_BUILD_ID");
 const LAUNCHER: &str = "start_musicserver_ui.ps1";
 const APP_HOME_ENV: &str = "MUSICSERVER_APP_HOME";
 const PACKAGED_APP_HOME_DIR: &str = "com.musicserver.desktop";
+const MAIN_WINDOW: &str = "main";
+/// 托盘图标的稳定 id。窗口事件靠它判断托盘是否真的存在，所以它必须是常量而不是
+/// 各处重复的字面量。
+const TRAY_ID: &str = "musicserver-tray";
 
 struct AppState {
     /// 由本应用拉起的 launcher 进程（若有）。
@@ -295,6 +300,18 @@ mod tests {
         assert_eq!(fs::read(target.join("user-data")).unwrap(), b"preserve");
         fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn minimize_hides_the_window_only_when_a_tray_icon_can_restore_it() {
+        // Minimizing with a tray icon present hides the window to the tray.
+        assert!(should_hide_to_tray(true, true));
+        // Without a tray icon the window must minimize normally: hiding it would
+        // remove it from both the taskbar and the tray, leaving no way back.
+        assert!(!should_hide_to_tray(true, false));
+        // A plain Resized (resize, maximize, restore) is not a minimize.
+        assert!(!should_hide_to_tray(false, true));
+        assert!(!should_hide_to_tray(false, false));
+    }
 }
 
 /// 拉起指定端口的 launcher 并返回子进程。失败返回 None（调用方会继续尝试）。
@@ -471,6 +488,54 @@ async fn pick_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
     }
 }
 
+/// 最小化到托盘是一个判断，不是一个副作用。
+///
+/// Tauri v2 没有“已最小化”窗口事件：最小化只以 `WindowEvent::Resized` 的形式到达，
+/// 所以这里必须自己查一次窗口状态。托盘图标是窗口隐藏之后**唯一**的恢复入口，因此
+/// 托盘不可用时绝不能隐藏窗口——否则窗口会同时从任务栏和托盘消失，用户只能杀进程。
+fn should_hide_to_tray(minimized: bool, tray_available: bool) -> bool {
+    minimized && tray_available
+}
+
+/// 左键点击托盘恢复主窗口。
+///
+/// 隐藏时窗口仍是 minimized 状态，所以必须先 `unminimize` 再 `show`：只 show 会让
+/// 任务栏留下一个最小化的空窗口。
+fn restore_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+/// 创建常驻托盘图标并接上左键恢复主窗口。
+///
+/// 返回是否创建成功。调用方只把它记进启动 trace：托盘缺失时功能降级为普通最小化，
+/// 而不是把一个藏起来又无法恢复的窗口留在后台。
+fn install_tray_icon(app: &tauri::AppHandle) -> bool {
+    let Some(icon) = app.default_window_icon().cloned() else {
+        return false;
+    };
+    TrayIconBuilder::with_id(TRAY_ID)
+        .icon(icon)
+        .tooltip("MusicServer（单击显示主窗口）")
+        .on_tray_icon_event(|tray, event| {
+            // 只认左键抬起。Windows 上一次双击会先送来一次 Click，单击恢复已经覆盖
+            // 双击语义，再挂 DoubleClick 只会重复恢复同一个窗口。
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                restore_main_window(tray.app_handle());
+            }
+        })
+        .build(app)
+        .is_ok()
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -487,6 +552,14 @@ fn main() {
             let bundle_runtime = resolve_bundled_runtime(resource_dir);
             let app_home = resolve_app_home();
             trace.record("resolve_runtime", started);
+
+            // 托盘必须在任何一次最小化之前就绪：窗口一旦隐藏，它是唯一的恢复入口。
+            let started = Instant::now();
+            let tray_ready = install_tray_icon(app.handle());
+            trace.record(
+                if tray_ready { "tray_icon" } else { "tray_icon_unavailable" },
+                started,
+            );
 
             let ui_url = bundle_runtime
                 .as_deref()
@@ -512,14 +585,27 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // 主窗口关闭时，停掉本应用拉起的 launcher（其 finally 会停掉 API）。
-            if let tauri::WindowEvent::Destroyed = event {
-                let app = window.app_handle();
-                let state: tauri::State<AppState> = app.state();
-                let mut guard = state.child.lock().unwrap();
-                if let Some(child) = guard.take() {
-                    let _ = kill_process_tree(child.id());
+            match event {
+                // 主窗口关闭时，停掉本应用拉起的 launcher（其 finally 会停掉 API）。
+                tauri::WindowEvent::Destroyed => {
+                    let app = window.app_handle();
+                    let state: tauri::State<AppState> = app.state();
+                    let mut guard = state.child.lock().unwrap();
+                    if let Some(child) = guard.take() {
+                        let _ = kill_process_tree(child.id());
+                    }
                 }
+                // 最小化到托盘：窗口进入最小化时隐藏它，托盘左键负责恢复。窗口状态在
+                // 事件里查，托盘是否存在也查注册表而不是另存一份状态，两者都不会说谎。
+                tauri::WindowEvent::Resized(_) => {
+                    let app = window.app_handle();
+                    let minimized = window.is_minimized().unwrap_or(false);
+                    let tray_available = app.tray_by_id(TRAY_ID).is_some();
+                    if should_hide_to_tray(minimized, tray_available) {
+                        let _ = window.hide();
+                    }
+                }
+                _ => {}
             }
         })
         .run(tauri::generate_context!())
