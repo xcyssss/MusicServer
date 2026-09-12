@@ -1136,7 +1136,7 @@ function Handle-Request {
     }
 
     switch ($path) {
-        '/'            { Send-IndexHtml -Context $Context; return }
+        '/'            { Send-IndexHtml -Context $Context -RelativePath 'music-tree.html'; return }
         '/index.html'  { Send-IndexHtml -Context $Context; return }
         '/music-tree.html' { Send-IndexHtml -Context $Context -RelativePath 'music-tree.html'; return }
         '/music-tree-ui.js' { Send-StaticFile -Context $Context -RelativePath 'music-tree-ui.js' -ContentType 'application/javascript; charset=utf-8'; return }

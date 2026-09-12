@@ -206,3 +206,19 @@
   .tree-page .player-bar { grid-template-columns: 34% 41% 25%; gap: 5px; padding: 8px; }.tree-page .player-art { width: 42px; flex-basis: 42px; }.tree-page .now-playing { gap: 5px; }.tree-page #player-title { font-size: 12px; }.tree-page #player-artist { font-size: 10px; }.tree-page .player-heart { display: none; }.tree-page .player-controls { gap: 22px; }.tree-page .lyrics-toggle { font-size: 11px; padding-left: 8px; }.tree-page .volume-control input { width: 47px; }.tree-page .lyrics-toggle .ui-icon { display: none; }
 }
 @media (prefers-reduced-motion: reduce) { .tree-page *, .tree-page *::before, .tree-page *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
+/* Quiet water reflections stay behind every control. */
+.tree-page::before { content:''; position:fixed; inset:0; pointer-events:none; background:radial-gradient(ellipse 580px 120px at 14% 80%,transparent 64%,#fbfff17a 65%,transparent 66%,transparent 74%,#b5c49a35 75%,transparent 76%),radial-gradient(ellipse 430px 100px at 79% 18%,transparent 66%,#ffffed80 67%,transparent 68%,transparent 80%,#a8bc8d26 81%,transparent 82%); }
+.tree-page .app-shell { position:relative; }
+.water-discover { position:absolute; inset:0; width:100%; height:100%; background:none; border:0; z-index:2; clip-path:polygon(49% 0,66% 24%,82% 43%,96% 66%,97% 79%,87% 94%,62% 99%,35% 98%,13% 90%,5% 74%,8% 56%,28% 28%); cursor:pointer; }
+.water-discover:focus-visible { background:#f7ffe330; outline:2px solid #8a9e66; outline-offset:-5px; }
+.water-ripples { position:absolute; inset:0; overflow:hidden; pointer-events:none; z-index:5; clip-path:polygon(49% 0,66% 24%,82% 43%,96% 66%,97% 79%,87% 94%,62% 99%,35% 98%,13% 90%,5% 74%,8% 56%,28% 28%); }
+.discovery-wave { position:absolute; border:2px solid #ffffdf; border-radius:50%; box-shadow:0 0 12px #fcffd17a,inset 0 0 14px #d9e6aa66; pointer-events:none; }
+.tree-page #recommendation-list { pointer-events:none; }
+.ripple-focus,.ripple-orbit { pointer-events:auto; }
+.ripple-orbit { width:20%; }
+.ripple-orbit[data-orbit="0"] { left:25%; top:33%; }
+.ripple-orbit[data-orbit="1"] { left:65%; top:35%; }
+.ripple-orbit[data-orbit="2"] { left:7%; top:55%; }
+.ripple-orbit[data-orbit="3"] { left:77%; top:57%; }
+.ripple-orbit[data-orbit="4"] { left:20%; top:79%; }
+.ripple-orbit[data-orbit="5"] { left:60%; top:81%; }

@@ -27,10 +27,16 @@
   function orbitItems(items, focusId) {
     if (!items.length) return { focus: null, orbit: [], index: -1 };
     const index = Math.max(0, items.findIndex((item) => String(item.track_id) === String(focusId)));
-    return { focus: items[index], index, orbit: Array.from({ length: Math.min(4, items.length - 1) }, (_, offset) => items[(index + offset + 1) % items.length]) };
+    return { focus: items[index], index, orbit: Array.from({ length: Math.min(6, items.length - 1) }, (_, offset) => items[(index + offset + 1) % items.length]) };
   }
 
-  if (typeof module === 'object' && module.exports) module.exports = { LeafWindow, orbitItems, PAGE_SIZE };
+  function nextRecommendationIndex(index, length, direction) {
+    if (!length) return 0;
+    const step = length > 7 ? 7 : 1;
+    return (index + direction * step + length) % length;
+  }
+
+  if (typeof module === 'object' && module.exports) module.exports = { LeafWindow, orbitItems, PAGE_SIZE, nextRecommendationIndex };
   if (typeof document === 'undefined') return;
   const el = (id) => document.getElementById(id);
   if (!el('tree-viewport')) return;
@@ -202,6 +208,7 @@
     focusId = group.focus?.track_id || null;
     el('rec-position').textContent = items.length ? `${group.index + 1} / ${items.length}` : '';
     el('rec-previous').disabled = el('rec-next').disabled = items.length < 2;
+    el('water-discover').disabled = items.length < 2;
     const recList = el('recommendation-list');
     const active = recList.contains(document.activeElement) ? document.activeElement : null;
     const activeTrack = active?.closest('[data-track-id]')?.dataset.trackId;
@@ -229,9 +236,27 @@
     const items = recommendationView?.items || [];
     if (!items.length) return;
     const index = Math.max(0, items.findIndex((item) => item.track_id === focusId));
-    focusId = items[(index + direction + items.length) % items.length].track_id;
+    focusId = items[nextRecommendationIndex(index, items.length, direction)].track_id;
     paintRecommendations();
   }
+  el('water-discover').addEventListener('click', (event) => {
+    nextRecommendation(1);
+    const layer = el('water-ripples');
+    layer.replaceChildren();
+    if (reducedMotion.matches) return;
+    const box = layer.getBoundingClientRect();
+    const x = event.detail ? event.clientX - box.left : box.width / 2;
+    const y = event.detail ? event.clientY - box.top : box.height * .6;
+    const size = Math.hypot(box.width, box.height) * 2;
+    for (let i = 0; i < 3; i++) {
+      const ring = document.createElement('span');
+      ring.className = 'discovery-wave';
+      Object.assign(ring.style, { width: `${size}px`, height: `${size}px`, left: `${x - size / 2}px`, top: `${y - size / 2}px` });
+      layer.append(ring);
+      const animation = ring.animate([{ transform: 'scale(0)', opacity: .85 }, { transform: 'scale(1)', opacity: 0 }], { duration: 1050, delay: i * 100, easing: 'cubic-bezier(.1,.5,.3,1)', fill: 'both' });
+      animation.onfinish = () => ring.remove();
+    }
+  });
   el('rec-previous').addEventListener('click', () => nextRecommendation(-1));
   el('rec-next').addEventListener('click', () => nextRecommendation(1));
   el('tree-player-like').addEventListener('click', () => recommendationView?.likeCurrent());
