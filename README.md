@@ -33,6 +33,12 @@ Tauri APP / WebView2
 
 `web/` 是 Tauri WebView2 加载的共享 UI，不是另一套独立产品。桌面端代码位于 `src-tauri/`。
 
+### 音乐树前端预览
+
+进入 APP 后点击顶部的 **音乐树预览**，打开同页的七首叶片音乐库与绿色水滴推荐。支持搜索、有歌词筛选、排序、滚轮逐首浏览、换组、拖动水滴定位，以及方向键 / Page Up / Page Down / Home / End。播放、歌词、收藏、少推荐和下载动态沿用现有接口；切换浏览位置不会改变正在播放的歌曲。设置中可返回经典界面。
+
+预览入口为 `/music-tree.html`，矢量形状和交互在 `web/music-tree-ui.js` 与 `web/music-tree.css`，角色装饰为 `web/assets/muelsyse-water.png`（依据设计参考生成）。页面遵循系统减少动态效果设置。此预览面向桌面窗口，建议 1280 × 820 或更大。
+
 ## Windows 桌面版
 
 ### 从源码构建

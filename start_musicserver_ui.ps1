@@ -784,8 +784,11 @@ function Send-StaticFile {
 }
 
 function Send-IndexHtml {
-    param([Parameter(Mandatory)]$Context)
-    $file = Join-Path $WebRoot 'index.html'
+    param(
+        [Parameter(Mandatory)]$Context,
+        [ValidateSet('index.html', 'music-tree.html')][string]$RelativePath = 'index.html'
+    )
+    $file = Join-Path $WebRoot $RelativePath
     $html = Get-Content -LiteralPath $file -Raw -Encoding UTF8
     $lifecycleScript = @'
 <script>
@@ -1135,6 +1138,10 @@ function Handle-Request {
     switch ($path) {
         '/'            { Send-IndexHtml -Context $Context; return }
         '/index.html'  { Send-IndexHtml -Context $Context; return }
+        '/music-tree.html' { Send-IndexHtml -Context $Context -RelativePath 'music-tree.html'; return }
+        '/music-tree-ui.js' { Send-StaticFile -Context $Context -RelativePath 'music-tree-ui.js' -ContentType 'application/javascript; charset=utf-8'; return }
+        '/music-tree.css' { Send-StaticFile -Context $Context -RelativePath 'music-tree.css' -ContentType 'text/css; charset=utf-8'; return }
+        '/assets/muelsyse-water.png' { Send-StaticFile -Context $Context -RelativePath 'assets/muelsyse-water.png' -ContentType 'image/png'; return }
         '/app.js'      { Send-StaticFile -Context $Context -RelativePath 'app.js' -ContentType 'application/javascript; charset=utf-8'; return }
         '/styles.css'  { Send-StaticFile -Context $Context -RelativePath 'styles.css' -ContentType 'text/css; charset=utf-8'; return }
         '/favicon.ico' { $Context.Response.StatusCode = 204; $Context.Response.Close(); return }

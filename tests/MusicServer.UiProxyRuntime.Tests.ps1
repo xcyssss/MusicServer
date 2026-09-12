@@ -161,6 +161,18 @@ Describe 'MusicServer live UI API proxy' {
         $script:ProxyTest.Processes += $ui
         Wait-TestHealth -BaseUrl $uiPrefix
 
+        # The alternative page must retain the same launcher heartbeat and load
+        # every asset through the installed app's explicit static routes.
+        $preview = Invoke-WebRequest -UseBasicParsing -Uri ($uiPrefix + 'music-tree.html') -TimeoutSec 5
+        $preview.StatusCode | Should Be 200
+        $preview.Content | Should Match '/ui/heartbeat'
+        $preview.Content | Should Match 'id="tree-viewport"'
+        foreach ($asset in @('music-tree-ui.js', 'music-tree.css', 'assets/muelsyse-water.png')) {
+            $response = Invoke-WebRequest -UseBasicParsing -Uri ($uiPrefix + $asset) -TimeoutSec 5
+            $response.StatusCode | Should Be 200
+            [int]$response.RawContentLength | Should BeGreaterThan 100
+        }
+
         $like = Invoke-TestJsonHttp -Method 'POST' -Url ($uiPrefix.TrimEnd('/') + "/api/tracks/$trackId/like")
         $like.Status | Should Be 200 -Because "the UI proxy must forward the browser-style JSON body; response was [$($like.Text)]"
         $like.Json.accepted | Should Be $true
