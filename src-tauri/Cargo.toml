@@ -9,7 +9,10 @@ edition = "2021"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# tray-icon 是最小化到托盘需要的 feature。它不引入新的 crate 版本：tauri 2.11.5
+# 已经把 tray-icon/muda 作为可选依赖，Cargo.lock 中两者都已解析（tray-icon 0.24.2 /
+# muda 0.19.3），默认 feature 里的 common-controls-v6 也只在启用托盘后才作用到它。
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
