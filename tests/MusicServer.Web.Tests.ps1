@@ -33,7 +33,7 @@ Describe 'MusicServer web playback safeguards' -Tag @('RequiresLocalRuntime') {
 Describe 'MusicServer web UI safeguards' {
 
     It 'passes the shipped JavaScript timing and state behavior regressions' {
-        & node --test (Join-Path $PSScriptRoot 'web-ui.behavior.test.cjs')
+        & node --test (Join-Path $PSScriptRoot 'web-ui.behavior.test.cjs') (Join-Path $PSScriptRoot 'music-tree.behavior.test.cjs')
         $LASTEXITCODE | Should Be 0
     }
 

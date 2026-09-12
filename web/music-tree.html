@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#e9ecdd" />
+  <title>MusicServer · 音乐树预览</title>
+  <link rel="stylesheet" href="/styles.css" />
+  <link rel="stylesheet" href="/music-tree.css" />
+</head>
+<body class="tree-page">
+  <div class="water-light" aria-hidden="true"><svg class="water-caustics" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 960" preserveAspectRatio="xMidYMid slice">
+  <defs>
+    <filter id="refraction" x="-10%" y="-10%" width="120%" height="120%">
+      <feTurbulence type="fractalNoise" baseFrequency=".006 .009" numOctaves="2" seed="19" result="water"/>
+      <feDisplacementMap in="SourceGraphic" in2="water" scale="62" xChannelSelector="R" yChannelSelector="G"/>
+      <feGaussianBlur stdDeviation="1.2"/>
+    </filter>
+    <pattern id="reflections" width="440" height="350" patternUnits="userSpaceOnUse" patternTransform="rotate(-21) scale(1.12 .85)">
+      <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+        <defs><path id="flow" d="M-20 45C48 112 81 3 159 37S222 143 297 95S370 6 464 46M-25 222C46 163 103 249 166 213S246 158 312 202S397 285 459 229M45-25C82 24 64 78 100 118S198 160 166 213S82 291 113 375M303-20C274 27 285 66 297 95S376 125 352 164S292 224 320 271S395 326 374 370" /></defs><use href="#flow" stroke="#71924b" stroke-opacity=".10" stroke-width="15"/>
+        <use href="#flow" stroke="#ffffde" stroke-opacity=".72" stroke-width="6"/>
+        <use href="#flow" stroke="#ffffff" stroke-opacity=".92" stroke-width="1.7"/>
+      </g>
+    </pattern>
+  </defs>
+  <rect x="-100" y="-100" width="1640" height="1160" fill="url(#reflections)" filter="url(#refraction)"/>
+</svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%"><defs><filter id="caustic-light" x="0" y="0" width="100%" height="100%"><feTurbulence type="fractalNoise" baseFrequency=".009 .014" numOctaves="1" seed="8" result="water"/><feSpecularLighting in="water" surfaceScale="12" specularConstant="2.3" specularExponent="13" lighting-color="#ffffe7"><feDistantLight azimuth="225" elevation="46"/></feSpecularLighting><feColorMatrix type="luminanceToAlpha"/><feComponentTransfer result="caustic-mask"><feFuncA type="gamma" amplitude="2" exponent=".65" offset="0"/></feComponentTransfer><feFlood flood-color="#ffffe9"/><feComposite in2="caustic-mask" operator="in"/></filter></defs><rect width="100%" height="100%" filter="url(#caustic-light)"/></svg></div>
+  <a class="skip-link" href="#library-search">跳到音乐搜索</a>
+  <div id="tree-svg-defs" aria-hidden="true"></div>
+  <div class="app-shell listening-collapsed">
+    <aside id="listening-sidebar" class="listening-sidebar collapsed" aria-label="我的常听">
+      <button id="listening-collapse" class="listening-collapse" type="button" aria-label="收起常听侧栏">×</button>
+      <div class="listening-content">
+        <div class="listening-header"><span class="section-kicker">YOUR LISTENING</span><h2>我的常听</h2></div>
+        <div id="most-played-list" class="most-played-list" aria-live="polite"></div>
+        <div class="rediscover-block"><div class="rediscover-heading"><h3>换点口味</h3><button id="rediscover-button" class="text-button">换一批</button></div><div id="rediscover-list" class="rediscover-list" aria-live="polite"></div></div>
+        <button id="random-listening-button" class="secondary-button">随机来一首</button>
+      </div>
+      <div id="listening-handle" class="listening-handle" hidden></div>
+    </aside>
+    <main class="main-content">
+      <header class="topbar">
+        <a class="tree-brand" href="/index.html" title="返回经典界面"><svg class="brand-leaf" viewBox="0 0 64 64" aria-hidden="true"><use href="#mark-leaf" /></svg><span>MusicServer</span></a>
+        <span class="preview-label" id="tree-preview-label">预览</span>
+        <label class="search-box"><svg class="ui-icon" aria-hidden="true"><use href="#i-search" /></svg><input id="library-search" type="search" aria-label="搜索音乐库" placeholder="搜索歌名、艺术家、专辑" autocomplete="off" /><kbd>Ctrl K</kbd></label>
+        <div class="topbar-actions">
+          <button id="listening-toggle" class="header-action" aria-controls="listening-sidebar" aria-expanded="false"><svg class="ui-icon"><use href="#i-headphones" /></svg><span>我的常听</span></button>
+          <button id="queue-toggle" class="header-action" aria-controls="wanted" aria-expanded="false"><svg class="ui-icon"><use href="#i-download" /></svg><span>下载动态</span><b id="queue-count">0</b></button>
+          <button id="refresh-button" class="header-action compact-action" aria-label="刷新音乐库与推荐" title="刷新音乐库与推荐"><svg class="ui-icon"><use href="#i-refresh" /></svg></button>
+          <button id="settings-toggle" class="header-action" aria-controls="settings-panel" aria-expanded="false"><svg class="ui-icon"><use href="#i-settings" /></svg><span>设置</span></button>
+        </div>
+      </header>
+      <div class="workspace-grid">
+        <section id="library" class="library-panel" aria-label="本地音乐库">
+          <div class="tree-heading">
+            <div class="tree-title"><svg class="title-leaf" viewBox="0 0 64 64" aria-hidden="true"><use href="#mark-leaf-plain" /></svg><div><h1>音乐树</h1><p>本地音乐库 <span id="library-nav-count"></span></p></div></div>
+            <div class="tree-tools">
+              <label class="select-pill"><span class="sr-only">歌曲范围</span><select id="tree-scope"><option value="all">全部歌曲</option><option value="lyrics">有歌词</option></select></label>
+              <label class="select-pill"><span class="sr-only">音乐库排序</span><select id="library-sort"><option value="default">默认排序</option><option value="added">最近入库</option></select></label>
+              <button id="tree-regroup" class="soft-button"><svg class="ui-icon"><use href="#i-refresh" /></svg><span>换一组</span></button>
+              <span class="seven-label">每屏 <b>7</b> 首</span>
+              <div class="play-mode" aria-label="播放顺序"><button class="mode-button active" data-mode="sequence" aria-pressed="true">顺序</button><button id="shuffle-button" class="shuffle-button" aria-pressed="false"><svg class="ui-icon"><use href="#i-shuffle" /></svg>随机</button></div>
+            </div>
+          </div>
+          <div class="tree-viewport" id="tree-viewport" tabindex="0" aria-label="七首音乐树，方向键逐首浏览，Page Down 换组">
+            <svg class="tree-trunk" viewBox="0 0 1000 700" preserveAspectRatio="none" aria-hidden="true">
+              <path class="trunk-shadow" d="M584 710 C530 656 494 586 520 529 C559 454 452 398 500 347 C534 294 635 208 590 165 C566 119 573 95 567 74" />
+              <path class="trunk-main" d="M584 710 C530 656 494 586 520 529 C559 454 452 398 500 347 C534 294 635 208 590 165 C566 119 573 95 567 74" />
+              <path class="trunk-edge" d="M581 710 C526 653 490 586 516 529 C555 454 448 398 496 347 C530 294 631 208 586 165 C562 119 569 95 563 74" />
+            </svg>
+            <div id="library-list" class="track-list library-list" aria-label="曲库歌曲"></div>
+            <div class="tree-scroll-rail">
+              <button id="tree-up" class="rail-arrow" aria-label="向上浏览一首"><svg class="ui-icon"><use href="#i-up" /></svg></button>
+              <div id="tree-scroll-track" class="rail-track"><div class="rail-line"></div><div class="rail-ticks" aria-hidden="true"></div><button id="tree-scroll-thumb" class="rail-thumb" role="slider" aria-label="音乐树位置" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0"><svg viewBox="0 0 36 50" aria-hidden="true"><path d="M18 2C15 14 3 27 3 35a15 15 0 0030 0C33 27 21 14 18 2Z" fill="url(#dropThumb)" stroke="#b6a66c"/><circle cx="18" cy="35" r="6" fill="url(#goldBead)" stroke="#fffbdf"/></svg></button></div>
+              <button id="tree-down" class="rail-arrow" aria-label="向下浏览一首"><svg class="ui-icon"><use href="#i-down" /></svg></button>
+            </div>
+          </div>
+          <div class="tree-navigation"><span id="library-count" role="status"></span><div class="group-nav"><button id="tree-previous" class="round-button" aria-label="上一组歌曲"><svg class="ui-icon"><use href="#i-left" /></svg></button><span>滚动切换 · 拖动定位</span><button id="tree-next" class="round-button" aria-label="下一组歌曲"><svg class="ui-icon"><use href="#i-right" /></svg></button></div></div>
+          <button id="library-more" hidden>显示更多</button>
+        </section>
+        <section id="recommendations" class="recommendation-panel" aria-label="今日推荐">
+          <div class="drop-stage">
+            <button id="water-discover" class="water-discover" aria-label="泛起波纹，换一批推荐" title="点击水面换一批推荐"></button>
+            <div id="water-ripples" class="water-ripples" aria-hidden="true"></div>
+            <img class="muelsyse-portrait" src="/assets/muelsyse-water.png" alt="" aria-hidden="true" />
+            <svg class="water-art" viewBox="0 0 600 700" preserveAspectRatio="none" aria-hidden="true">
+              <defs><clipPath id="dropClip"><path d="M291 4C275 118 164 213 81 361C-10 523 51 663 237 682C413 704 546 641 571 518C597 389 458 229 373 130C328 77 303 39 291 4Z" /></clipPath></defs>
+              <path d="M291 4C275 118 164 213 81 361C-10 523 51 663 237 682C413 704 546 641 571 518C597 389 458 229 373 130C328 77 303 39 291 4Z" fill="url(#waterBody)" stroke="#b5ba8c" stroke-width="2" />
+              <path d="M291 15C273 128 169 221 89 366C1 522 60 654 239 674C411 695 537 635 562 517C588 393 451 236 367 136C326 84 304 49 291 15Z" fill="none" stroke="#ffffe9" stroke-width="1.5" opacity=".85" />
+              <g clip-path="url(#dropClip)" fill="none" stroke="#fcf7d7"><ellipse cx="309" cy="434" rx="244" ry="226" opacity=".42"/><ellipse cx="309" cy="440" rx="206" ry="189" opacity=".5"/><ellipse cx="309" cy="446" rx="169" ry="156" opacity=".7"/><path d="M38 471C70 638 387 712 542 579" opacity=".55"/><path d="M45 488C91 651 376 707 528 602" opacity=".55"/></g>
+              <g class="water-leaves" fill="url(#leafBody)" stroke="#edf0d8" stroke-width="1"><path d="M128 341Q144 287 187 265Q178 316 128 341Z"/><path d="M436 651Q484 605 495 565Q449 587 436 651Z"/><path d="M435 651Q385 660 373 633Q405 626 435 651Z"/></g>
+            </svg>
+            <div class="drop-heading"><h2>今日推荐</h2><p>点击水面，换一批推荐</p><div class="rec-navigation"><button id="rec-previous" aria-label="上一批推荐"><svg class="ui-icon"><use href="#i-left" /></svg></button><span id="rec-position"></span><button id="rec-next" aria-label="下一批推荐"><svg class="ui-icon"><use href="#i-right" /></svg></button></div></div>
+            <div id="recommendation-list" class="track-list" aria-label="推荐歌曲"></div>
+            <div id="error-banner" class="error-banner" role="status" hidden></div>
+          </div>
+          <details id="wanted" class="wanted-callout"><summary><svg class="ui-icon"><use href="#i-download" /></svg>下载动态<svg class="ui-icon"><use href="#i-right" /></svg></summary><div id="wanted-list" class="wanted-list" role="status"></div></details>
+        </section>
+      </div>
+    </main>
+  </div>
+  <footer class="player-bar">
+    <div class="now-playing"><div id="player-art" class="player-art"></div><div class="now-playing-meta"><span id="playback-status" class="now-label" role="status">准备就绪</span><strong id="player-title">让音乐，从一片叶子开始</strong><small id="player-artist">选择叶片播放</small></div><button id="tree-player-like" class="player-heart" aria-label="喜欢当前推荐" hidden><svg class="ui-icon"><use href="#i-heart" /></svg></button></div>
+    <div class="player-center"><div class="player-controls"><button id="previous-button" class="player-nav-button" aria-label="上一首" disabled><svg class="ui-icon"><use href="#i-previous" /></svg></button><button id="play-toggle" class="play-toggle" aria-label="播放" disabled>▶</button><button id="next-button" class="player-nav-button" aria-label="下一首" disabled><svg class="ui-icon"><use href="#i-next" /></svg></button></div><div class="player-progress"><span id="current-time" class="time-label">0:00</span><div id="progress-track" class="progress-track" role="slider" aria-label="播放进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" tabindex="0"><div id="progress-fill" class="progress-fill"></div><div id="progress-thumb" class="progress-thumb"></div></div><span id="duration-time" class="time-label">0:00</span></div></div>
+    <div class="player-right"><label class="volume-control"><svg class="ui-icon" aria-hidden="true"><use href="#i-volume" /></svg><span class="sr-only">音量</span><input id="volume-control" type="range" min="0" max="1" step="0.05" value="1" aria-label="音量" /></label><button id="lyrics-toggle" class="lyrics-toggle" aria-controls="lyrics-panel" aria-expanded="false" disabled><svg class="ui-icon"><use href="#i-lyrics" /></svg>歌词</button></div><audio id="audio-player" preload="metadata"></audio>
+  </footer>
+  <aside id="lyrics-panel" class="lyrics-panel" hidden aria-label="歌词"><div class="lyrics-heading"><div><span class="section-kicker">NOW PLAYING</span><h2>歌词</h2></div><button id="lyrics-close" class="icon-button" aria-label="关闭歌词">×</button></div><div id="lyrics-content" class="lyrics-content"><span class="muted">播放歌曲后加载歌词</span></div></aside>
+  <aside id="settings-panel" class="settings-panel" hidden aria-label="设置"><div class="settings-heading"><div><span class="section-kicker">PREFERENCES</span><h2>设置</h2></div><button id="settings-close" class="icon-button" aria-label="关闭设置">×</button></div><div class="settings-content"><div class="settings-group"><label>音乐库位置</label><div id="music-library-status" class="settings-status"></div><div class="settings-path-row"><input id="music-library-path" type="text" readonly aria-label="音乐库路径" /></div><div class="settings-path-source"><span id="music-library-source" class="muted"></span></div><div class="settings-actions"><button id="music-library-browse" class="secondary-button">选择文件夹</button><button id="music-library-open" class="secondary-button">打开文件夹</button><button id="music-library-reset" class="text-button">恢复默认</button></div><p class="settings-hint">更改位置只改变使用的目录，不会移动、复制或删除歌曲。</p></div><div class="settings-group"><label>曲库显示方式</label><div class="settings-choice" role="radiogroup" aria-label="曲库显示方式"><label class="settings-option"><input type="radio" name="display-mode" value="raw" /><span class="settings-option-body"><strong>传统模式</strong><small>保留原始文件名和歌手</small></span></label><label class="settings-option"><input type="radio" name="display-mode" value="canonical" /><span class="settings-option-body"><strong>正则模式 <span class="beta-badge">Beta</span></strong><small>使用解析后的歌名与歌手</small></span></label></div><p id="display-mode-note" class="settings-note" role="status"></p></div><div class="settings-group"><a class="soft-button" href="/index.html">返回经典界面</a><p class="settings-hint">音乐树预览与经典界面共享音乐库、播放和收藏服务。</p></div></div></aside>
+  <div class="tree-service-status" hidden><span id="last-updated"></span><span id="today-eyebrow"></span><span id="provider-summary"></span><span id="recommendation-count"></span><span id="hero-count"></span><span id="liked-count"></span><span id="local-count"></span><span id="wanted-count"></span><button id="play-first">开始听推荐</button></div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/music-tree-ui.js" defer></script>
+  <script src="/app.js" defer></script>
+</body>
+</html>

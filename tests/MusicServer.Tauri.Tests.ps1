@@ -120,7 +120,7 @@ Describe 'MusicServer Tauri desktop shell' {
         (@($capability.permissions) -contains 'dialog:allow-open') | Should Be $true
     }
 
-    It 'minimizes to the tray instead of hiding a window that cannot come back' {
+    It 'keeps taskbar and tray together when minimized' {
         $main = Get-Content -LiteralPath (Join-Path $ProjectRoot 'src-tauri\src\main.rs') -Raw
         $cargo = Get-Content -LiteralPath (Join-Path $ProjectRoot 'src-tauri\Cargo.toml') -Raw
 
@@ -129,12 +129,9 @@ Describe 'MusicServer Tauri desktop shell' {
         $main | Should Match 'TrayIconBuilder::with_id\(TRAY_ID\)'
         $main | Should Match 'on_tray_icon_event'
         $main | Should Match 'restore_main_window'
-        # Windows reports a minimize as a Resized event, so the window state has to
-        # be read from the window instead of inferred from the event.
-        $main | Should Match 'tauri::WindowEvent::Resized\(_\)'
-        $main | Should Match 'is_minimized\(\)'
-        # Hiding is allowed only while a tray icon exists to bring the window back.
-        $main | Should Match 'tray_by_id\(TRAY_ID\)'
+        $main | Should Not Match 'window\.hide\(\)'
+        $main | Should Not Match 'should_hide_to_tray'
+        $main | Should Match 'window\.unminimize\(\)'
         # Closing the window still exits and stops this APP's owned service tree:
         # minimize-to-tray must not turn the close button into a second hide.
         $main | Should Match 'tauri::WindowEvent::Destroyed'

@@ -63,9 +63,8 @@ $WorkerId = "wanted_worker_$([Environment]::MachineName)_$PID"
 Write-WorkerLog "worker 启动：id=$WorkerId poll=${PollSeconds}s app_home=$($Config.AppHome) log=$WorkerLog" -Color DarkGray
 $ActiveQueueStates = @('RESOLVING','DOWNLOADING','VALIDATING')
 
-# Hardened helpers: wanted_queue (SQLite) is the concurrency authority. The legacy
-# JSON state stays the UI-facing record (music_api reads/writes it); every queue
-# transition below is mirrored into wanted_queue with a revision-guarded CAS so a
+# wanted_queue (SQLite) is the sole concurrency and UI state authority. Every
+# transition below uses a revision-guarded CAS so a
 # crashed/stale worker can never overwrite a cancel or steal a live lease.
 function Test-OwnsActiveLease {
     param([psobject]$Wanted)
@@ -214,6 +213,7 @@ function Set-QueueState {
     $Wanted.last_error = $Error
     $Wanted.next_retry_at = if ($NextRetryAt) { $NextRetryAt } else { $null }
     $Wanted.revision = [int]$result.Revision
+    Write-WorkerLog ("[transition] worker={0} track={1} from={2} to={3} attempt={4}/{5} error={6} retry_at={7} revision={8}" -f $WorkerId,$Wanted.track_id,$live.state,$State,$attemptCount,$Wanted.max_attempts,$Error,$NextRetryAt,$Wanted.revision)
     Write-MusicServerEventDb -TrackId $Wanted.track_id -EventType 'STATE_TRANSITION' -FromState ([string]$live.state) -ToState $State -Attempt $attemptCount -ErrorType $Error
     return $true
 }
@@ -442,7 +442,7 @@ function Process-WantedTrack {
     if ($ranked.Count -eq 0) {
         [void](Increment-WantedAttempt -Wanted $Wanted)
         $blockedUntil = Get-BilibiliBlockedUntil
-        if ($blockedUntil) {
+        if ($blockedUntil -and [int]$Wanted.attempts -lt [int]$Wanted.max_attempts) {
             [void](Set-QueueState -Wanted $Wanted -State 'RETRY_WAIT' -Error 'BILIBILI_CIRCUIT_OPEN' -NextRetryAt $blockedUntil)
             Set-CanonicalTrackStatusForWantedDb -TrackId $track.id -WorkerId $WorkerId -WantedState 'RETRY_WAIT' -Status 'RETRY_WAIT' | Out-Null
             Write-WorkerLog "  [queue] $($track.title)：无候选，Bilibili 熔断中，$($blockedUntil) 后重试。" -Color DarkYellow
@@ -458,103 +458,119 @@ function Process-WantedTrack {
         return
     }
 
-    foreach ($entry in $ranked) {
-        if (Test-WantedCancellation -Wanted $Wanted) { Complete-WantedCancellation -Wanted $Wanted; return }
-        if (-not (Test-OwnsActiveLease -Wanted $Wanted)) { return }
+    $searchedFallback = (@(Get-DirectCandidates -Track $track).Count -eq 0)
+    $attemptedUrls = @{}
+    $lastFailure = 'ALL_CANDIDATES_FAILED'
+    $blockedProvider = ''
+    do {
+        foreach ($entry in $ranked) {
+            if (Test-WantedCancellation -Wanted $Wanted) { Complete-WantedCancellation -Wanted $Wanted; return }
+            if (-not (Test-OwnsActiveLease -Wanted $Wanted)) { return }
 
-        $candidate = $entry.Candidate
-        $score = $entry.Score
-        $Wanted.selected_candidate = $candidate
-        Write-WorkerLog "  [candidate] $($track.title)：provider=$($candidate.provider) identity=$($score.identity_confidence) duration_diff=$($score.duration_diff) url=$($candidate.url)" -Color DarkGray
-        # A NetEase id discovered by provider search is worth keeping: later
-        # attempts, lyrics and recommendation assembly reuse it.
-        $discoveredNeteaseId = ''
-        if ($candidate.PSObject.Properties['metadata'] -and $candidate.metadata -and $candidate.metadata.PSObject.Properties['netease_id']) {
-            $discoveredNeteaseId = [string]$candidate.metadata.netease_id
-        }
-        if ($candidate.provider -eq 'netease' -and $discoveredNeteaseId) {
-            [void](Add-CanonicalTrackIdentifierDb -TrackId $track.id -Type 'netease' -Value $discoveredNeteaseId)
-        }
-        Write-MusicServerEventDb -TrackId $track.id -Provider $candidate.provider -EventType 'CANDIDATE_SELECTED' -Attempt ([int]$Wanted.attempts) -Message "score=$($score.score); identity=$($score.identity_confidence); duration_diff=$($score.duration_diff)"
-        if ($candidate.provider -eq 'local') {
-            Bind-LocalTrack -Track $track -Wanted $Wanted -Path $candidate.url
-            return
-        }
-
-        if (-not (Set-QueueState -Wanted $Wanted -State 'DOWNLOADING')) { Complete-WantedCancellation -Wanted $Wanted; return }
-        Set-CanonicalTrackStatusForWantedDb -TrackId $track.id -WorkerId $WorkerId -WantedState 'DOWNLOADING' -Status 'DOWNLOADING' | Out-Null
-        if (Test-WantedCancellation -Wanted $Wanted) { Complete-WantedCancellation -Wanted $Wanted; return }
-        if (-not (Test-OwnsActiveLease -Wanted $Wanted)) { return }
-        [void](Reassert-WantedLease -Wanted $Wanted)
-
-        if ($candidate.provider -eq 'netease') {
-            $download = Invoke-NeteaseDownload -Config $Config -Track $track -Candidate $candidate
-        } else {
-            $download = Invoke-BilibiliDownload -Config $Config -Track $track -Candidate $candidate
-        }
-        if (Test-WantedCancellation -Wanted $Wanted) {
-            Complete-WantedCancellation -Wanted $Wanted -TemporaryPath ([string]$download.Path)
-            return
-        }
-        if ($download.Success -and -not (Test-OwnsActiveLease -Wanted $Wanted)) {
-            Remove-Item -LiteralPath ([string]$download.Path) -Force -ErrorAction SilentlyContinue
-            return
-        }
-
-        if (-not $download.Success) {
-            if ($candidate.provider -eq 'netease') {
-                # NetEase miss (VIP / not available) is a normal fall-through, not a
-                # circuit event: log it and try the next candidate (Bilibili).
-                Write-MusicServerEventDb -TrackId $track.id -Provider 'netease' -EventType 'DOWNLOAD_FAILED' -Attempt ([int]$Wanted.attempts) -ErrorType $download.Error
-                Write-WorkerLog "  [download] netease 未命中（$($download.Error)）：$($track.title)，尝试下一个候选。" -Color DarkGray
-                continue
+            $candidate = $entry.Candidate
+            if ($attemptedUrls.ContainsKey([string]$candidate.url)) { continue }
+            $attemptedUrls[[string]$candidate.url] = $true
+            $score = $entry.Score
+            $Wanted.selected_candidate = $candidate
+            Write-WorkerLog "  [candidate] worker=$WorkerId track=$($track.id) title=$($track.title) provider=$($candidate.provider) identity=$($score.identity_confidence) duration_diff=$($score.duration_diff)" -Color DarkGray
+            # A NetEase id discovered by provider search is worth keeping: later
+            # attempts, lyrics and recommendation assembly reuse it.
+            $discoveredNeteaseId = ''
+            if ($candidate.PSObject.Properties['metadata'] -and $candidate.metadata -and $candidate.metadata.PSObject.Properties['netease_id']) {
+                $discoveredNeteaseId = [string]$candidate.metadata.netease_id
             }
-            if ($download.Blocked) {
-                [void](Increment-WantedAttempt -Wanted $Wanted)
-                [void](Set-QueueState -Wanted $Wanted -State 'RETRY_WAIT' -Error $download.Error -NextRetryAt (Get-RetryTime -Wanted $Wanted -Provider 'bilibili_download'))
-                Set-CanonicalTrackStatusForWantedDb -TrackId $track.id -WorkerId $WorkerId -WantedState 'RETRY_WAIT' -Status 'RETRY_WAIT' | Out-Null
-                Write-WorkerLog "  [download] $($track.title)：$($download.Error)，等待重试。" -Color DarkYellow
+            if ($candidate.provider -eq 'netease' -and $discoveredNeteaseId) {
+                [void](Add-CanonicalTrackIdentifierDb -TrackId $track.id -Type 'netease' -Value $discoveredNeteaseId)
+            }
+            Write-MusicServerEventDb -TrackId $track.id -Provider $candidate.provider -EventType 'CANDIDATE_SELECTED' -Attempt ([int]$Wanted.attempts) -Message "score=$($score.score); identity=$($score.identity_confidence); duration_diff=$($score.duration_diff)"
+            if ($candidate.provider -eq 'local') {
+                Bind-LocalTrack -Track $track -Wanted $Wanted -Path $candidate.url
                 return
             }
-            Write-MusicServerEventDb -TrackId $track.id -Provider $candidate.provider -EventType 'DOWNLOAD_FAILED' -Attempt ([int]$Wanted.attempts) -ErrorType $download.Error
-            Write-WorkerLog "  [download] $($candidate.provider) 下载失败（$($download.Error)）：$($track.title)" -Color DarkYellow
-            continue
-        }
 
-        if (-not (Set-QueueState -Wanted $Wanted -State 'VALIDATING')) {
-            Complete-WantedCancellation -Wanted $Wanted -TemporaryPath $download.Path
+            if (-not (Set-QueueState -Wanted $Wanted -State 'DOWNLOADING')) { Complete-WantedCancellation -Wanted $Wanted; return }
+            Set-CanonicalTrackStatusForWantedDb -TrackId $track.id -WorkerId $WorkerId -WantedState 'DOWNLOADING' -Status 'DOWNLOADING' | Out-Null
+            if (Test-WantedCancellation -Wanted $Wanted) { Complete-WantedCancellation -Wanted $Wanted; return }
+            if (-not (Test-OwnsActiveLease -Wanted $Wanted)) { return }
+            [void](Reassert-WantedLease -Wanted $Wanted)
+
+            if ($candidate.provider -eq 'netease') {
+                $download = Invoke-NeteaseDownload -Config $Config -Track $track -Candidate $candidate
+            } else {
+                $download = Invoke-BilibiliDownload -Config $Config -Track $track -Candidate $candidate
+            }
+            if (Test-WantedCancellation -Wanted $Wanted) {
+                Complete-WantedCancellation -Wanted $Wanted -TemporaryPath ([string]$download.Path)
+                return
+            }
+            if ($download.Success -and -not (Test-OwnsActiveLease -Wanted $Wanted)) {
+                Remove-Item -LiteralPath ([string]$download.Path) -Force -ErrorAction SilentlyContinue
+                return
+            }
+
+            if (-not $download.Success) {
+                $lastFailure = [string]$download.Error
+                if ($candidate.provider -eq 'netease') {
+                    # NetEase miss (VIP / not available) is a normal fall-through, not a
+                    # circuit event: log it and try the next candidate (Bilibili).
+                    Write-MusicServerEventDb -TrackId $track.id -Provider 'netease' -EventType 'DOWNLOAD_FAILED' -Attempt ([int]$Wanted.attempts) -ErrorType $download.Error
+                    Write-WorkerLog "  [download] netease 未命中（$($download.Error)）：$($track.title)，尝试下一个候选。" -Color DarkGray
+                    continue
+                }
+                if ($download.Blocked) {
+                    $blockedProvider = 'bilibili_download'
+                    Write-MusicServerEventDb -TrackId $track.id -Provider $candidate.provider -EventType 'DOWNLOAD_FAILED' -Attempt ([int]$Wanted.attempts) -ErrorType $download.Error
+                    Write-WorkerLog "[fallback] worker=$WorkerId track=$($track.id) provider=$($candidate.provider) reason=$($download.Error) action=try_other_source"
+                    continue
+                }
+                Write-MusicServerEventDb -TrackId $track.id -Provider $candidate.provider -EventType 'DOWNLOAD_FAILED' -Attempt ([int]$Wanted.attempts) -ErrorType $download.Error
+                Write-WorkerLog "  [download] $($candidate.provider) 下载失败（$($download.Error)）：$($track.title)" -Color DarkYellow
+                continue
+            }
+
+            if (-not (Set-QueueState -Wanted $Wanted -State 'VALIDATING')) {
+                Complete-WantedCancellation -Wanted $Wanted -TemporaryPath $download.Path
+                return
+            }
+            Set-CanonicalTrackStatusForWantedDb -TrackId $track.id -WorkerId $WorkerId -WantedState 'VALIDATING' -Status 'VALIDATING' | Out-Null
+            if (-not (Test-OwnsActiveLease -Wanted $Wanted)) { Remove-Item -LiteralPath $download.Path -Force -ErrorAction SilentlyContinue; return }
+            [void](Reassert-WantedLease -Wanted $Wanted)
+            $validation = Validate-DownloadedCandidate -Config $Config -Track $track -Path $download.Path
+            Write-MusicServerEventDb -TrackId $track.id -Provider $candidate.provider -EventType 'VALIDATION' -Result $validation.Reason -Message "duration=$($validation.Duration); expected=$($track.duration); diff=$($validation.DurationDiff); allowed=$($validation.AllowedDiff)"
+
+            if (Test-WantedCancellation -Wanted $Wanted) {
+                Complete-WantedCancellation -Wanted $Wanted -TemporaryPath $download.Path
+                return
+            }
+            if (-not (Test-OwnsActiveLease -Wanted $Wanted)) { Remove-Item -LiteralPath $download.Path -Force -ErrorAction SilentlyContinue; return }
+            if (-not $validation.Valid) {
+                Remove-Item -LiteralPath $download.Path -Force -ErrorAction SilentlyContinue
+                Write-WorkerLog "  [validate] $($track.title)：校验未通过（$($validation.Reason)），丢弃本次下载。" -Color DarkYellow
+                $lastFailure = [string]$validation.Reason
+                continue
+            }
+            Complete-DownloadedTrack -Track $track -Wanted $Wanted -Path $download.Path -Validation $validation -Candidate $candidate -Score $score
+            Write-WorkerLog "  [done] $($track.title) - $($track.artist)：已下载并本地化（$($candidate.provider)）-> $($download.Path)" -Color Green
             return
         }
-        Set-CanonicalTrackStatusForWantedDb -TrackId $track.id -WorkerId $WorkerId -WantedState 'VALIDATING' -Status 'VALIDATING' | Out-Null
-        if (-not (Test-OwnsActiveLease -Wanted $Wanted)) { Remove-Item -LiteralPath $download.Path -Force -ErrorAction SilentlyContinue; return }
+
+        if ($searchedFallback) { break }
+        $searchedFallback = $true
+        if (Test-WantedCancellation -Wanted $Wanted) { Complete-WantedCancellation -Wanted $Wanted; return }
+        if (-not (Test-OwnsActiveLease -Wanted $Wanted)) { return }
+        Write-WorkerLog "[fallback] worker=$WorkerId track=$($track.id) from=known_candidates to=bilibili_search reason=$lastFailure"
         [void](Reassert-WantedLease -Wanted $Wanted)
-        $validation = Validate-DownloadedCandidate -Config $Config -Track $track -Path $download.Path
-        Write-MusicServerEventDb -TrackId $track.id -Provider $candidate.provider -EventType 'VALIDATION' -Result $validation.Reason -Message "duration=$($validation.Duration); expected=$($track.duration); diff=$($validation.DurationDiff); allowed=$($validation.AllowedDiff)"
-
-        if (Test-WantedCancellation -Wanted $Wanted) {
-            Complete-WantedCancellation -Wanted $Wanted -TemporaryPath $download.Path
-            return
-        }
-        if (-not (Test-OwnsActiveLease -Wanted $Wanted)) { Remove-Item -LiteralPath $download.Path -Force -ErrorAction SilentlyContinue; return }
-        if (-not $validation.Valid) {
-            Remove-Item -LiteralPath $download.Path -Force -ErrorAction SilentlyContinue
-            Write-WorkerLog "  [validate] $($track.title)：校验未通过（$($validation.Reason)），丢弃本次下载。" -Color DarkYellow
-            if ($validation.Reason -eq 'WRONG_DURATION') { continue }
-            break
-        }
-        Complete-DownloadedTrack -Track $track -Wanted $Wanted -Path $download.Path -Validation $validation -Candidate $candidate -Score $score
-        Write-WorkerLog "  [done] $($track.title) - $($track.artist)：已下载并本地化（$($candidate.provider)）-> $($download.Path)" -Color Green
-        return
-    }
+        $ranked = @(Resolve-DownloadCandidates -Config $Config -Track $track -SearchFallbackOnly)
+    } while ($ranked.Count -gt 0)
 
     if (Test-WantedCancellation -Wanted $Wanted) { Complete-WantedCancellation -Wanted $Wanted; return }
     if (-not (Test-OwnsActiveLease -Wanted $Wanted)) { return }
     [void](Increment-WantedAttempt -Wanted $Wanted)
     if ([int]$Wanted.attempts -ge [int]$Wanted.max_attempts) {
-        [void](Set-QueueState -Wanted $Wanted -State 'UNAVAILABLE' -Error 'ALL_CANDIDATES_FAILED')
+        [void](Set-QueueState -Wanted $Wanted -State 'UNAVAILABLE' -Error $lastFailure)
         Set-CanonicalTrackStatusForWantedDb -TrackId $track.id -WorkerId $WorkerId -WantedState 'UNAVAILABLE' -Status 'UNAVAILABLE' | Out-Null
     } else {
-        [void](Set-QueueState -Wanted $Wanted -State 'RETRY_WAIT' -Error 'ALL_CANDIDATES_FAILED' -NextRetryAt (Get-RetryTime -Wanted $Wanted))
+        [void](Set-QueueState -Wanted $Wanted -State 'RETRY_WAIT' -Error $lastFailure -NextRetryAt (Get-RetryTime -Wanted $Wanted -Provider $blockedProvider))
         Set-CanonicalTrackStatusForWantedDb -TrackId $track.id -WorkerId $WorkerId -WantedState 'RETRY_WAIT' -Status 'RETRY_WAIT' | Out-Null
     }
 }
@@ -602,7 +618,21 @@ function Invoke-WorkerPass {
         return
     }
     Write-WorkerLog "[$(Get-Date -Format 'HH:mm:ss')] 处理 Wanted Queue：$($selected.Count) 条（worker=$WorkerId）" -Color Cyan
-    foreach ($wanted in $selected) { Process-WantedTrack -Wanted $wanted }
+    foreach ($wanted in $selected) {
+        $clock = [Diagnostics.Stopwatch]::StartNew()
+        try { Process-WantedTrack -Wanted $wanted } catch {
+            Write-WorkerLog "[failed] worker=$WorkerId track=$($wanted.track_id) stage=$($wanted.state) exception=$($_.Exception.GetType().Name) message=$($_.Exception.Message)"
+            if (Test-OwnsActiveLease -Wanted $wanted) {
+                [void](Increment-WantedAttempt -Wanted $wanted)
+                $failedState = if ([int]$wanted.attempts -ge [int]$wanted.max_attempts) { 'UNAVAILABLE' } else { 'RETRY_WAIT' }
+                $retry = if ($failedState -eq 'RETRY_WAIT') { Get-RetryTime -Wanted $wanted } else { '' }
+                [void](Set-QueueState -Wanted $wanted -State $failedState -Error 'WORKER_EXCEPTION' -NextRetryAt $retry)
+                Set-CanonicalTrackStatusForWantedDb -TrackId $wanted.track_id -WorkerId $WorkerId -WantedState $failedState -Status $failedState | Out-Null
+            }
+        } finally {
+            Write-WorkerLog "[processed] worker=$WorkerId track=$($wanted.track_id) state=$($wanted.state) elapsed_ms=$($clock.ElapsedMilliseconds)"
+        }
+    }
 }
 
 try {

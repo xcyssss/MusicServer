@@ -843,6 +843,34 @@ function Split-LocalArtistNames {
         Where-Object { $_.Length -ge 2 })
 }
 
+function Select-DiverseRemoteRecommendations {
+    # Input is already taste-ranked. Avoid adjacent shared singers without losing
+    # the ranking or manufacturing candidates when the pool is small.
+    param([AllowEmptyCollection()][object[]]$Candidates = @(), [int]$Count = 20, [int]$MaxPerArtist = 5)
+    if ($Count -le 0 -or $MaxPerArtist -le 0) { return @() }
+    $remaining = New-Object System.Collections.ArrayList
+    $seen = @{}
+    foreach ($candidate in $Candidates) {
+        $key = Get-CanonicalTrackId -Title ([string]$candidate.Title) -Artist ([string]$candidate.Artist)
+        if ($seen.ContainsKey($key)) { continue }
+        $seen[$key] = $true
+        $credits = @([string]$candidate.Artist -split '[,，、/＆&×;；]' | ForEach-Object { Normalize-MusicText $_ } | Where-Object { $_ } | Select-Object -Unique)
+        [void]$remaining.Add([pscustomobject]@{ Item=$candidate; Credits=$credits })
+    }
+    $counts = @{}; $previous = @(); $selected = @()
+    while ($remaining.Count -gt 0 -and $selected.Count -lt $Count) {
+        $eligible = @($remaining | Where-Object { $row=$_; @($row.Credits | Where-Object { $counts.ContainsKey($_) -and $counts[$_] -ge $MaxPerArtist }).Count -eq 0 })
+        if ($eligible.Count -eq 0) { break }
+        $choice = @($eligible | Where-Object { @($_.Credits | Where-Object { $previous -contains $_ }).Count -eq 0 } | Select-Object -First 1)
+        $row = if ($choice.Count) { $choice[0] } else { $eligible[0] }
+        $selected += $row.Item
+        foreach ($credit in $row.Credits) { if (-not $counts.ContainsKey($credit)) { $counts[$credit]=0 }; $counts[$credit]++ }
+        $previous = $row.Credits
+        [void]$remaining.Remove($row)
+    }
+    return @($selected)
+}
+
 function Select-LocalRecommendationTracks {
     <#
     .SYNOPSIS

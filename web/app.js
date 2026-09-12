@@ -627,8 +627,8 @@ function showToast(message) {
 
 function filteredLibrary() {
   const query = state.searchQuery;
-  if (!query) return state.library;
-  return state.library.filter((item) => item.searchText.includes(query));
+  const items = query ? state.library.filter((item) => item.searchText.includes(query)) : state.library;
+  return globalThis.MusicTreeUI ? globalThis.MusicTreeUI.filterLibrary(items) : items;
 }
 
 // Sort displayed library items. 'added' sorts newest-added first using the
@@ -726,6 +726,13 @@ function renderLibrary() {
   $('#library-more').textContent = `显示更多（${visible.length} / ${matches.length}）`;
   $('#library-nav-count').textContent = state.library.length;
   $('#local-count').textContent = state.library.length;
+  if (globalThis.MusicTreeUI) {
+    globalThis.MusicTreeUI.renderLibrary({ items: matches, total: state.library.length,
+      searchQuery: state.searchQuery, librarySort: state.librarySort, displayMode: state.displayMode,
+      currentKey: state.currentKey, paused: $('#audio-player').paused, display: formatTrackDisplay, keyOf,
+      refresh: () => { renderLibrary(); updateNavigationButtons(); } });
+    return;
+  }
   if (!state.library.length) { list._sig = null; list.innerHTML = '<div class="empty-state">曲库还是空的。<br />从右侧推荐开始，点红心收藏喜欢的音乐。</div>'; return; }
   if (!visible.length) { list._sig = null; list.innerHTML = '<div class="empty-state">没有找到匹配的歌曲。<br />试试歌手名，或清空搜索。</div>'; return; }
   const signature = JSON.stringify(visible.map((item) => [keyOf(item), state.currentKey === keyOf(item), $('#audio-player').paused, item.starred, item.source, item.title, item.artist, item.raw_artist, item.album, item.duration, state.displayMode]));
@@ -750,6 +757,18 @@ function renderLibrary() {
 // The download panel reflects the whole wanted queue, not just today's
 // recommendations: a failed or waiting download must stay visible even after
 // the daily list is regenerated (the queue entry itself is never dropped).
+function downloadExplanation(entry) {
+  const reasons = { HTTP_412:'来源限流，冷却后重试', CIRCUIT_OPEN:'来源暂时冷却', BILIBILI_CIRCUIT_OPEN:'Bilibili 暂时冷却', NETEASE_NOT_AVAILABLE:'网易云未提供完整音源', NETEASE_REQUEST_FAILED:'网易云请求失败', NO_CANDIDATE:'未找到身份匹配的音源', ALL_CANDIDATES_FAILED:'本轮音源均未通过', WRONG_DURATION:'音源时长不符，已拒绝入库', WORKER_EXCEPTION:'处理异常，详见下载日志', DOWNLOAD_FAILED:'下载失败', NETEASE_DOWNLOAD_EMPTY:'音源为空或不完整' };
+  const reason = reasons[entry.last_error] || entry.last_error || '';
+  const attempts = Number(entry.attempt_count ?? entry.attempts ?? 0);
+  const limit = Number(entry.max_attempts || 5);
+  const parts = [reason, attempts > 0 ? `尝试 ${attempts}/${limit}` : ''];
+  const retry = Date.parse(entry.next_retry_at || '');
+  if (entry.state === 'RETRY_WAIT' && Number.isFinite(retry)) parts.push(`下次 ${new Date(retry).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}`);
+  if (entry.state === 'UNAVAILABLE') parts.push('已停止自动重试，可手动重试');
+  return parts.filter(Boolean).join(' · ');
+}
+
 function wantedQueueEntries() {
   const byId = new Map();
   for (const entry of (Array.isArray(state.wanted) ? state.wanted : [])) {
@@ -782,8 +801,14 @@ function renderRecommendations() {
     const label = escapeHtml([entry.title, entry.artist].filter(Boolean).join(' · ') || entry.track_id || '未知曲目');
     const badge = `<span class="status-badge ${statusClass(entry.state)}">${escapeHtml(labels[entry.state] || entry.state)}</span>`;
     const retry = retryable ? `<button class="text-button wanted-retry" type="button" data-action="wanted-retry" data-track-id="${escapeHtml(entry.track_id || '')}">重试</button>` : '';
-    return `<div class="wanted-row"><span>${label}</span>${badge}${retry}</div>`;
+    return `<div class="wanted-row"><span>${label}<small class="download-explanation">${escapeHtml(downloadExplanation(entry))}</small></span>${badge}${retry}</div>`;
   }).join('') : '当前没有待下载或等待重试的歌曲。';
+  if (globalThis.MusicTreeUI) {
+    globalThis.MusicTreeUI.renderRecommendations({ items: state.items, display: formatTrackDisplay, keyOf,
+      currentKey: state.currentKey, paused: $('#audio-player').paused, pendingLikes, pendingDislikes,
+      likeCurrent: () => { const item = state.items.find((entry) => keyOf(entry) === state.currentKey); if (item) toggleLike(item); } });
+    return;
+  }
   if (!state.items.length) { list._sig = null; list.innerHTML = '<div class="empty-state">今天的推荐还在准备中。<br />先从音乐库选一首，或稍后刷新。</div>'; return; }
   const signature = JSON.stringify(state.items.map((item) => [item.track_id, item.liked, item.disliked, itemStatus(item), state.currentKey === keyOf(item), $('#audio-player').paused, item.title, item.artist, item.reason, item.duration, item.year, state.displayMode, pendingLikes.has(item.track_id), pendingDislikes.has(item.track_id)]));
   if (list._sig === signature && !list._dirty) return;
@@ -1106,6 +1131,7 @@ async function playItem(item, collection = 'library') {
 
 function renderPlayerArt(item) {
   if (!item) return;
+  if (globalThis.MusicTreeUI) { globalThis.MusicTreeUI.playerArt(item); return; }
   const art = $('#player-art');
   if (!art) return;
   const cover = item.cover_url || item.recommendation?.cover_url || item.track?.cover_url;
@@ -1468,6 +1494,7 @@ const playToggle = $('#play-toggle');
 function setPlayIcon(playing) {
   if (!playToggle) return;
   playToggle.textContent = playing ? DEFAULT_PAUSE_ICON : DEFAULT_PLAY_ICON;
+  globalThis.MusicTreeUI?.setPlayIcon(playing);
   playToggle.setAttribute('aria-label', playing ? '暂停' : '播放');
 }
 
@@ -1577,6 +1604,7 @@ try {
 // section headings scrollable without requiring the user to hover exactly on
 // the thin track-list area.
 function forwardScroll(event) {
+  if (globalThis.MusicTreeUI) return;
   const panel = event.currentTarget;
   const scroller = panel.querySelector('.track-list');
   if (!scroller) return;

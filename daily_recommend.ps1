@@ -500,14 +500,8 @@ if ($bucketsTotal -gt 0) {
 }
 
 $ranked = @($candidateMap.Values | Sort-Object @{Expression = {$_.Score}; Descending = $true}, @{Expression = { Get-Random }})
-$recos = @(); $artists = @{}
-foreach ($candidate in $ranked) {
-    $artistKey = Normalize-MusicText (($candidate.Artist -split '[,，、]')[0])
-    if ($artistKey -and $artists.ContainsKey($artistKey) -and $artists[$artistKey] -ge 5) { continue }
-    $recos += $candidate
-    if ($artistKey) { if ($artists.ContainsKey($artistKey)) { $artists[$artistKey]++ } else { $artists[$artistKey] = 1 } }
-    if ($recos.Count -ge ($Count - @($localPicks).Count)) { break }
-}
+$recos = @(Select-DiverseRemoteRecommendations -Candidates $ranked -Count ([Math]::Max(0, $Count - @($localPicks).Count)))
+Write-MusicServerLog -Path (Join-Path $Config.LogDir 'musicserver-recommendation.log') -Message "[selection] candidates=$($ranked.Count) selected=$($recos.Count) local=$(@($localPicks).Count) target=$Count diversity=credited_artist dislike_penalized=$songsPenalized"
 
 $recommendations = @(); $tracks = @(); $rank = 0
 foreach ($candidate in $recos) {
