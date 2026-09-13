@@ -17,6 +17,23 @@ Describe 'First-use API on an empty installed runtime' {
         @($rows).Count | Should Be 14
         @((Invoke-RestMethod "$script:GuideBase/api/wanted").items).Count | Should Be 0
         (Invoke-WebRequest "$script:GuideBase/onboarding.js" -UseBasicParsing).StatusCode | Should Be 200
+        (Invoke-WebRequest "$script:GuideBase/management.js" -UseBasicParsing).StatusCode | Should Be 200
+        @((Invoke-RestMethod "$script:GuideBase/api/maintenance").components).Count | Should Be 3
+    }
+
+    It 'exports a backup asynchronously through the real proxy and exposes its result' {
+        $job=Invoke-RestMethod "$script:GuideBase/api/maintenance" -Method Post -ContentType 'application/json' -Body '{"operation":"backup"}'
+        $job.id | Should Match '^[a-f0-9]{32}$'
+        $deadline=[DateTime]::UtcNow.AddSeconds(20)
+        do {
+            $status=Invoke-RestMethod "$script:GuideBase/api/maintenance"
+            $found=@($status.jobs | Where-Object { $_.id -eq $job.id })[0]
+            if ($found.state -ne 'RUNNING') { break }
+            Start-Sleep -Milliseconds 300
+        } while ([DateTime]::UtcNow -lt $deadline)
+        $found.state | Should Be DONE
+        @($status.backups).Count | Should BeGreaterThan 0
+        [IO.File]::Exists((Join-Path $found.result_path 'musicserver.db')) | Should Be $true
     }
 
     It 'persists preferences and uses the existing atomic like-to-download contract' {

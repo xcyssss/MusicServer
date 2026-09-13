@@ -345,9 +345,9 @@ function Complete-DownloadedTrack {
     if ($Path -ne $target) {
         if (Test-Path -LiteralPath $target) {
             $stem = [IO.Path]::GetFileNameWithoutExtension($target)
-            $target = Join-Path $Config.MusicDir "$stem [$($Track.id.Substring(6, 8))].mp3"
+            do { $target = Join-Path $Config.MusicDir "$stem [$([Guid]::NewGuid().ToString('N').Substring(0,8))].mp3" } while ([IO.File]::Exists($target))
         }
-        Move-Item -LiteralPath $Path -Destination $target -Force
+        Move-Item -LiteralPath $Path -Destination $target
         $oldLrc = [IO.Path]::ChangeExtension($Path, '.lrc')
         $newLrc = [IO.Path]::ChangeExtension($target, '.lrc')
         if (Test-Path -LiteralPath $oldLrc) { Move-Item -LiteralPath $oldLrc -Destination $newLrc -Force }
@@ -458,7 +458,7 @@ function Process-WantedTrack {
         return
     }
 
-    $searchedFallback = (@(Get-DirectCandidates -Track $track).Count -eq 0)
+    $searchedFallback = (@(Get-DirectCandidates -Track $track).Count -eq 0 -and -not (Get-NeteaseIdFromTrack -Track $track))
     $attemptedUrls = @{}
     $lastFailure = 'ALL_CANDIDATES_FAILED'
     $blockedProvider = ''
@@ -576,6 +576,9 @@ function Process-WantedTrack {
 }
 
 function Invoke-WorkerPass {
+    $freshTools=New-MusicServerConfig -Root $Config.Root -AppHome $Config.AppHome
+    foreach ($tool in @('YtDlp','FFmpeg','FFprobe')) { $Config.$tool=$freshTools.$tool }
+
     # Crash recovery first: reclaim expired leases (lease_expires_epoch < now) and
     # finish queued CANCEL_REQUESTED cleanups before anyone else touches the queue.
     try { Invoke-CrashRecoveryDb | Out-Null } catch {
@@ -586,6 +589,8 @@ function Invoke-WorkerPass {
         Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Wanted Queue 为空。" -ForegroundColor DarkGray
         return
     }
+    $missingTools=@('YtDlp','FFmpeg','FFprobe') | Where-Object { -not [IO.File]::Exists($Config.$_) -and -not (Get-Command $Config.$_ -ErrorAction SilentlyContinue) }
+    if (@($missingTools).Count -gt 0 -and -not $DryRun) { return }
     $selected = @()
     foreach ($wanted in $queue) {
         if ($selected.Count -ge $MaxItems) { break }

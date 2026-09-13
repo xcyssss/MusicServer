@@ -46,6 +46,7 @@ Import-Module (Join-Path $PSScriptRoot 'MusicServer.Database.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.State.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Http.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Onboarding.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Management.psm1') -Force
 $startupPhases['module_imports'] = $startupClock.Elapsed.TotalMilliseconds
 
 $Config = New-MusicServerConfig -Root $Root
@@ -74,6 +75,7 @@ $startupPhases['config_state'] = $startupClock.Elapsed.TotalMilliseconds
 Initialize-MusicServerDatabase -DbPath $DbPath -SqliteExe $SqliteExe
 $startupPhases['database_connect'] = $startupClock.Elapsed.TotalMilliseconds
 Initialize-MusicServerSchema
+Initialize-ManagementSchema
 $startupPhases['schema'] = $startupClock.Elapsed.TotalMilliseconds
 Apply-ConfiguredMusicDir -Config $Config
 Initialize-MusicServerLibrary -Config $Config | Out-Null
@@ -1094,8 +1096,23 @@ while ($true) {
                 Set-OnboardingStateDb @values
                 Write-ApiLog ("[onboarding] preferences updated phase={0}" -f $data.phase)
             }
+            $freshTools=New-MusicServerConfig -Root $Config.Root -AppHome $Config.AppHome
+            foreach ($tool in @('YtDlp','FFmpeg','FFprobe')) { $Config.$tool=$freshTools.$tool }
             $body = Get-OnboardingStateDb -Config $Config
             Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 200 })
+        }
+        elseif ($path -eq '/api/maintenance' -and $method -in @('GET','POST')) {
+            if ($method -eq 'POST') {
+                $data = if ($bodyText) { ConvertFrom-Json -InputObject $bodyText } else { $null }
+                if (-not $data -or $data.operation -notin @('components','diagnostics','backup','health')) {
+                    Send-Json -Context ([pscustomobject]@{Response=$Context.Response;Body=@{error='INVALID_OPERATION'};StatusCode=400})
+                } else {
+                    $jobId=Start-ManagementJob -Config $Config -Operation $data.operation
+                    Send-Json -Context ([pscustomobject]@{Response=$Context.Response;Body=@{id=$jobId};StatusCode=202})
+                }
+            } else {
+                Send-Json -Context ([pscustomobject]@{Response=$Context.Response;Body=(Get-ManagementStatus -Config $Config);StatusCode=200})
+            }
         }
         elseif ($method -eq 'GET' -and $path -eq '/api/settings/display-mode') {
             # Traditional ('raw') is the default, so nothing has to be stored for

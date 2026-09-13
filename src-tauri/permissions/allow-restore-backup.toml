@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-restore-backup"
+description = "Restores a validated local backup after stopping the APP-owned services."
+commands.allow = ["restore_backup"]

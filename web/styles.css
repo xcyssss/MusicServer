@@ -111,3 +111,10 @@ kbd { color:var(--muted); font-size:10px; white-space:nowrap; border:1px solid v
 .tree-page .onboarding-guide { color:#244335; background:linear-gradient(135deg,#fffff2ee,#edf3e0df); border-color:#fffff2; }
 .tree-page .guide-error { color:#8a3b28; }
 @media(max-height:760px) { .onboarding-guide { top:92px; max-height:calc(100dvh - 216px); padding:20px; } .guide-options { margin:15px 0; gap:12px; } .guide-steps { margin:14px 0; } }
+/* Maintenance stays inside the existing settings drawer. */
+.app-care h3 { margin: 0 0 10px; font-size: 17px; }
+.care-component { display: inline-block; padding: 5px 9px; margin: 3px; border: 1px solid #91a88d66; border-radius: 16px; font-size: 12px; }
+.app-care progress { width: 100%; height: 7px; accent-color: #688d58; }
+.app-care select { max-width: 100%; width: 100%; padding: 9px; background: #f5f8eac9; border: 1px solid #91a88d80; border-radius: 10px; color: #203d2a; }
+.app-care [data-care-status] { font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.app-care [data-care-confirm] { padding: 12px; background: #eff4ddc9; border: 1px solid #91a88d80; border-radius: 12px; }

@@ -31,6 +31,36 @@ Describe 'Like download fallback pipeline' {
         $candidate=New-DownloadCandidate -Provider netease -Title 'Known Song' -Artist 'Someone Else' -Duration 200 -Url 'netease:456'
         Test-DownloadCandidateIdentity -Track $track -Candidate $candidate | Should Be $false
     }
+    It 'never searches before trying a known NetEase identity' {
+        $track.download_candidates=@()
+        Mock Search-BilibiliCandidates { throw 'should not search' } -ModuleName MusicServer.Providers
+        $ranked=@(Resolve-DownloadCandidates -Config $Config -Track $track)
+        $ranked.Count | Should Be 1
+        $ranked[0].Candidate.provider | Should Be 'netease'
+        Assert-MockCalled Search-BilibiliCandidates -ModuleName MusicServer.Providers -Times 0 -Exactly -Scope It
+    }
+    It 'does not use duration as a replacement for evidence of the singer' {
+        $candidate=New-DownloadCandidate -Provider bilibili_search -Title 'Known Song' -Artist '' -Duration 200 -Url 'https://www.bilibili.com/video/BVfixture'
+        Test-DownloadCandidateIdentity -Track $track -Candidate $candidate | Should Be $false
+    }
+    It 'requires complete audio decoding even after duration validation passes' {
+        Mock Invoke-MusicServerBoundedProcess {
+            param($FilePath)
+            if ($FilePath -eq $Config.FFprobe) { return [pscustomobject]@{ExitCode=0;Output='200';Error=''} }
+            return [pscustomobject]@{ExitCode=1;Output='';Error='corrupt audio'}
+        } -ModuleName MusicServer.Providers
+        $result=Validate-DownloadedCandidate -Config $Config -Track $track -Path 'corrupt.mp3'
+        $result.Valid | Should Be $false
+        $result.Reason | Should Be 'AUDIO_DECODE_FAILED'
+    }
+    It 'uses separate staging paths without deleting a same-named file' {
+        $owned=Join-Path $Config.DailyDir "$(Get-SafeDownloadName -Track $track).mp3"
+        [IO.File]::WriteAllText($owned,'owned music')
+        $first=New-DownloadStagingPath -Config $Config -Track $track
+        $second=New-DownloadStagingPath -Config $Config -Track $track
+        ($first -ne $second) | Should Be $true
+        [IO.File]::ReadAllText($owned) | Should Be 'owned music'
+    }
     It 'advances a real liked and leased queue through one fallback after a dead direct resource' {
         Invoke-LikeTrackTransactionDb -TrackId $track.id | Out-Null
         $claim=Claim-WantedItemDb -TrackId $track.id -WorkerId $WorkerId

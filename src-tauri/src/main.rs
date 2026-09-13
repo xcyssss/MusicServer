@@ -539,6 +539,56 @@ fn open_folder(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn restore_backup(app: tauri::AppHandle, backup_id: String) -> Result<(), String> {
+    if !backup_id.starts_with("snapshot-")
+        || backup_id.len() != 33
+        || !backup_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        return Err("INVALID_BACKUP_ID".into());
+    }
+    let state: tauri::State<AppState> = app.state();
+    if state.child.lock().map_err(|_| "STATE_LOCKED")?.is_none() {
+        return Err(
+            "This window does not own the services. Close other MusicServer windows first.".into(),
+        );
+    }
+    let home = resolve_app_home();
+    // Only the runtime belonging to this APP home can be invoked, never a caller-supplied path.
+    let script = home.join("manage_musicserver.ps1");
+    if !script.is_file() {
+        return Err("RECOVERY_RUNTIME_MISSING".into());
+    }
+    stop_owned_launcher(&state);
+    let mut child = background_process::command("powershell.exe")
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+        .arg(script)
+        .arg("-AppHome")
+        .arg(&home)
+        .arg("-RestoreBackup")
+        .arg(backup_id)
+        .env("MUSICSERVER_SQLITE", home.join("tools").join("sqlite3.exe"))
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+            if !status.success() {
+                // Restore refuses bad backups before replacing data. Restart the intact old state.
+                app.restart();
+            }
+            app.restart();
+        }
+        if Instant::now() >= deadline {
+            let _ = kill_process_tree(child.id());
+            app.restart();
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[tauri::command]
 async fn pick_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
     let (tx, rx) = std::sync::mpsc::channel();
@@ -600,7 +650,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![open_folder, pick_folder])
+        .invoke_handler(tauri::generate_handler![open_folder, pick_folder, restore_backup])
         .manage(AppState {
             child: Mutex::new(None),
         })
