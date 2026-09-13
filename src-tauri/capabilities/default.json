@@ -15,6 +15,7 @@
     "shell:allow-open",
     "dialog:allow-open",
     "allow-pick-folder",
-    "allow-open-folder"
+    "allow-open-folder",
+    "allow-restore-backup"
   ]
 }

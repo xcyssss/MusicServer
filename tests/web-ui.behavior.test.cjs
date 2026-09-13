@@ -54,6 +54,30 @@ async function app() {
 const json = payload => ({ ok: true, json: async () => payload });
 const library = [{ id: 'library-a', title: '春天', artist: '测试歌手', album: '专辑', duration: 120, stream_url: '/api/library/library-a/stream', local_status: 'LOCAL' }];
 
+test('a failed decoded source exposes retry and next without losing the selected song', async () => {
+  const a = await app(); a.context.tracks = library;
+  a.get('audio-player').play = async () => { throw new Error('unsupported audio'); };
+  await a.run('syncLibrary(tracks); playItem(tracks[0])');
+  assert.equal(a.run('state.currentKey'), 'library-a');
+  assert.equal(a.get('playback-recovery').hidden, false);
+  assert.match(a.get('playback-status').textContent, /重试或换一首/);
+});
+
+test('a stalled old source has a deadline and cannot pause the next selected song', async () => {
+  const a = await app(); a.context.tracks = [...library, { ...library[0], id: 'library-b', stream_url: '/api/library/library-b/stream' }];
+  a.run('syncLibrary(tracks)');
+  const audio = a.get('audio-player');
+  audio.play = () => new Promise(() => {});
+  const old = a.run('playItem(tracks[0])');
+  const timeout = [...a.timers.values()].find((timer) => timer.delay === 15000);
+  assert.ok(timeout);
+  audio.play = async () => { audio.paused = false; };
+  await a.run('playItem(tracks[1])');
+  timeout.fn(); await old;
+  assert.equal(a.run('state.currentKey'), 'library-b');
+  assert.equal(audio.paused, false);
+});
+
 test('explicit library refresh bypasses the derived cache while background polling reuses it', async () => {
   const a = await app();
   await a.run('loadLibrary()');

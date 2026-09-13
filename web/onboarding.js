@@ -40,7 +40,7 @@
       const description = stage === 'ready' ? '现在可以从左侧音乐树播放这首歌。以后点喜欢，也会这样自动收藏并下载。' : stage === 'attention' ? '歌曲已经喜欢，但这次下载没有完成。打开下载动态，可以看到具体原因和可用的重试操作。' : '歌曲已经喜欢，下载仍在后台进行。完成后才会显示为本地歌曲；你可以继续听其他歌。';
       content = `<p>${description}</p><div class="guide-song"><span>${stage === 'ready' ? '已下载' : stage === 'attention' ? '需要留意' : '等待下载结果'}</span><strong>${esc(item?.title || '你喜欢的歌')}</strong><small>${esc(entry ? bridge.explain(entry) : '打开下载动态查看最新状态。')}</small></div><div class="guide-actions">${button('downloads','查看下载动态', false, true)}${button('finish','开始自由探索 →')}</div>`;
     }
-    const readiness = !prefs.download_ready ? `<div class="guide-readiness" role="note"><strong>试听可以先开始，自动下载还缺少组件</strong><span>${esc(prefs.missing_components.join('、'))}尚未就绪。这一版暂时不能在引导内自动安装，喜欢会保存在队列中。</span></div>` : '';
+    const readiness = !prefs.download_ready ? `<div class="guide-readiness" role="note"><strong>试听可以先开始，自动下载还缺少组件</strong><span>${esc(prefs.missing_components.join('、'))}尚未就绪。可以一键准备，完成后喜欢的歌曲会继续下载。</span><button type="button" data-guide="setup" class="guide-secondary">准备下载环境</button><span></span></div>` : '';
     const html = `<div class="guide-top"><span>初 遇 · MUSICSERVER</span><button type="button" data-guide="dismiss" class="guide-close" aria-label="暂时收起新手引导" ${busy ? 'disabled' : ''}>×</button></div><ol class="guide-steps" aria-label="体验步骤"><li ${isWelcome ? 'aria-current="step"' : ''}>相遇</li><li ${!isWelcome && !isDownload ? 'aria-current="step"' : ''}>听见</li><li ${isDownload ? 'aria-current="step"' : ''}>留下</li></ol><h2 id="guide-title">${heading}</h2>${content}${readiness}<p class="guide-error" role="status">${esc(error || (busy ? '正在处理…' : ''))}</p><footer>随时收起，之后可从「设置 · 新手引导」继续。</footer>`;
     if (signature !== html) {
       const focused = panel.contains(document.activeElement) ? document.activeElement.dataset.guide : null;
@@ -53,7 +53,8 @@
     if (busy) return;
     busy = true; error = ''; draw();
     try {
-      if (action === 'dismiss' || action === 'finish') {
+      if (action === 'setup') { window.MusicServerCare?.open(); }
+      else if (action === 'dismiss' || action === 'finish') {
         await save({ dismissed: true, ...(action === 'finish' ? { phase: 'done' } : {}) }); closeLocally();
       } else if (action === 'library') {
         await save({ normalize: prefs.normalize, auto_lyrics: prefs.auto_lyrics, dismissed: true });
@@ -84,6 +85,12 @@
   }
   root.MusicServerGuide = {
     update: draw,
+    componentsReady(components) {
+      if (!prefs) return;
+      prefs.download_ready = components.every((item) => item.present);
+      prefs.missing_components = components.filter((item) => !item.present).map((item) => item.name);
+      draw();
+    },
     async connect(api) {
       bridge = api;
       panel = document.createElement('aside'); panel.id = 'onboarding-guide'; panel.className = 'onboarding-guide'; panel.hidden = true;

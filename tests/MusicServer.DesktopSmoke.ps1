@@ -1,4 +1,22 @@
 ﻿# Shared by the installed-app CI smoke and its PS5.1 regression tests.
+function Close-MusicServerSmokeDesktop {
+    param([Parameter(Mandatory)]$Process)
+    if ($Process.HasExited) { return }
+    $deadline = [DateTime]::UtcNow.AddSeconds(35)
+    do {
+        $Process.Refresh()
+        if ($Process.HasExited) { throw 'APP exited before its window could be closed.' }
+        if ($Process.MainWindowHandle -ne 0) { break }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+    # Force termination is failure cleanup only, so a broken APP exit handler
+    # cannot pass this normal window-close regression.
+    if ($Process.MainWindowHandle -eq 0 -or -not $Process.CloseMainWindow() -or -not $Process.WaitForExit(40000)) {
+        Stop-MusicServerSmokeDesktop -Process $Process
+        throw 'APP did not exit after a normal window-close request.'
+    }
+}
+
 function Stop-MusicServerSmokeDesktop {
     param([Parameter(Mandatory)]$Process)
     $killExitCode = 0

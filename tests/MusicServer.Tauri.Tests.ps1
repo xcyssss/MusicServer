@@ -52,6 +52,28 @@ Describe 'Owned API startup wait' {
     }
 }
 
+Describe 'Normal APP shutdown outcome' {
+    It 'closes the window without force-killing a healthy APP' {
+        Mock Stop-MusicServerSmokeDesktop { throw 'Must not force a normal close.' }
+        $process = [pscustomobject]@{ Id = 123; HasExited = $false; MainWindowHandle = 1 }
+        $process | Add-Member ScriptMethod Refresh {}
+        $process | Add-Member ScriptMethod CloseMainWindow { return $true }
+        $process | Add-Member ScriptMethod WaitForExit { param($milliseconds) return $true }
+        { Close-MusicServerSmokeDesktop -Process $process } | Should Not Throw
+        Assert-MockCalled Stop-MusicServerSmokeDesktop -Times 0 -Exactly -Scope It
+    }
+
+    It 'reports failure after cleanup when normal close is refused' {
+        Mock Stop-MusicServerSmokeDesktop {}
+        $process = [pscustomobject]@{ Id = 123; HasExited = $false; MainWindowHandle = 1 }
+        $process | Add-Member ScriptMethod Refresh {}
+        $process | Add-Member ScriptMethod CloseMainWindow { return $false }
+        { Close-MusicServerSmokeDesktop -Process $process } | Should Throw 'normal window-close'
+        Assert-MockCalled Stop-MusicServerSmokeDesktop -Times 1 -Exactly -Scope It
+    }
+
+}
+
 Describe 'Installed APP shutdown outcome' {
     It 'accepts a taskkill tree error only when the APP has exited' {
         Mock Start-Process { [pscustomobject]@{ ExitCode = 128 } }

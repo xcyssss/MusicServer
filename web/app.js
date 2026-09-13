@@ -605,7 +605,12 @@ function setLyricsOpen(open, returnFocus = false) {
   if (returnFocus) $('#lyrics-toggle').focus();
 }
 
-function setPlaybackStatus(message) { $('#playback-status').textContent = message; globalThis.MusicServerGuide?.update(); }
+function setPlaybackStatus(message) {
+  $('#playback-status').textContent = message;
+  const recovery = $('#playback-recovery');
+  if (recovery) recovery.hidden = !/失败|暂不可用|超时/.test(message);
+  globalThis.MusicServerGuide?.update();
+}
 
 function newPlaybackSessionId() {
   if (globalThis.crypto && crypto.randomUUID) return crypto.randomUUID();
@@ -1123,11 +1128,18 @@ async function playItem(item, collection = 'library') {
   setPlaybackStatus('正在加载…');
   // Lyrics must not hold up audio or reopen a panel the listener closed.
   void loadLyrics(lyricsUrl, false);
-  try { await audio.play(); } catch {
+  let loadTimer;
+  try {
+    await Promise.race([
+      audio.play(),
+      new Promise((_, reject) => { loadTimer = setTimeout(() => reject(new Error('PLAYBACK_TIMEOUT')), 15000); }),
+    ]);
+  } catch {
     if (requestId !== state.playRequest) return;
-    setPlaybackStatus('播放失败 · 点击播放重试');
-    showToast('试听源加载失败，点击播放按钮重试');
-  }
+    audio.pause();
+    setPlaybackStatus('播放失败 · 可以重试或换一首');
+    showToast('这次试听没有成功。喜欢仍会保留，可以重试或换一首。');
+  } finally { clearTimeout(loadTimer); }
 }
 
 function renderPlayerArt(item) {
@@ -1583,7 +1595,12 @@ $('#audio-player').addEventListener('play', () => { setPlayIcon(true); setPlayba
 $('#audio-player').addEventListener('pause', () => { setPlayIcon(false); setPlaybackStatus('已暂停'); render(); });
 $('#audio-player').addEventListener('waiting', () => setPlaybackStatus('正在缓冲…'));
 $('#audio-player').addEventListener('playing', () => { setPlaybackStatus('正在播放'); globalThis.MusicServerGuide?.update(); });
-$('#audio-player').addEventListener('error', () => { if (state.currentKey) setPlaybackStatus('播放失败 · 点击播放重试'); });
+$('#audio-player').addEventListener('error', () => { if (state.currentKey) setPlaybackStatus('播放失败 · 可以重试或换一首'); });
+$('#playback-retry')?.addEventListener('click', () => {
+  const item = state.currentItem;
+  if (item) { $('#audio-player').load(); void playItem(item, state.currentCollection); }
+});
+$('#playback-next')?.addEventListener('click', nextItem);
 
 renderMode(); renderDisplayModeChoice(); loadRecommendations(); loadWanted(); loadProviderStatus();
 // The display mode decides how the local names are rendered, so it is resolved

@@ -58,6 +58,16 @@ function Get-NetEaseLyricsById {
         $response=$request.GetResponse()
         try { [int]$response.StatusCode | Should Be 206; $response.ContentLength | Should Be 100 } finally { $response.Dispose() }
     }
+    It 'streams an unindexed downloaded song in a cold media runspace' {
+        $file=Join-Path $script:MediaFixture.Config.MusicDir 'newly-downloaded.mp3'
+        [IO.File]::WriteAllBytes($file,(New-Object byte[] 4096))
+        # Match the public path identity without warming GET /api/library.
+        $key=Get-MusicServerLocalIdentity -File $file
+        $request=[Net.HttpWebRequest]::Create($script:MediaBase + '/api/library/'+$key+'/stream')
+        $request.Timeout=10000; $request.AddRange(0,99)
+        $response=$request.GetResponse()
+        try { [int]$response.StatusCode | Should Be 206; $response.ContentLength | Should Be 100 } finally { $response.Dispose() }
+    }
 
     It 'discovers nearby lyrics and reads an automatic cache in its isolated media runspace' {
         $cfg = $script:MediaFixture.Config

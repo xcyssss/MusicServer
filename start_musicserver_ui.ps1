@@ -384,6 +384,7 @@ Import-Module (Join-Path $Root 'MusicServer.State.psm1') -Force
 Import-Module (Join-Path $Root 'MusicServer.Http.psm1') -Force
 Import-Module (Join-Path $Root 'MusicServer.Providers.psm1') -Force
 Import-Module (Join-Path $Root 'MusicServer.Identity.psm1') -Force
+Import-Module (Join-Path $Root 'MusicServer.Management.psm1') -Force
 $startupPhases['module_imports'] = $startupClock.Elapsed.TotalMilliseconds
 $script:BuildMarker = Get-MusicServerBuildIdentity -Root $Root
 $startupPhases['build_identity'] = $startupClock.Elapsed.TotalMilliseconds
@@ -404,6 +405,17 @@ $WatchdogLog = Join-Path $LogRoot 'musicserver-ui.watchdog.log'
 Initialize-MusicServerState -Config $Config -SkipLibrary
 if (-not (Test-Path -LiteralPath $LogRoot -PathType Container)) {
     New-Item -ItemType Directory -Force -Path $LogRoot | Out-Null
+}
+# Fail before schema writes if an existing installation cannot be backed up.
+$existingDb=Join-Path $Config.StateDir 'musicserver.db'
+if ([IO.File]::Exists($existingDb)) {
+    Connect-MusicServerDatabase -DbPath $existingDb -SqliteExe $Config.Sqlite
+    $settingsExist=@(Invoke-MusicServerSqlJson -Query "SELECT name FROM sqlite_master WHERE name='app_settings';")
+    $priorBuild=if ($settingsExist.Count) { Get-AppSettingDb -Key 'last_backed_up_build' } else { '' }
+    if ($priorBuild -ne $script:BuildMarker) {
+        New-MusicServerBackup -Config $Config -Reason 'before-upgrade' | Out-Null
+        if ($settingsExist.Count) { Set-AppSettingDb -Key 'last_backed_up_build' -Value $script:BuildMarker }
+    }
 }
 # Resolve configured music dir from SQLite if available (DB may already exist from a prior run)
 try {
@@ -1144,6 +1156,7 @@ function Handle-Request {
         '/music-tree.html' { Send-IndexHtml -Context $Context -RelativePath 'music-tree.html'; return }
         '/music-tree-ui.js' { Send-StaticFile -Context $Context -RelativePath 'music-tree-ui.js' -ContentType 'application/javascript; charset=utf-8'; return }
         '/onboarding.js' { Send-StaticFile -Context $Context -RelativePath 'onboarding.js' -ContentType 'application/javascript; charset=utf-8'; return }
+        '/management.js' { Send-StaticFile -Context $Context -RelativePath 'management.js' -ContentType 'application/javascript; charset=utf-8'; return }
         '/music-tree.css' { Send-StaticFile -Context $Context -RelativePath 'music-tree.css' -ContentType 'text/css; charset=utf-8'; return }
         '/assets/muelsyse-water.png' { Send-StaticFile -Context $Context -RelativePath 'assets/muelsyse-water.png' -ContentType 'image/png'; return }
         '/app.js'      { Send-StaticFile -Context $Context -RelativePath 'app.js' -ContentType 'application/javascript; charset=utf-8'; return }
@@ -1204,7 +1217,7 @@ function Initialize-MediaPool {
     $initial.ImportPSModule(@((Join-Path $Root 'MusicServer.Core.psm1'), (Join-Path $Root 'MusicServer.Database.psm1'), (Join-Path $Root 'MusicServer.State.psm1'), (Join-Path $Root 'MusicServer.Providers.psm1')))
     # Library lookup fills a private file map. Automatic lyric jobs bind their
     # own SQLite connection and lease before making any bounded provider request.
-    foreach ($name in @('Write-UiLog','Invoke-NavidromeSqliteJson','Get-LocalLibraryId','Get-LrcPath','Get-LyricQuality','Get-NeteaseIdForTrack','Get-NetEaseLyricsById','Get-UiLibrary','Resolve-UiLibraryFile','Send-ResponseBytes','Send-Json','ConvertTo-JsonStringValue','Send-LyricsJson','Send-JsonRaw','Send-LibraryStream','Send-LibraryLyrics','Send-TrackLyrics')) {
+    foreach ($name in @('Write-UiLog','Invoke-NavidromeSqliteJson','Get-LocalLibraryId','Get-LibraryFolderArtist','Get-LrcPath','Get-LyricQuality','Get-NeteaseIdForTrack','Get-NetEaseLyricsById','Get-UiLibrary','Resolve-UiLibraryFile','Send-ResponseBytes','Send-Json','ConvertTo-JsonStringValue','Send-LyricsJson','Send-JsonRaw','Send-LibraryStream','Send-LibraryLyrics','Send-TrackLyrics')) {
         $definition = (Get-Command $name -CommandType Function).Definition
         $initial.Commands.Add([Management.Automation.Runspaces.SessionStateFunctionEntry]::new($name, $definition))
     }
