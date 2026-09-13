@@ -59,6 +59,27 @@ function Get-NetEaseLyricsById {
         try { [int]$response.StatusCode | Should Be 206; $response.ContentLength | Should Be 100 } finally { $response.Dispose() }
     }
 
+    It 'discovers nearby lyrics and reads an automatic cache in its isolated media runspace' {
+        $cfg = $script:MediaFixture.Config
+        $adjacent = Join-Path $cfg.MusicDir 'test.lrc'
+        $nearbyDir = Join-Path $cfg.MusicDir 'Lyrics'
+        New-Item -ItemType Directory -Path $nearbyDir | Out-Null
+        $nearby = Join-Path $nearbyDir 'test.lrc'
+        Move-Item -LiteralPath $adjacent -Destination $nearby
+        $url = $script:MediaBase + '/api/library/library-cold-fixture/lyrics'
+        (Invoke-RestMethod $url -TimeoutSec 10).text | Should Be '[00:00.00]local lyric'
+        Remove-Item -LiteralPath $nearby
+        $file = Get-Item -LiteralPath (Join-Path $cfg.MusicDir 'test.wav')
+        $key = Get-MusicServerPathKey -Path $file.FullName
+        Claim-LocalLyricLookupDb -PathKey $key -Fingerprint "$($file.Length):$($file.LastWriteTimeUtc.Ticks)" -Owner fixture | Should Be $true
+        Save-LocalLyricCacheDb -PathKey $key -Owner fixture -Status READY -Text '[00:00.00]cached lyric' -SongId fixture
+        $cached = Invoke-RestMethod $url -TimeoutSec 10
+        $cached.available | Should Be $true
+        $cached.source | Should Be netease
+        $cached.text | Should Be '[00:00.00]cached lyric'
+        (Invoke-RestMethod ($script:MediaBase + '/health') -TimeoutSec 2).status | Should Be ok
+    }
+
     It 'keeps health and heartbeat responsive during slow lyrics and bounds admission' {
         $pending = @()
         foreach ($i in 1..3) {

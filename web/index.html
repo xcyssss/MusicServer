@@ -111,7 +111,7 @@
     </aside>
     <aside id="settings-panel" class="settings-panel" hidden aria-label="设置">
       <div class="settings-heading"><div><span class="section-kicker">CONFIGURATION</span><h2>设置</h2></div><button id="settings-close" class="icon-button" aria-label="关闭设置">×</button></div>
-      <div class="settings-content">
+      <div class="settings-content"><div class="settings-group"><button id="onboarding-open" class="secondary-button" type="button">新手引导</button><p class="settings-hint">从试听到喜欢、下载，也可以重新选择自动整理和歌词偏好。</p></div>
         <div class="settings-group">
           <label>音乐库位置</label>
           <div id="music-library-status" class="settings-status"></div>
@@ -150,6 +150,7 @@
       </div>
     </aside>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="/app.js" defer></script>
+    <script src="/onboarding.js" defer></script>
+  <script src="/app.js" defer></script>
   </body>
 </html>

@@ -254,7 +254,7 @@ function Test-DailyRecommendGeneratedToday {
         $previousExe = Get-MusicServerSqliteExe
         try {
             Connect-MusicServerDatabase -DbPath $dbPath -SqliteExe $taskConfig.Sqlite
-            $rows = @(Invoke-MusicServerParamSql -Template 'SELECT COUNT(*) AS cnt FROM daily_recommendations WHERE date = @d;' -Params @{ d = (Get-TodayDate) })
+            $rows = @(Invoke-MusicServerParamSql -Template "SELECT COUNT(*) AS cnt FROM daily_recommendations WHERE date = @d AND seed_source <> 'onboarding_starter';" -Params @{ d = (Get-TodayDate) })
             return ((@($rows).Count -gt 0) -and ([int]$rows[0].cnt -gt 0))
         } finally {
             if ($previousDb) { Connect-MusicServerDatabase -DbPath $previousDb -SqliteExe $previousExe }
@@ -456,10 +456,7 @@ function Get-LocalLibraryId {
 
 function Get-LrcPath {
     param([string]$File)
-    if (-not $File) { return $null }
-    $candidate = [System.IO.Path]::ChangeExtension($File, '.lrc')
-    if ([IO.File]::Exists($candidate)) { return $candidate }
-    return $null
+    return Find-MusicServerLyricFile -File $File
 }
 
 function Get-LyricQuality {
@@ -582,7 +579,7 @@ function Get-UiLibrary {
             addedto = [string]$row.addedto; collectionat = [string]$row.collectionat
             path = $file; file = $file
             stream_url = "/api/library/$id/stream"
-            lyrics_url = if ($lrcPath) { "/api/library/$id/lyrics" } else { '' }
+            has_local_lyrics = [bool]$lrcPath; lyrics_url = "/api/library/$id/lyrics"
         })
     }
 
@@ -606,7 +603,7 @@ function Get-UiLibrary {
                 duration = 0; track = 0; addedto = $addedAt; collectionat = $addedAt
                 path = $file; file = $file
                 stream_url = "/api/library/$id/stream"
-                lyrics_url = if ($lrcPath) { "/api/library/$id/lyrics" } else { '' }
+                has_local_lyrics = [bool]$lrcPath; lyrics_url = "/api/library/$id/lyrics"
             })
         }
     }
@@ -913,7 +910,13 @@ function Send-LibraryLyrics {
     $file = Resolve-UiLibraryFile -Id $Id
     $lrcPath = if ($file) { Get-LrcPath -File $file } else { $null }
     if (-not $lrcPath) {
-        Send-LyricsJson -Context $Context -Id $Id -Available $false -Text '' -Quality 'MISSING' -Source 'local' -Path '' -Message '这首歌暂时没有找到本地歌词。'
+        if ($file) {
+            Connect-MusicServerDatabase -DbPath (Join-Path $Config.StateDir 'musicserver.db') -SqliteExe $Config.Sqlite
+            $result = Resolve-MusicServerLocalLyrics -Config $Config -File $file
+            Send-LyricsJson -Context $Context -Id $Id -Available $result.available -Text $result.text -Quality $result.quality -Source $result.source -Path '' -Message $result.message
+        } else {
+            Send-LyricsJson -Context $Context -Id $Id -Available $false -Text '' -Quality 'MISSING' -Source 'local' -Path '' -Message '歌曲文件当前不可用。'
+        }
         return
     }
 
@@ -1140,6 +1143,7 @@ function Handle-Request {
         '/index.html'  { Send-IndexHtml -Context $Context; return }
         '/music-tree.html' { Send-IndexHtml -Context $Context -RelativePath 'music-tree.html'; return }
         '/music-tree-ui.js' { Send-StaticFile -Context $Context -RelativePath 'music-tree-ui.js' -ContentType 'application/javascript; charset=utf-8'; return }
+        '/onboarding.js' { Send-StaticFile -Context $Context -RelativePath 'onboarding.js' -ContentType 'application/javascript; charset=utf-8'; return }
         '/music-tree.css' { Send-StaticFile -Context $Context -RelativePath 'music-tree.css' -ContentType 'text/css; charset=utf-8'; return }
         '/assets/muelsyse-water.png' { Send-StaticFile -Context $Context -RelativePath 'assets/muelsyse-water.png' -ContentType 'image/png'; return }
         '/app.js'      { Send-StaticFile -Context $Context -RelativePath 'app.js' -ContentType 'application/javascript; charset=utf-8'; return }
@@ -1197,10 +1201,9 @@ function Handle-Request {
 # the boundary, never the main loop's mutable script context or client registry.
 function Initialize-MediaPool {
     $initial = [Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
-    $initial.ImportPSModule(@((Join-Path $Root 'MusicServer.Core.psm1'), (Join-Path $Root 'MusicServer.Database.psm1')))
-    # Get-UiLibrary is only used here to fill this runspace's file map, so the
-    # artist overlay it applies needs neither the state DB nor the providers; its
-    # lookups fail soft in this runspace and the map is unaffected.
+    $initial.ImportPSModule(@((Join-Path $Root 'MusicServer.Core.psm1'), (Join-Path $Root 'MusicServer.Database.psm1'), (Join-Path $Root 'MusicServer.State.psm1'), (Join-Path $Root 'MusicServer.Providers.psm1')))
+    # Library lookup fills a private file map. Automatic lyric jobs bind their
+    # own SQLite connection and lease before making any bounded provider request.
     foreach ($name in @('Write-UiLog','Invoke-NavidromeSqliteJson','Get-LocalLibraryId','Get-LrcPath','Get-LyricQuality','Get-NeteaseIdForTrack','Get-NetEaseLyricsById','Get-UiLibrary','Resolve-UiLibraryFile','Send-ResponseBytes','Send-Json','ConvertTo-JsonStringValue','Send-LyricsJson','Send-JsonRaw','Send-LibraryStream','Send-LibraryLyrics','Send-TrackLyrics')) {
         $definition = (Get-Command $name -CommandType Function).Definition
         $initial.Commands.Add([Management.Automation.Runspaces.SessionStateFunctionEntry]::new($name, $definition))

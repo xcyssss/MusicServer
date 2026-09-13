@@ -45,6 +45,7 @@ Import-Module (Join-Path $PSScriptRoot 'MusicServer.Providers.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Database.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.State.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Http.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Onboarding.psm1') -Force
 $startupPhases['module_imports'] = $startupClock.Elapsed.TotalMilliseconds
 
 $Config = New-MusicServerConfig -Root $Root
@@ -315,7 +316,7 @@ function New-ListeningLibraryItem {
         track_id = $trackId; canonical_track_id = if ($canonical) { [string]$canonical.id } else { '' }
         listening_identity = $identity; local_status = 'LOCAL'
         stream_url = "/api/library/$LocalId/stream"
-        lyrics_url = if ($lrcPath) { "/api/library/$LocalId/lyrics" } else { '' }
+        has_local_lyrics = [bool]$lrcPath; lyrics_url = "/api/library/$LocalId/lyrics"
         cover_url = ''
     }
 }
@@ -452,13 +453,8 @@ function Read-NeteaseLyrics([string]$Path) {
 function Get-LrcPath {
     param([string]$Path)
     if (-not $Path) { return $null }
-    $candidate = if ([System.IO.Path]::GetExtension($Path) -ieq '.lrc') {
-        $Path
-    } else {
-        [System.IO.Path]::ChangeExtension($Path, '.lrc')
-    }
-    if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
-    return $null
+    if ([IO.Path]::GetExtension($Path) -ieq '.lrc' -and [IO.File]::Exists($Path)) { return $Path }
+    return Find-MusicServerLyricFile -File $Path
 }
 
 function Get-LibraryItemResponse {
@@ -497,7 +493,7 @@ function Get-LibraryItemResponse {
                 name = $name; artist = $artist; album = $artist; duration = 0; track = 0
                 addedto = ''; collectionat = ''; path = $found; file = $found; year = 0
                 stream_url = "/api/library/$LocalId/stream"
-                lyrics_url = if ($lrcPath) { "/api/library/$LocalId/lyrics" } else { '' }
+                has_local_lyrics = [bool]$lrcPath; lyrics_url = "/api/library/$LocalId/lyrics"
             }
             return @(Add-ResolvedArtist -Items @($item))[0]
         }
@@ -516,7 +512,7 @@ function Get-LibraryItemResponse {
                 duration = 0; track = 0; addedto = ''; collectionat = ''
                 path = [string]$playback.file; file = [string]$playback.file
                 stream_url = "/api/library/$LocalId/stream"
-                lyrics_url = if ($lrcPath) { "/api/library/$LocalId/lyrics" } else { '' }
+                has_local_lyrics = [bool]$lrcPath; lyrics_url = "/api/library/$LocalId/lyrics"
             }
         }
     }
@@ -1084,6 +1080,21 @@ while ($true) {
                 message = 'Music library path reset to default. Restart MusicServer for all services to pick up the change.'
                 requires_restart = $true
             }
+            Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 200 })
+        }
+        elseif ($path -eq '/api/onboarding' -and $method -in @('GET','POST','PUT')) {
+            if ($method -eq 'POST') {
+                if (Initialize-StarterRecommendationsDb) {
+                    $script:TodayCacheItems = $null
+                    Write-ApiLog '[onboarding] starter recommendations prepared; downloads=0'
+                }
+            } elseif ($method -eq 'PUT') {
+                $data = if ($bodyText) { ConvertFrom-Json -InputObject $bodyText } else { [pscustomobject]@{} }
+                $values = ConvertTo-OnboardingUpdate -Data $data
+                Set-OnboardingStateDb @values
+                Write-ApiLog ("[onboarding] preferences updated phase={0}" -f $data.phase)
+            }
+            $body = Get-OnboardingStateDb -Config $Config
             Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 200 })
         }
         elseif ($method -eq 'GET' -and $path -eq '/api/settings/display-mode') {
