@@ -647,7 +647,7 @@ fn install_tray_icon(app: &tauri::AppHandle) -> bool {
 }
 
 fn main() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![open_folder, pick_folder, restore_backup])
@@ -697,20 +697,26 @@ fn main() {
         .on_window_event(|window, event| {
             match event {
                 // 主窗口关闭时，停掉本应用拉起的 launcher（其 finally 会停掉 API）。
-                tauri::WindowEvent::Destroyed => {
+                tauri::WindowEvent::Destroyed if window.label() == MAIN_WINDOW => {
                     let app = window.app_handle();
                     let state: tauri::State<AppState> = app.state();
-                    let mut guard = state.child.lock().unwrap();
-                    if let Some(child) = guard.take() {
-                        let _ = kill_process_tree(child.id());
-                    }
+                    stop_owned_launcher(&state);
                 }
                 // Native minimize retains the taskbar entry; the tray stays available.
                 _ => {}
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+    app.run(|app, event| {
+        // A close during setup can precede delivery of the window's Destroyed
+        // event. Tauri exits the process without dropping state, so reclaim our
+        // service tree at the application exit boundary as well.
+        if matches!(event, tauri::RunEvent::Exit) {
+            let state: tauri::State<AppState> = app.state();
+            stop_owned_launcher(&state);
+        }
+    });
 }
 
 #[cfg(windows)]

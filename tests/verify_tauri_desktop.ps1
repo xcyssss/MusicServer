@@ -14,6 +14,7 @@ if (-not $Root) {
     $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 }
 Import-Module (Join-Path $Root 'MusicServer.Identity.psm1') -Force
+. (Join-Path $Root 'tests\MusicServer.DesktopSmoke.ps1')
 $BuildMarker = Get-MusicServerBuildIdentity -Root $Root
 if (-not $Executable) {
     $Executable = Join-Path $Root 'src-tauri\target\release\musicserver-desktop.exe'
@@ -145,7 +146,7 @@ if ($Launch) {
     if (-not (Test-Path -LiteralPath $Executable -PathType Leaf)) {
         throw "Tauri release executable not found: $Executable"
     }
-    $launchedProcess = Start-Process -FilePath $Executable -WorkingDirectory $Root -PassThru
+    $launchedProcess = Start-Process -FilePath $Executable -WorkingDirectory $Root -WindowStyle Hidden -PassThru
     $launchedDesktopPid = [int]$launchedProcess.Id
 }
 
@@ -235,8 +236,7 @@ if ($playbackSummary) { $summary.PlaybackContract = $playbackSummary }
 
 if ($CloseLaunchedApp) {
     if ($launcher.Count -eq 0) { throw 'The clean launch did not produce a launcher child owned by Tauri.' }
-    $targetPid = [int]$desktop[0].ProcessId
-    & taskkill.exe /PID $targetPid /T /F | Out-Null
+    Close-MusicServerSmokeDesktop -Process $launchedProcess
     $closeDeadline = [DateTime]::UtcNow.AddSeconds(20)
     do {
         $stillDesktop = @(Get-DesktopProcess)
