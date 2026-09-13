@@ -170,6 +170,12 @@ Describe 'MusicServer Hardening v2 - Legacy Runtime Retirement' {
     It 'persists retry increments in SQLite attempt_count' {
         $scratch = New-LegacyRetirementScratch
         try {
+            # This case tests the provider retry path. Give it presence-only
+            # component fixtures on clean CI too; every network circuit is disabled
+            # below, so none may be executed. Missing tools now intentionally pause.
+            $tools=Join-Path $scratch.Root 'components\yt20260819-ffmpeg901\bin'
+            [IO.Directory]::CreateDirectory($tools) | Out-Null
+            foreach ($name in @('yt-dlp.exe','ffmpeg.exe','ffprobe.exe')) { [IO.File]::WriteAllText((Join-Path $tools $name),'fixture: must never execute') }
             $track = New-CanonicalTrack -Title 'Retry Counter' -Artist 'Phase5' -Status 'REMOTE' -DownloadCandidates @()
             Save-CanonicalTrackDb -Track $track | Out-Null
             Add-WantedItemDb -TrackId $track.id -MaxAttempts 3 | Out-Null

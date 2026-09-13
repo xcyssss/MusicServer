@@ -590,7 +590,10 @@ function Invoke-WorkerPass {
         return
     }
     $missingTools=@('YtDlp','FFmpeg','FFprobe') | Where-Object { -not [IO.File]::Exists($Config.$_) -and -not (Get-Command $Config.$_ -ErrorAction SilentlyContinue) }
-    if (@($missingTools).Count -gt 0 -and -not $DryRun) { return }
+    if (@($missingTools).Count -gt 0 -and -not $DryRun) {
+        # Cancelling a queued download never requires download components.
+        $queue=@($queue | Where-Object { $_.state -eq 'CANCEL_REQUESTED' })
+    }
     $selected = @()
     foreach ($wanted in $queue) {
         if ($selected.Count -ge $MaxItems) { break }

@@ -30,6 +30,7 @@ function Set-ManagementJob {
 
 function Get-ManagementStatus {
     param($Config)
+    Invoke-MusicServerParamNonQuery -Template 'UPDATE maintenance_jobs SET state=''ERROR'',message=''INTERRUPTED_OR_TIMEOUT'' WHERE state=''RUNNING'' AND deadline < @now;' -Params @{now=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()} | Out-Null
     $fresh = New-MusicServerConfig -Root $Config.Root -AppHome $Config.AppHome
     $components = foreach ($pair in @(@('YtDlp','yt-dlp'),@('FFmpeg','ffmpeg'),@('FFprobe','ffprobe'))) {
         $path = [string]$fresh.($pair[0])
@@ -106,6 +107,14 @@ function Test-DownloadComponents {
 function Install-DownloadComponents {
     param($Config, [string]$JobId)
     $base=Join-Path $Config.AppHome 'components'; [IO.Directory]::CreateDirectory($base) | Out-Null
+    $active=Get-ManagedComponentDirectory -Config $Config
+    if ([IO.Directory]::Exists($active)) {
+        try {
+            Set-ManagementJob -Id $JobId -Progress 85 -Message 'VERIFY_AUDIO'
+            $current=Test-DownloadComponents -Config $Config -Directory $active
+            if ($current.YtDlp -eq '2026.08.19' -and $current.FFmpeg -match '9\.0\.1' -and $current.FFprobe -match '9\.0\.1') { return (Split-Path $active -Parent) }
+        } catch { } # An unhealthy installed directory is repaired from pinned assets.
+    }
     $stage=Join-Path $base ('staging-'+$JobId); [IO.Directory]::CreateDirectory((Join-Path $stage 'bin')) | Out-Null
     $catalog=@(Get-DownloadComponentCatalog); $index=0
     foreach ($component in $catalog) {
@@ -152,6 +161,29 @@ function Install-DownloadComponents {
     # Keep the previous verified directory for recovery; never remove a running executable.
     Set-AppSettingDb -Key 'download_components_verified' -Value (Get-NowIso)
     return $final
+}
+
+function Reset-InterruptedManagementJobs {
+    param($Config)
+    $jobs=@(Invoke-MusicServerSqlJson -Query "SELECT id FROM maintenance_jobs WHERE state='RUNNING';")
+    if (-not $jobs.Count) { return }
+    $pattern='(?i)(?:^|\s)-File\s+"?'+[regex]::Escape((Join-Path $Config.Root 'manage_musicserver.ps1'))+'(?:"|\s|$)'
+    $processes=@(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Where-Object { $_.CommandLine -match $pattern })
+    foreach ($job in $jobs) {
+        $idPattern='(?i)(?:^|\s)-JobId\s+"?'+[regex]::Escape($job.id)+'(?:"|\s|$)'
+        if (-not @($processes | Where-Object { $_.CommandLine -match $idPattern }).Count) {
+            Set-ManagementJob -Id $job.id -State ERROR -Message 'INTERRUPTED_OR_TIMEOUT'
+        }
+    }
+}
+
+function Remove-ManagementStaging {
+    param($Config, [string]$JobId)
+    if ($JobId -notmatch '^[a-f0-9]{32}$') { throw 'INVALID_JOB_ID' }
+    $base=[IO.Path]::GetFullPath((Join-Path $Config.AppHome 'components'))
+    $stage=[IO.Path]::GetFullPath((Join-Path $base ('staging-'+$JobId)))
+    if (-not $stage.StartsWith($base+'\',[StringComparison]::OrdinalIgnoreCase)) { throw 'INVALID_STAGING_PATH' }
+    if ([IO.Directory]::Exists($stage)) { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction Stop }
 }
 
 function Get-MusicServerBackups {

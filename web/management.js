@@ -16,6 +16,7 @@
     try { const response = await fetch(path, { ...options, signal: controller.signal }); const value = await response.json(); if (!response.ok) throw new Error(value.error || '服务暂时不可用'); return value; } finally { clearTimeout(timer); }
   }
   function draw() {
+    window.MusicServerGuide?.componentsReady(state.components);
     const box = find('[data-care-components]'); box.replaceChildren();
     for (const item of state.components) { const line = document.createElement('span'); line.className='care-component'; line.textContent = `${item.present ? '✓' : '○'} ${item.name}${item.managed ? ' · 应用管理' : ''}`; box.append(line); }
     const restoreNote = state.restore_result ? `${messages[state.restore_result] || state.restore_result}\n` : '';

@@ -30,6 +30,12 @@ if ($env:MUSICSERVER_MANAGEMENT_CHILD -ne $JobId) {
         $result=Invoke-MusicServerBoundedProcess -FilePath 'powershell.exe' -Arguments @('-NoProfile','-ExecutionPolicy','Bypass','-File',$PSCommandPath,'-AppHome',$AppHome,'-JobId',$JobId) -TimeoutSeconds 600
         if ($result.ExitCode -ne 0) { Set-ManagementJob -Id $JobId -State ERROR -Message 'WORKER_FAILED' }
     } catch { Set-ManagementJob -Id $JobId -State ERROR -Message 'INTERRUPTED_OR_TIMEOUT' }
+    finally {
+        # The bounded child has exited or its process tree has been killed.
+        try { Remove-ManagementStaging -Config $config -JobId $JobId } catch {
+            Write-MusicServerLog -Path (Join-Path $config.LogDir 'management.log') -Message "job=$JobId stage=cleanup result=DEFERRED"
+        }
+    }
     exit 0
 }
 try {

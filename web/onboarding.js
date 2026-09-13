@@ -85,6 +85,12 @@
   }
   root.MusicServerGuide = {
     update: draw,
+    componentsReady(components) {
+      if (!prefs) return;
+      prefs.download_ready = components.every((item) => item.present);
+      prefs.missing_components = components.filter((item) => !item.present).map((item) => item.name);
+      draw();
+    },
     async connect(api) {
       bridge = api;
       panel = document.createElement('aside'); panel.id = 'onboarding-guide'; panel.className = 'onboarding-guide'; panel.hidden = true;

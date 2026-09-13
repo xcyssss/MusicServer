@@ -76,6 +76,7 @@ Initialize-MusicServerDatabase -DbPath $DbPath -SqliteExe $SqliteExe
 $startupPhases['database_connect'] = $startupClock.Elapsed.TotalMilliseconds
 Initialize-MusicServerSchema
 Initialize-ManagementSchema
+Reset-InterruptedManagementJobs -Config $Config
 $startupPhases['schema'] = $startupClock.Elapsed.TotalMilliseconds
 Apply-ConfiguredMusicDir -Config $Config
 Initialize-MusicServerLibrary -Config $Config | Out-Null

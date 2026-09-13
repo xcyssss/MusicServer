@@ -58,6 +58,18 @@ Describe 'Desktop management data boundaries' {
         Set-ManagementJob -Id $id -State ERROR -Message 'late worker'
         (Get-ManagementStatus -Config $fixture.Config).jobs[0].state | Should Be 'DONE'
     }
+    It 'makes an interrupted maintenance job retryable on restart' {
+        $id=[Guid]::NewGuid().ToString('N')
+        Invoke-MusicServerParamNonQuery -Template 'INSERT INTO maintenance_jobs(id,operation,state,created_at,updated_at,deadline) VALUES(@id,''components'',''RUNNING'',@now,@now,9999999999);' -Params @{id=$id;now=(Get-NowIso)}
+        Reset-InterruptedManagementJobs -Config $fixture.Config
+        (Get-ManagementStatus -Config $fixture.Config).jobs[0].state | Should Be 'ERROR'
+        $stage=Join-Path $fixture.Config.AppHome ('components\staging-'+$id)
+        [IO.Directory]::CreateDirectory($stage) | Out-Null
+        [IO.File]::WriteAllText((Join-Path $stage 'partial.zip'),'partial')
+        Remove-ManagementStaging -Config $fixture.Config -JobId $id
+        [IO.Directory]::Exists($stage) | Should Be $false
+        { Remove-ManagementStaging -Config $fixture.Config -JobId '..\outside' } | Should Throw 'INVALID_JOB_ID'
+    }
     It 'preserves command arguments and kills a stalled child within its deadline' {
         $result=Invoke-MusicServerBoundedProcess -FilePath 'powershell.exe' -Arguments @('-NoProfile','-Command','Write-Output ''literal spaces''') -TimeoutSeconds 10
         $result.ExitCode | Should Be 0

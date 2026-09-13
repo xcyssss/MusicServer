@@ -61,6 +61,21 @@ Describe 'Like download fallback pipeline' {
         ($first -ne $second) | Should Be $true
         [IO.File]::ReadAllText($owned) | Should Be 'owned music'
     }
+    It 'keeps likes queued without consuming attempts when components are missing' {
+        Invoke-LikeTrackTransactionDb -TrackId $track.id | Out-Null
+        $MaxItems=5; $DryRun=$false
+        $saved=@{}
+        foreach ($name in @('PATH','MUSICSERVER_YTDLP','MUSICSERVER_FFMPEG','MUSICSERVER_FFPROBE')) {
+            $saved[$name]=[Environment]::GetEnvironmentVariable($name,'Process')
+            [Environment]::SetEnvironmentVariable($name,$null,'Process')
+        }
+        try { Invoke-WorkerPass } finally {
+            foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name,$saved[$name],'Process') }
+        }
+        $wanted=Get-WantedItemDb -TrackId $track.id
+        $wanted.state | Should Be WANTED
+        $wanted.attempt_count | Should Be 0
+    }
     It 'advances a real liked and leased queue through one fallback after a dead direct resource' {
         Invoke-LikeTrackTransactionDb -TrackId $track.id | Out-Null
         $claim=Claim-WantedItemDb -TrackId $track.id -WorkerId $WorkerId
