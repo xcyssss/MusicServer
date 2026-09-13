@@ -59,6 +59,7 @@ Describe 'Like download fallback pipeline' {
         $first=New-DownloadStagingPath -Config $Config -Track $track
         $second=New-DownloadStagingPath -Config $Config -Track $track
         ($first -ne $second) | Should Be $true
+        $first.StartsWith($Config.MusicDir+'\',[StringComparison]::OrdinalIgnoreCase) | Should Be $false
         [IO.File]::ReadAllText($owned) | Should Be 'owned music'
     }
     It 'keeps likes queued without consuming attempts when components are missing' {

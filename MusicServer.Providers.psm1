@@ -344,7 +344,8 @@ function Resolve-DownloadCandidates {
 
 function New-DownloadStagingPath {
     param($Config, $Track)
-    $directory=Join-Path $Config.DailyDir ('.staging\'+[Guid]::NewGuid().ToString('N'))
+    # Keep incomplete audio outside the recursively scanned music library.
+    $directory=Join-Path $Config.AppHome ('download-staging\'+[Guid]::NewGuid().ToString('N'))
     [IO.Directory]::CreateDirectory($directory) | Out-Null
     return Join-Path $directory "$(Get-SafeDownloadName -Track $Track).mp3"
 }

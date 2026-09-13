@@ -343,11 +343,18 @@ function Complete-DownloadedTrack {
 
     $target = Join-Path $Config.MusicDir ([IO.Path]::GetFileName($Path))
     if ($Path -ne $target) {
-        if (Test-Path -LiteralPath $target) {
+        if ([IO.File]::Exists($target) -or [IO.File]::Exists([IO.Path]::ChangeExtension($target,'.lrc'))) {
             $stem = [IO.Path]::GetFileNameWithoutExtension($target)
-            do { $target = Join-Path $Config.MusicDir "$stem [$([Guid]::NewGuid().ToString('N').Substring(0,8))].mp3" } while ([IO.File]::Exists($target))
+            do { $target = Join-Path $Config.MusicDir "$stem [$([Guid]::NewGuid().ToString('N').Substring(0,8))].mp3" } while ([IO.File]::Exists($target) -or [IO.File]::Exists([IO.Path]::ChangeExtension($target,'.lrc')))
         }
-        Move-Item -LiteralPath $Path -Destination $target
+        # A library can be on another drive. Publish only after the copy has
+        # completed, using a same-directory rename from an unindexed extension.
+        $incoming=Join-Path $Config.MusicDir ('.musicserver-import-'+[Guid]::NewGuid().ToString('N')+'.part')
+        try {
+            [IO.File]::Copy($Path,$incoming,$false)
+            [IO.File]::Move($incoming,$target)
+            [IO.File]::Delete($Path)
+        } finally { if ([IO.File]::Exists($incoming)) { [IO.File]::Delete($incoming) } }
         $oldLrc = [IO.Path]::ChangeExtension($Path, '.lrc')
         $newLrc = [IO.Path]::ChangeExtension($target, '.lrc')
         if (Test-Path -LiteralPath $oldLrc) { Move-Item -LiteralPath $oldLrc -Destination $newLrc -Force }
