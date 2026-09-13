@@ -892,6 +892,51 @@ function Select-NeteaseArtistForTitle {
     return $best
 }
 
+function Resolve-MusicServerLocalLyrics {
+    param([Parameter(Mandatory)][psobject]$Config, [Parameter(Mandatory)][string]$File)
+    $missing = [pscustomobject]@{ available=$false; text=''; quality='MISSING'; source='none'; message='尚未找到可靠歌词。' }
+    if (-not [IO.File]::Exists($File)) { return $missing }
+    $info = Get-Item -LiteralPath $File
+    $key = Get-MusicServerPathKey -Path $File
+    $fingerprint = "$($info.Length):$($info.LastWriteTimeUtc.Ticks)"
+    $cached = Get-LocalLyricCacheDb -PathKey $key -Fingerprint $fingerprint
+    if ($cached -and $cached.status -eq 'READY') { return [pscustomobject]@{available=$true;text=[string]$cached.text;quality='EXACT';source='netease';message=''} }
+    if ([string](Get-AppSettingDb -Key 'auto_lyrics') -eq 'false') { $missing.message='自动查找歌词已关闭，可在新手引导中开启。'; return $missing }
+    if ($cached -and [string]$cached.retry_at -gt (Get-NowIso)) { $missing.message=if($cached.message){[string]$cached.message}else{'正在查找歌词，稍后重新打开即可。'}; return $missing }
+    $owner = [guid]::NewGuid().ToString('N')
+    if (-not (Claim-LocalLyricLookupDb -PathKey $key -Fingerprint $fingerprint -Owner $owner)) { $missing.message='正在查找歌词，稍后重新打开即可。'; return $missing }
+    $status='MISSING'; $text=''; $songId=''; $phase='identity'; $failure=''; $timer=[Diagnostics.Stopwatch]::StartNew()
+    try {
+        $resolved = Get-LocalTrackArtistDb -PathKey $key
+        $artist = if ($resolved -and $resolved.status -eq 'RESOLVED' -and $resolved.source -eq 'netease') { [string]$resolved.artist } else { Get-TitleDeclaredArtist -Title $info.BaseName }
+        if (-not $artist) { $missing.message='未能确认这首歌的歌手，暂不自动匹配。也可把同名 .lrc 放在歌曲旁。'; return $missing }
+        $title = [string](@(Get-TitleSearchKeywords -Title $info.BaseName) | Select-Object -First 1)
+        $track = New-CanonicalTrack -Title $title -Artist $artist
+        if ($env:MUSICSERVER_DISABLE_NETEASE_SEARCH -eq '1' -or -not (Test-ProviderRequestAvailable -Config $Config -Provider 'netease')) { $status='ERROR'; $missing.message='歌词来源暂不可用，稍后会再试。'; return $missing }
+        $phase='search'; $candidate = Search-NeteaseCandidate -Config $Config -Track $track
+        if (-not $candidate) { $status='ERROR'; $missing.message='暂未找到歌名与歌手都匹配的歌词，稍后会再试。'; return $missing }
+        $songId = [string]$candidate.metadata.netease_id
+        if (-not (Test-ProviderRequestAvailable -Config $Config -Provider 'netease') -or -not (Claim-ProviderRequest -Config $Config -Provider 'netease')) { $status='ERROR'; $missing.message='歌词来源暂时繁忙，稍后会再试。'; return $missing }
+        $phase='lyrics'; $response=Invoke-RestMethod -Uri "https://music.163.com/api/song/lyric?id=$([uri]::EscapeDataString($songId))&lv=1&kv=1&tv=-1" -Headers @{'Referer'='https://music.163.com/';'User-Agent'='Mozilla/5.0'} -TimeoutSec 8
+        Record-ProviderSuccess -Config $Config -Provider 'netease' -LatencyMs $timer.Elapsed.TotalMilliseconds
+        $text = [string](Get-OptionalProperty (Get-OptionalProperty $response 'lrc' $null) 'lyric' '')
+        if ($text -and $text.Length -le 200000 -and $text -notmatch '(?i)<html|<!doctype') {
+            $status='READY'
+            return [pscustomobject]@{available=$true;text=$text;quality='EXACT';source='netease';message=''}
+        }
+        $text=''; $missing.message='歌词来源暂未提供这首歌的歌词，可能是纯音乐。'
+        return $missing
+    } catch {
+        $failure=$_.Exception.GetType().Name
+        $status='ERROR'; $text=''; $missing.message='暂时无法联网查找歌词，稍后会再试。'
+        Record-ProviderFailure -Config $Config -Provider 'netease' -ErrorType 'LYRICS_FAILED' -Message 'Automatic lyric lookup failed.' | Out-Null
+        return $missing
+    } finally {
+        Save-LocalLyricCacheDb -PathKey $key -Owner $owner -Status $status -Text $text -SongId $songId -Message $missing.message
+        Write-MusicServerLog -Path (Join-Path $Config.LogDir 'musicserver-lyrics.log') -Message "[lookup] result=$status source=netease phase=$phase error=$failure elapsed_ms=$($timer.ElapsedMilliseconds)"
+    }
+}
+
 function Resolve-NeteaseTrackArtist {
     <#
     .SYNOPSIS

@@ -450,7 +450,7 @@
 
   drawTree();
   root.MusicTreeUI = {
-    filterLibrary(items) { return el('tree-scope').value === 'lyrics' ? items.filter((item) => !!item.lyrics_url) : items; },
+    filterLibrary(items) { return el('tree-scope').value === 'lyrics' ? items.filter((item) => item.has_local_lyrics ?? !!item.lyrics_url) : items; },
     renderLibrary(view) {
       libraryView = view;
       const changedSong = lastPlayingKey !== view.currentKey;

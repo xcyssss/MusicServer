@@ -562,7 +562,7 @@ async function fetchJson(url, options = {}) {
   const cancel = () => controller.abort();
   if (options.signal?.aborted) cancel();
   options.signal?.addEventListener('abort', cancel, { once: true });
-  const timer = setTimeout(cancel, 12000);
+  const timer = setTimeout(cancel, options.timeoutMs || 12000);
   try {
     const response = await fetch(url, { ...options, cache: 'no-store', signal: controller.signal });
     let payload;
@@ -605,7 +605,7 @@ function setLyricsOpen(open, returnFocus = false) {
   if (returnFocus) $('#lyrics-toggle').focus();
 }
 
-function setPlaybackStatus(message) { $('#playback-status').textContent = message; }
+function setPlaybackStatus(message) { $('#playback-status').textContent = message; globalThis.MusicServerGuide?.update(); }
 
 function newPlaybackSessionId() {
   if (globalThis.crypto && crypto.randomUUID) return crypto.randomUUID();
@@ -875,6 +875,7 @@ function playbackCollection() {
 }
 
 function updateNavigationButtons() {
+  globalThis.MusicServerGuide?.update();
   const collection = playbackCollection();
   const disabled = !collection.length || !state.currentKey;
   $('#previous-button').disabled = disabled;
@@ -969,7 +970,7 @@ async function loadLyrics(url, open = true) {
   $('#lyrics-content').innerHTML = '<div class="lyrics-empty">正在加载歌词…</div>';
   if (!url) { renderLyrics(); return; }
   try {
-    const data = await fetchJson(url, { signal: state.lyricsController.signal });
+    const data = await fetchJson(url, { signal: state.lyricsController.signal, timeoutMs: 34000 });
     if (requestId !== state.lyricsRequest) return;
     const normalized = normalizeLyricsPayload(data);
     state.lyrics = { ...normalized, entries: normalized.available ? parseLyrics(normalized.text) : [] };
@@ -1581,7 +1582,7 @@ $('#audio-player').addEventListener('loadedmetadata', updateProgressUI);
 $('#audio-player').addEventListener('play', () => { setPlayIcon(true); setPlaybackStatus('正在播放'); render(); });
 $('#audio-player').addEventListener('pause', () => { setPlayIcon(false); setPlaybackStatus('已暂停'); render(); });
 $('#audio-player').addEventListener('waiting', () => setPlaybackStatus('正在缓冲…'));
-$('#audio-player').addEventListener('playing', () => setPlaybackStatus('正在播放'));
+$('#audio-player').addEventListener('playing', () => { setPlaybackStatus('正在播放'); globalThis.MusicServerGuide?.update(); });
 $('#audio-player').addEventListener('error', () => { if (state.currentKey) setPlaybackStatus('播放失败 · 点击播放重试'); });
 
 renderMode(); renderDisplayModeChoice(); loadRecommendations(); loadWanted(); loadProviderStatus();
@@ -1777,3 +1778,18 @@ $('#settings-toggle').addEventListener('click', () => {
   if (!$('#settings-panel').hidden) $('#settings-close').focus();
 });
 $('#settings-close').addEventListener('click', () => setSettingsOpen(false, true));
+
+globalThis.MusicServerGuide?.connect({
+  request: fetchJson, applyDisplayMode, toast: showToast,
+  play: (item) => playItem(item, 'recommendations'), like: toggleLike,
+  refreshWanted: () => loadWanted(true),
+  refreshRecommendations: async () => { await loadRecommendations(true); if (!state.items.length) await loadRecommendations(true); },
+  settings: () => { setSettingsOpen(true); $('#music-library-browse').focus(); },
+  closeSettings: () => setSettingsOpen(false),
+  downloads: () => { $('#wanted').open = true; $('#queue-toggle').focus(); },
+  explain: (entry) => [labels[entry.state] || entry.state, downloadExplanation(entry)].filter(Boolean).join(' · '),
+  view: () => ({ items: state.items, wanted: state.wanted,
+    current: state.items.find((item) => keyOf(item) === state.currentKey),
+    playing: !$('#audio-player').paused && $('#audio-player').readyState >= 3,
+    playbackStatus: $('#playback-status').textContent }),
+});

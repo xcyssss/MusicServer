@@ -636,6 +636,19 @@ function Get-NavidromeSongIdForPath {
     finally { Remove-Item -LiteralPath "$tmp*" -Force -ErrorAction SilentlyContinue }
 }
 
+function Find-MusicServerLyricFile {
+    param([string]$File)
+    if (-not $File) { return '' }
+    $adjacent = [IO.Path]::ChangeExtension($File, '.lrc')
+    if ([IO.File]::Exists($adjacent)) { return $adjacent }
+    $parent = [IO.Path]::GetDirectoryName($File)
+    foreach ($folder in @('Lyrics','歌词')) {
+        $candidate = Join-Path (Join-Path $parent $folder) ([IO.Path]::GetFileName($adjacent))
+        if ([IO.File]::Exists($candidate)) { return $candidate }
+    }
+    return ''
+}
+
 function Get-DefaultMusicDir {
     param([Parameter(Mandatory)][string]$AppHome)
     return [IO.Path]::GetFullPath((Join-Path $AppHome 'Music'))

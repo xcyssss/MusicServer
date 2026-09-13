@@ -15,6 +15,7 @@ const REQUIRED: &[&str] = &[
     "MusicServer.Http.psm1",
     "MusicServer.State.psm1",
     "MusicServer.Providers.psm1",
+    "MusicServer.Onboarding.psm1",
     "MusicServer.Migration.psm1",
     "MusicServer.Identity.psm1",
     "web/app.js",
