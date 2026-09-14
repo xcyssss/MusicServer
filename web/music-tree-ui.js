@@ -49,7 +49,7 @@
       const a = anchor(slot), b = anchor(slot + 1);
       path += `C${number(a.x + slope(scroll + slot) / 3)} ${number(a.y + 91 / 3)} ${number(b.x - slope(scroll + slot + 1) / 3)} ${number(b.y - 91 / 3)} ${b.x} ${b.y}`;
     }
-    return { path, anchors: Array.from({ length: PAGE_SIZE }, (_, slot) => anchor(slot)) };
+    return { path, anchors: Array.from({ length: PAGE_SIZE }, (_, slot) => anchor(slot)), sprigs: [0.48,1.55,2.5,3.6,4.5,5.65].map(anchor) };
   }
 
   function playbackFocus(items, keyOf, currentKey, previousKey, focusId) {
@@ -94,6 +94,10 @@
   function drawTree() {
     const geometry = treeGeometry(stemScroll);
     trunkPaths.forEach(path => path.setAttribute('d', geometry.path));
+    document.querySelectorAll('.stem-sprig').forEach((sprig,index) => {
+      const point=geometry.sprigs[index];
+      sprig.setAttribute('transform', `translate(${point.x} ${point.y}) scale(${index%2 ? -1 : 1} 1)`);
+    });
     positionLeaves(geometry);
   }
   function flowTree(target, immediate = false) {
@@ -117,7 +121,7 @@
     <linearGradient id="stemGradient"><stop stop-color="#516d43"/><stop offset=".4" stop-color="#a9b078"/><stop offset=".6" stop-color="#e7deb0"/><stop offset="1" stop-color="#647c4c"/></linearGradient>
     <radialGradient id="goldBead" cx=".3" cy=".2" r=".8"><stop stop-color="#fffde4"/><stop offset=".45" stop-color="#dfcb83"/><stop offset="1" stop-color="#b09b52"/></radialGradient>
     <radialGradient id="dropThumb" cx=".35" cy=".3" r=".8"><stop stop-color="#f7fad9"/><stop offset=".57" stop-color="#d9e5b7"/><stop offset="1" stop-color="#a1b67a"/></radialGradient>
-    <radialGradient id="waterBody" cx=".45" cy=".55" r=".7"><stop stop-color="#f5ffe9" stop-opacity=".08"/><stop offset=".55" stop-color="#b4cea3" stop-opacity=".20"/><stop offset=".9" stop-color="#89a777" stop-opacity=".32"/><stop offset="1" stop-color="#faffdc" stop-opacity=".72"/></radialGradient>
+    <radialGradient id="waterBody" cx=".45" cy=".55" r=".7"><stop stop-color="#f5fff0" stop-opacity=".06"/><stop offset=".55" stop-color="#b7d9c8" stop-opacity=".09"/><stop offset=".9" stop-color="#7fa28c" stop-opacity=".19"/><stop offset="1" stop-color="#fbfff0" stop-opacity=".6"/></radialGradient>
     <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5l11 7-11 7Z" fill="currentColor" stroke="none"/></symbol>
     <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14" stroke-width="3.5"/></symbol>
     <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="7.5"/><path d="m16 16 5 5"/></symbol>
@@ -137,6 +141,8 @@
     <symbol id="mark-leaf-plain" viewBox="0 0 64 64"><path d="M5 57C7 27 26 17 59 5C58 38 44 57 5 57Z" fill="url(#leafBody)" stroke="#89975c" stroke-width="1.5"/><path d="M8 54Q30 43 56 9M19 46l1-15m11 7 14 1m-5-11 1-13" fill="none" stroke="#fff5c6" stroke-width=".9"/></symbol>
     <symbol id="mark-leaf" viewBox="0 0 64 64"><use href="#mark-leaf-plain"/><path d="M31 41V25l15-4v16M31 28l15-4" fill="none" stroke="#587445" stroke-width="3.5"/><ellipse cx="26" cy="43" rx="5.5" ry="4" fill="#658252"/><ellipse cx="41" cy="39" rx="5.5" ry="4" fill="#658252"/></symbol>
   </defs></svg>`;
+
+  el('stem-details').innerHTML = Array.from({length:6},(_,index)=>`<g class="stem-sprig" style="--sprig-delay:${-index*1.3}s"><g class="sprig-leaves"><path class="sprig-body" d="M0 0C-29-5-41-31-38-49C-13-39-2-22 0 0Z"/><path class="sprig-vein" d="M0 0Q-17-29-34-43M-13-20l-15-6M-22-30l1-9"/><path class="sprig-body small" d="M-3-4Q6-33 29-35Q27-10-3-4Z"/><path class="sprig-vein" d="M-3-4Q15-16 25-31"/><circle class="stem-dew" cx="-8" cy="-10" r="2.8"/></g></g>`).join('');
 
   const leafPath = 'M498 77C380-14 153 13 8 26C93 51 96 125 264 138C360 151 441 111 498 77Z';
   function leafSvg() {
@@ -479,7 +485,7 @@
       lastRecommendationKey = view.currentKey;
       if (nextFocus !== focusId) { focusId = nextFocus; promoteRecommendation(); }
       else paintRecommendations();
-      const item = view.items.find((entry) => view.keyOf(entry) === view.currentKey);
+      const item = view.currentTrack || view.items.find((entry) => view.keyOf(entry) === view.currentKey);
       const like = el('tree-player-like');
       like.hidden = !item;
       like.disabled = !!item && view.pendingLikes.has(item.track_id);

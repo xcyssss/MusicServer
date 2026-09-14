@@ -35,6 +35,8 @@ const state = {
   recommendationRevision: 0,
   libraryLimit: 200,
   searchQuery: '',
+  online: { items: [], query: '', phase: 'idle', message: '', request: 0 },
+  onlinePlaybackItems: [],
 };
 
 const labels = { REMOTE: '在线', WANTED: '待下载', RESOLVING: '正在解析', DOWNLOADING: '下载中', VALIDATING: '校验中', CANCEL_REQUESTED: '正在取消', LOCAL: '已本地化', RETRY_WAIT: '等待重试', UNAVAILABLE: '暂不可用' };
@@ -811,7 +813,8 @@ function renderRecommendations() {
   if (globalThis.MusicTreeUI) {
     globalThis.MusicTreeUI.renderRecommendations({ items: state.items, display: formatTrackDisplay, keyOf,
       currentKey: state.currentKey, paused: $('#audio-player').paused, pendingLikes, pendingDislikes,
-      likeCurrent: () => { const item = state.items.find((entry) => keyOf(entry) === state.currentKey); if (item) toggleLike(item); } });
+      currentTrack: state.currentItem?.track_id ? state.currentItem : null,
+      likeCurrent: () => { const item = state.currentItem?.track_id ? state.currentItem : state.items.find((entry) => keyOf(entry) === state.currentKey); if (item) toggleLike(item); } });
     return;
   }
   if (!state.items.length) { list._sig = null; list.innerHTML = '<div class="empty-state">今天的推荐还在准备中。<br />先从音乐库选一首，或稍后刷新。</div>'; return; }
@@ -874,6 +877,7 @@ function listeningCollection() {
 }
 
 function playbackCollection() {
+  if (state.currentCollection === 'online') return state.onlinePlaybackItems;
   if (state.currentCollection === 'recommendations') return state.items;
   if (state.currentCollection === 'listening') return listeningCollection();
   return sortLibraryVisible(filteredLibrary());
@@ -887,7 +891,7 @@ function updateNavigationButtons() {
   $('#next-button').disabled = disabled;
 }
 
-function render() { renderLibrary(); renderRecommendations(); renderListening(); renderMode(); updateNavigationButtons(); }
+function render() { renderLibrary(); renderRecommendations(); renderListening(); renderMode(); renderOnlineSearch(); updateNavigationButtons(); }
 
 function renderMode() {
   document.querySelectorAll('.mode-button').forEach((button) => button.classList.toggle('active', button.dataset.mode === state.mode));
@@ -1098,7 +1102,7 @@ async function playItem(item, collection = 'library') {
   if (!key) return;
   if (state.currentKey === key && !audio.paused) { audio.pause(); return; }
   let source = resolvePlaybackSource(item);
-  if (!source && item.track_id) {
+  if ((!source || collection === 'online') && item.track_id) {
     setPlaybackStatus('正在准备试听…');
     await hydrateRecommendationPlayback(item);
     if (requestId !== state.playRequest) return;
@@ -1214,6 +1218,7 @@ async function toggleLike(item) {
   state.recommendationRevision++;
   const next = !item.liked;
   item.liked = next;
+  syncTrackCopies(item);
   render();
   showToast(next ? '已喜欢，加入后台下载队列' : '已取消喜欢');
   try {
@@ -1232,10 +1237,12 @@ async function toggleLike(item) {
     // Like and dislike are one axis, so liking clears a dislike.
     if (item.liked) item.disliked = false;
     item.wanted = result?.wanted || null;
+    syncTrackCopies(item);
     if (!item.wanted) state.wanted = (Array.isArray(state.wanted) ? state.wanted : []).filter((entry) => String(entry?.track_id || entry?.id || '') !== String(item.track_id));
     render();
   } catch (error) {
     item.liked = !next;
+    syncTrackCopies(item);
     render();
     const detail = String(error?.message || '未知错误');
     showToast(`喜欢操作失败：${detail}`);
@@ -1243,6 +1250,7 @@ async function toggleLike(item) {
     pendingLikes.delete(item.track_id);
     state.recommendationRevision++;
     renderRecommendations();
+    renderOnlineSearch();
   }
 }
 
@@ -1284,6 +1292,7 @@ async function loadWanted(silent = false) {
       if (!Array.isArray(payload.items)) throw new Error('Invalid wanted response');
       state.wanted = payload.items;
       renderRecommendations();
+      renderOnlineSearch();
       updateNavigationButtons();
     } catch { if (!silent) showToast('下载动态同步失败，请稍后刷新'); }
   });
@@ -1399,6 +1408,100 @@ $('#recommendation-list').addEventListener('click', (event) => {
   if (event.target.closest('[data-action="like"]')) toggleLike(item);
   else if (event.target.closest('[data-action="dislike"]')) toggleDislike(item);
   else if (event.target.closest('[data-action="play"]')) playItem(item, 'recommendations');
+});
+
+function syncTrackCopies(item) {
+  for (const copy of [...state.items, ...state.online.items, ...state.onlinePlaybackItems, state.currentItem]) {
+    if (copy && copy.track_id === item.track_id && copy !== item) {
+      copy.liked = item.liked; copy.disliked = item.disliked; copy.wanted = item.wanted;
+    }
+  }
+}
+
+let onlineAbort = null;
+function setOnlineSearchOpen(open) {
+  $('#online-search-panel').hidden = !open;
+  $('#online-search-button').setAttribute('aria-expanded', String(open));
+  if (!open) { state.online.request++; onlineAbort?.abort(); $('#library-search').focus(); }
+}
+
+function renderOnlineSearch() {
+  if (!$('#online-search-panel') || $('#online-search-panel').hidden) return;
+  const { items, query, phase, message } = state.online;
+  const label = phase === 'loading' ? `正在网络中寻找「${query}」…` : phase === 'done' ? `「${query}」 · ${items.length ? `找到 ${items.length} 首` : '没有找到匹配歌曲，试试歌名加歌手。'}` : message || '输入歌名或歌手，按回车开始网络搜索。';
+  $('#online-search-status').textContent = label;
+  $('#online-search-panel').setAttribute('aria-busy', String(phase === 'loading'));
+  const html = items.map((item, index) => {
+    const text = formatTrackDisplay(item);
+    const wanted = state.wanted.find(entry => entry.track_id === item.track_id) || item.wanted;
+    const status = wanted?.state || item.local_status;
+    const playing = keyOf(item) === state.currentKey && !$('#audio-player').paused;
+    return `<article class="online-song ${playing ? 'playing' : ''}" data-online-id="${escapeHtml(item.track_id)}"><span class="online-song-number">${String(index+1).padStart(2,'0')}</span><button class="online-song-play" type="button" data-online-action="play" aria-label="${playing ? '暂停' : '试听'} ${escapeHtml(text.title)}">${playing ? 'Ⅱ' : '▷'}</button><div class="online-song-meta"><strong>${escapeHtml(text.title)}</strong><small>${escapeHtml(text.artist)}${text.album ? ` · ${escapeHtml(text.album)}` : ''}</small><span class="online-song-state">${status && status !== 'REMOTE' ? escapeHtml(labels[status] || status) : '在线歌曲'}</span></div><span class="online-song-duration">${duration(item.duration)}</span><button class="online-song-like ${item.liked ? 'liked' : ''}" data-online-action="like" type="button" aria-label="${item.liked ? '取消喜欢' : '喜欢并下载'} ${escapeHtml(text.title)}" aria-pressed="${!!item.liked}" ${pendingLikes.has(item.track_id) ? 'disabled' : ''}><span aria-hidden="true">${item.liked ? '♥' : '♡'}</span><span>${item.liked ? '已喜欢' : '喜欢并下载'}</span></button></article>`;
+  }).join('');
+  const list = $('#online-search-results');
+  if (list._sig !== html) {
+    const focus = document.activeElement;
+    const rowId = focus?.closest?.('[data-online-id]')?.dataset.onlineId;
+    const action = focus?.dataset.onlineAction;
+    list.innerHTML = html; list._sig = html;
+    if (rowId && action) list.querySelector(`[data-online-id="${CSS.escape(rowId)}"] [data-online-action="${action}"]`)?.focus({preventScroll:true});
+  }
+}
+
+async function searchOnline() {
+  const query = $('#library-search').value.trim();
+  onlineAbort?.abort(); onlineAbort = new AbortController();
+  const signal = onlineAbort.signal, request = ++state.online.request;
+  Object.assign(state.online, {query, items: [], phase: 'loading', message: ''});
+  setOnlineSearchOpen(true);
+  if (!query || query.length > 80) {
+    Object.assign(state.online, {phase:'idle', message:'请输入 1–80 个字符的歌名或歌手。'});
+    renderOnlineSearch(); return;
+  }
+  renderOnlineSearch();
+  const began = Date.now();
+  try {
+    const job = await fetchJson('/api/search', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({query}), signal});
+    if (!job.id) throw new Error('搜索暂时无法启动，请重试。');
+    while (request === state.online.request && Date.now() - began < 23000) {
+      const result = await fetchJson(`/api/search/${encodeURIComponent(job.id)}`, {signal});
+      if (request !== state.online.request) return;
+      if (result.state === 'ERROR') {
+        throw new Error(result.error === 'PROVIDER_UNAVAILABLE' ? '网络来源暂时休息中，请稍后重试。曲库仍可正常播放。' : '网络搜索暂时没有完成，请稍后重试。');
+      }
+      if (result.state === 'DONE') {
+        if (!Array.isArray(result.items)) throw new Error('搜索结果无法读取，请重试。');
+        state.online.items = result.items;
+        state.online.phase = 'done'; renderOnlineSearch(); return;
+      }
+      await new Promise(resolve => setTimeout(resolve, 650));
+    }
+    if (request === state.online.request) throw new Error('搜索等得有点久，请稍后重试。');
+  } catch (error) {
+    if (request !== state.online.request || signal.aborted) return;
+    Object.assign(state.online, {phase:'error', message:String(error?.message || '搜索失败，请重试。')}); renderOnlineSearch();
+  }
+}
+
+$('#online-search-button').addEventListener('click', searchOnline);
+$('#online-search-retry').addEventListener('click', searchOnline);
+$('#online-search-close').addEventListener('click', () => setOnlineSearchOpen(false));
+$('#search-local').addEventListener('click', () => { setOnlineSearchOpen(false); scheduleSearch(); });
+$('#online-search-results').addEventListener('click', event => {
+  const row = event.target.closest('[data-online-id]');
+  const item = state.online.items.find(item => item.track_id === row?.dataset.onlineId);
+  if (!item) return;
+  if (event.target.closest('[data-online-action="like"]')) void toggleLike(item);
+  else if (event.target.closest('[data-online-action="play"]')) {
+    state.onlinePlaybackItems = state.online.items.slice(); void playItem(item, 'online');
+  }
+});
+$('#library-search').addEventListener('keydown', event => {
+  if (event.key === 'Enter' && !event.isComposing && !composingSearch) { event.preventDefault(); void searchOnline(); }
+  if (event.key === 'Escape' && !$('#online-search-panel').hidden) setOnlineSearchOpen(false);
+});
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && !$('#online-search-panel').hidden) setOnlineSearchOpen(false);
 });
 
 let searchTimer;

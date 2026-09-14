@@ -326,6 +326,7 @@ function Bind-LocalTrack {
     if (-not (Test-OwnsActiveLease -Wanted $Wanted)) { Write-WorkerLog "  [abandon] $([string]$Wanted.title)：租约已丢失，放弃本次处理。" -Color DarkYellow; return }
     $Path = Move-LegacyDailyMixToLibrary -Path $Path
     $songId = Get-NavidromeSongIdForPath -Config $Config -Path $Path
+    if (-not $songId) { $songId = Get-MusicServerLocalIdentity -File $Path }
     $Wanted.selected_candidate = [pscustomobject]@{ provider = 'local'; path = $Path }
     $finResult = Finalize-WantedLocalDb -TrackId $Track.id -WorkerId $WorkerId -ExpectedState 'RESOLVING' -LocalSongId $songId
     if (-not $finResult.Success) {
@@ -372,7 +373,10 @@ function Complete-DownloadedTrack {
 
     [void](Write-TrackLyrics -Track $Track -AudioPath $target)
     $Wanted.selected_candidate = [pscustomobject]@{ provider = $Candidate.provider; url = $Candidate.url; score = $Score.score }
-    $finResult = Finalize-WantedLocalDb -TrackId $Track.id -WorkerId $WorkerId -ExpectedState 'VALIDATING'
+    # Installed desktops have no Navidrome index. Commit a playable local
+    # identity in the same transaction as LOCAL, before optional integrations.
+    $localId = Get-MusicServerLocalIdentity -File $target
+    $finResult = Finalize-WantedLocalDb -TrackId $Track.id -WorkerId $WorkerId -ExpectedState 'VALIDATING' -LocalSongId $localId
     if (-not $finResult.Success) {
         Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
         $targetLrc = [IO.Path]::ChangeExtension($target, '.lrc')
@@ -386,6 +390,7 @@ function Complete-DownloadedTrack {
         & $Config.NdExe -c $Config.NdConfig scan --nobanner 2>$null | Out-Null
     }
     $songId = Get-NavidromeSongIdForPath -Config $Config -Path $target
+    if (-not $songId) { $songId = $localId }
     $track = Get-CanonicalTrackDb -TrackId $Track.id
     if ($track) {
         $known = @($track.download_candidates) | Where-Object { [string](Get-OptionalProperty $_ 'url') -eq [string]$Candidate.url }

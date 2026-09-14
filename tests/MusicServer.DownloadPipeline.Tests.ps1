@@ -62,6 +62,25 @@ Describe 'Like download fallback pipeline' {
         $first.StartsWith($Config.MusicDir+'\',[StringComparison]::OrdinalIgnoreCase) | Should Be $false
         [IO.File]::ReadAllText($owned) | Should Be 'owned music'
     }
+    It 'publishes a playable local identity without a Navidrome installation' {
+        Invoke-LikeTrackTransactionDb -TrackId $track.id | Out-Null
+        Claim-WantedItemDb -TrackId $track.id -WorkerId $WorkerId | Out-Null
+        $wanted=Get-WantedItemDb -TrackId $track.id
+        Set-QueueState -Wanted $wanted -State DOWNLOADING | Out-Null
+        Set-QueueState -Wanted $wanted -State VALIDATING | Out-Null
+        $path=New-DownloadStagingPath -Config $Config -Track $track
+        [IO.File]::WriteAllBytes($path,(New-Object byte[] 4096))
+        $Config.NdExe=Join-Path $Config.AppHome 'absent-navidrome.exe'
+        Mock Write-TrackLyrics { $false }
+        Mock Get-NavidromeSongIdForPath { '' }
+        Complete-DownloadedTrack -Track $track -Wanted $wanted -Path $path -Validation ([pscustomobject]@{Duration=200;DurationDiff=0;AllowedDiff=5}) -Candidate ([pscustomobject]@{provider='netease';url='netease:123'}) -Score ([pscustomobject]@{score=100})
+        $published=Join-Path $Config.MusicDir ([IO.Path]::GetFileName($path))
+        [IO.File]::Exists($published) | Should Be $true
+        $saved=Get-CanonicalTrackDb -TrackId $track.id
+        $saved.status | Should Be LOCAL
+        $saved.local_song_id | Should Be (Get-MusicServerLocalIdentity -File $published)
+        (Get-WantedItemDb -TrackId $track.id).state | Should Be LOCAL
+    }
     It 'keeps likes queued without consuming attempts when components are missing' {
         Invoke-LikeTrackTransactionDb -TrackId $track.id | Out-Null
         $MaxItems=5; $DryRun=$false

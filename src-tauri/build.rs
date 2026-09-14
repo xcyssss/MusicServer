@@ -16,6 +16,7 @@ fn main() {
         "MusicServer.Providers.psm1",
         "MusicServer.Onboarding.psm1",
         "MusicServer.Management.psm1",
+        "MusicServer.Search.psm1",
         "manage_musicserver.ps1",
         "MusicServer.Migration.psm1",
         "MusicServer.Identity.psm1",
