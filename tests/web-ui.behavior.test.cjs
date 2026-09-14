@@ -54,6 +54,38 @@ async function app() {
 const json = payload => ({ ok: true, json: async () => payload });
 const library = [{ id: 'library-a', title: '春天', artist: '测试歌手', album: '专辑', duration: 120, stream_url: '/api/library/library-a/stream', local_status: 'LOCAL' }];
 
+test('source switching isolates requests and explains a blocked provider', async () => {
+  const a=await app(); a.get('library-search').value='song';
+  a.context.fetchHandler=async(url,options)=>url==='/api/search'?json({id:JSON.parse(options.body).source}):json({state:'ERROR',error:'PROVIDER_UNAVAILABLE'});
+  await a.get('search-bilibili').emit('click');await settle();
+  assert.equal(JSON.parse(a.requests.find(r=>r.url==='/api/search').options.body).source,'bilibili');
+  assert.match(a.get('online-search-status').textContent,/暂时限流.*切换另一个来源/);
+  assert.equal(a.get('search-bilibili').getAttribute('aria-pressed'),'true');
+});
+
+test('Bilibili preview is attributed to the UP, stops on close, and downloaded copies use audio', async () => {
+  const a=await app();
+  a.run("state.online.items=[{track_id:'bili',title:'Video',artist:'',preview_source:{provider:'bilibili',bvid:'BV1xx411c7mD',uploader:'Creator'}}];state.online.phase='done';setOnlineSearchOpen(true);renderOnlineSearch()");
+  assert.match(a.get('online-search-results').innerHTML,/UP主 · Creator/);
+  assert.match(a.get('online-search-results').innerHTML,/预览视频/);
+  a.context.fetchHandler=async()=>json({});
+  await a.run("playItem(state.online.items[0],'online')");
+  assert.match(a.get('online-video-frame').src,/player.bilibili.com/);
+  assert.equal(a.get('online-video-preview').hidden,false);
+  await a.get('audio-player').emit('pause');
+  assert.match(a.get('playback-status').textContent,/B站视频预览/, 'the delayed audio pause event must not overwrite video status');
+  await a.get('online-video-close').emit('click');
+  assert.equal(a.get('online-video-preview').hidden,true);
+  await a.run("playItem(state.online.items[0],'online')");
+  assert.equal(a.get('online-video-preview').hidden,false);
+  await a.get('audio-player').play();
+  assert.equal(a.get('online-video-preview').hidden,true, 'resuming the main player stops the embedded video');
+  a.context.fetchHandler=async()=>json({local_status:'LOCAL',playback_source:{type:'local',url:'/api/library/na-bili/stream'}});
+  await a.run("playItem(state.online.items[0],'online')");
+  assert.match(a.get('audio-player').src,/\/api\/library\/na-bili\/stream/);
+  assert.equal(a.get('online-video-preview').hidden,true);
+});
+
 test('online search keeps daily picks and ignores a slower obsolete response', async () => {
   const a=await app(), old=deferred();
   a.run("state.items=[{track_id:'daily',title:'Daily'}]");

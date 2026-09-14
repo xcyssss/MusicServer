@@ -236,44 +236,41 @@ function Get-SafeDownloadName {
 }
 
 function Search-BilibiliCandidates {
-    param([Parameter(Mandatory)][psobject]$Config, [Parameter(Mandatory)][psobject]$Track)
+    param([Parameter(Mandatory)][psobject]$Config, [Parameter(Mandatory)][psobject]$Track,
+        [string]$Query = '', [ValidateRange(1,20)][int]$Limit = 10,
+        [ValidateRange(5,40)][int]$TimeoutSeconds = 40)
     if (-not (Claim-ProviderRequest -Config $Config -Provider 'bilibili_search')) {
-        return [pscustomobject]@{ Candidates = @(); Blocked = $true; Error = 'CIRCUIT_OPEN'; HttpStatus = 0 }
+        return [pscustomobject]@{Candidates=@();Blocked=$true;Error='CIRCUIT_OPEN';HttpStatus=0}
     }
-    $keyword = [string](@(Get-SongSearchQueries -Title $Track.title -Artist $Track.artist -Max 1) | Select-Object -First 1)
-    $args = @(
-        "bilisearch10:$keyword", '--flat-playlist', '--dump-single-json', '--playlist-end', '10',
-        '--no-warnings', '--skip-download', '--socket-timeout', '20'
-    )
-    if (Test-Path -LiteralPath $Config.CookieFile) { $args += @('--cookies', $Config.CookieFile) }
-    $started = [Diagnostics.Stopwatch]::StartNew()
-    try { $run=Invoke-MusicServerBoundedProcess -FilePath $Config.YtDlp -Arguments $args -TimeoutSeconds 40 }
-    catch { Record-ProviderFailure -Config $Config -Provider 'bilibili_search' -ErrorType 'SEARCH_TIMEOUT' -Message 'bounded search process failed' | Out-Null; return [pscustomobject]@{Candidates=@();Blocked=$false;Error='SEARCH_TIMEOUT';HttpStatus=0} }
-    $started.Stop()
-    $joined=$run.Output+[Environment]::NewLine+$run.Error
-    if ($joined -match '(?i)HTTP(?: Error| status)?[: ]+412\b|Precondition Failed') {
-        Record-ProviderFailure -Config $Config -Provider 'bilibili_search' -HttpStatus 412 -ErrorType 'HTTP_412' -Message 'search metadata request blocked' | Out-Null
-        return [pscustomobject]@{ Candidates = @(); Blocked = $true; Error = 'HTTP_412'; HttpStatus = 412 }
-    }
-    if ($run.ExitCode -ne 0) {
-        Record-ProviderFailure -Config $Config -Provider 'bilibili_search' -ErrorType 'SEARCH_FAILED' -Message ($joined | Select-Object -Last 1) | Out-Null
-        return [pscustomobject]@{ Candidates = @(); Blocked = $false; Error = 'SEARCH_FAILED'; HttpStatus = 0 }
-    }
+    $keyword=if ($Query) { $Query } else { [string](@(Get-SongSearchQueries -Title $Track.title -Artist $Track.artist -Max 1) | Select-Object -First 1) }
+    $clock=[Diagnostics.Stopwatch]::StartNew()
     try {
-        $json = $run.Output | ConvertFrom-Json
-        $entries = if ($json.entries) { @($json.entries) } else { @($json) }
-        $results = foreach ($entry in $entries) {
-            if (-not $entry.id) { continue }
-            $url = if ($entry.webpage_url) { [string]$entry.webpage_url } else { "https://www.bilibili.com/video/$($entry.id)" }
-            # uploader is an UP account, not reliable song-artist metadata. Keep it in metadata only.
-            New-DownloadCandidate -Provider 'bilibili_search' -Url $url -Bvid ([string]$entry.id) `
-                -Title ([string]$entry.title) -Artist '' -Duration ([int]$entry.duration) -Priority 10 -Metadata $entry
-        }
-        Record-ProviderSuccess -Config $Config -Provider 'bilibili_search' -LatencyMs $started.Elapsed.TotalMilliseconds
-        return [pscustomobject]@{ Candidates = @($results); Blocked = $false; Error = ''; HttpStatus = 0 }
+        # The same anonymous session cookie used by yt-dlp's BiliBiliSearchIE.
+        # A single metadata request; a 412 opens the existing circuit, no retry.
+        $session=New-Object Microsoft.PowerShell.Commands.WebRequestSession
+        $session.Cookies.Add((New-Object Net.Cookie('buvid3',([guid]::NewGuid().ToString()+'infoc'),'/','.bilibili.com')))
+        $response=Invoke-RestMethod -Uri "https://api.bilibili.com/x/web-interface/search/type?search_type=video&keyword=$([uri]::EscapeDataString($keyword))&page=1" -WebSession $session -Headers @{'Referer'='https://www.bilibili.com/';'User-Agent'='Mozilla/5.0'} -TimeoutSec ([math]::Min(7,$TimeoutSeconds))
+        if ([int](Get-OptionalProperty $response 'code' -1) -ne 0 -or -not (Get-OptionalProperty $response 'data')) { throw 'INVALID_SEARCH_RESPONSE' }
+        $results=@(foreach ($entry in @(Get-OptionalProperty $response.data 'result' @()) | Select-Object -First $Limit) {
+            $bvid=[string](Get-OptionalProperty $entry 'bvid')
+            $title=[Net.WebUtility]::HtmlDecode(([string](Get-OptionalProperty $entry 'title') -replace '<[^>]+>',''))
+            $durationText=[string](Get-OptionalProperty $entry 'duration')
+            if ($bvid -cnotmatch '^BV[0-9A-Za-z]{10}$' -or -not $title -or $durationText -notmatch '^\d{1,3}:[0-5]?\d(:[0-5]?\d)?$') { continue }
+            $seconds=0; foreach ($part in ($durationText -split ':')) { $seconds=$seconds*60+[int]$part }
+            if ($seconds -lt 1 -or $seconds -gt 86400) { continue }
+            $metadata=[pscustomobject]@{uploader=[string](Get-OptionalProperty $entry 'author')}
+            New-DownloadCandidate -Provider bilibili_search -Url "https://www.bilibili.com/video/$bvid" -Bvid $bvid -Title $title -Artist '' -Duration $seconds -Priority 10 -Metadata $metadata
+        })
+        Record-ProviderSuccess -Config $Config -Provider bilibili_search -LatencyMs $clock.Elapsed.TotalMilliseconds | Out-Null
+        return [pscustomobject]@{Candidates=$results;Blocked=$false;Error='';HttpStatus=0}
     } catch {
-        Record-ProviderFailure -Config $Config -Provider 'bilibili_search' -ErrorType 'INVALID_SEARCH_RESPONSE' -Message $_.Exception.Message | Out-Null
-        return [pscustomobject]@{ Candidates = @(); Blocked = $false; Error = 'INVALID_SEARCH_RESPONSE'; HttpStatus = 0 }
+        $status=0
+        if ($_.Exception.PSObject.Properties['Response'] -and $_.Exception.Response) {
+            try { $status=[int]$_.Exception.Response.StatusCode } catch {}
+        }
+        $code=if ($status -eq 412 -or $status -eq 429) { 'HTTP_412' } else { 'SEARCH_FAILED' }
+        Record-ProviderFailure -Config $Config -Provider bilibili_search -HttpStatus $(if ($code -eq 'HTTP_412') {412} else {$status}) -ErrorType $code -Message 'Bilibili metadata search failed' | Out-Null
+        return [pscustomobject]@{Candidates=@();Blocked=($code -eq 'HTTP_412');Error=$code;HttpStatus=$status}
     }
 }
 

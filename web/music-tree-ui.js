@@ -128,7 +128,7 @@
     <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 10a8 8 0 00-14-5L3 8m0-5v5h5M4 14a8 8 0 0014 5l3-3m0 5v-5h-5"/></symbol>
     <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12m-5-5 5 5 5-5M4 15v5h16v-5"/></symbol>
     <symbol id="i-headphones" viewBox="0 0 24 24"><path d="M4 13v-2a8 8 0 0116 0v2M4 11H3v8h4v-8Zm16 0h1v8h-4v-8Z"/></symbol>
-    <symbol id="i-settings" viewBox="0 0 24 24"><path d="m9 3-1 3-3 1v4l-2 1 2 1v4l3 1 1 3h6l1-3 3-1v-4l2-1-2-1V7l-3-1-1-3Z"/><circle cx="12" cy="12" r="3"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 30 20"><path d="M2 5h8m5 0h13M2 15h16m5 0h5"/><circle cx="12.5" cy="5" r="2.5"/><circle cx="20.5" cy="15" r="2.5"/></symbol>
     <symbol id="i-shuffle" viewBox="0 0 24 24"><path d="M3 6h3c5 0 7 12 12 12h3m-4-4 4 4-4 4M3 18h3c2 0 3-2 4-4m4-4c1-2 2-4 4-4h3m-4-4 4 4-4 4"/></symbol>
     <symbol id="i-left" viewBox="0 0 24 24"><path d="m14 5-7 7 7 7"/></symbol><symbol id="i-right" viewBox="0 0 24 24"><path d="m10 5 7 7-7 7"/></symbol>
     <symbol id="i-up" viewBox="0 0 24 24"><path d="m5 14 7-7 7 7"/></symbol><symbol id="i-down" viewBox="0 0 24 24"><path d="m5 10 7 7 7-7"/></symbol>

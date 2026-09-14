@@ -13,11 +13,18 @@ function Invoke-RestMethod {
     Start-Sleep -Milliseconds 2200
     return ('{"code":200,"result":{"songs":[{"id":777001,"name":"Fixture Lake","artists":[{"name":"Fixture Artist"}],"album":{"name":"Reflections"},"duration":120000}]}}' | ConvertFrom-Json)
 }
+function Search-BilibiliCandidates {
+    param($Config,$Track,$Query,$Limit,$TimeoutSeconds)
+    Start-Sleep -Milliseconds 400
+    return [pscustomobject]@{Candidates=@([pscustomobject]@{bvid='BV1xx411c7mD';title='Fixture Bili';duration=120;metadata=[pscustomobject]@{uploader='Fixture UP'}});Blocked=$false;Error=''}
+}
 '@ | Add-Content -LiteralPath $module -Encoding UTF8
         Start-MusicServerFixtureServices -Fixture $script:runtime -WithUi
         $script:base="http://127.0.0.1:$($runtime.UiPort)"
     }
-    AfterAll { if ($runtime) { Remove-MusicServerRuntimeFixture -Fixture $runtime } }
+    AfterAll {
+        if ($runtime) { Remove-MusicServerRuntimeFixture -Fixture $runtime }
+    }
     It 'keeps health responsive during a provider request and supports like-to-download without daily seeds' {
         $timer=[Diagnostics.Stopwatch]::StartNew()
         $job=Invoke-RestMethod "$base/api/search" -Method Post -ContentType 'application/json' -Body '{"query":"Fixture Lake"}' -TimeoutSec 5
@@ -64,5 +71,21 @@ function Invoke-RestMethod {
     It 'rejects invalid search bodies through the shared input contract' {
         $response=Invoke-MusicServerFragmentedRequest -Port $runtime.UiPort -Path '/api/search' -Method POST -Fragments @('{"query":{}}')
         $response.Status | Should Be 400
+    }
+    It 'passes source selection through the API and uses the same like-download transaction for Bilibili' {
+        $job=Invoke-RestMethod "$base/api/search" -Method Post -ContentType 'application/json' -Body '{"query":"Fixture Lake","source":"bilibili"}' -TimeoutSec 5
+        $deadline=[DateTime]::UtcNow.AddSeconds(15)
+        do {
+            $result=Invoke-RestMethod "$base/api/search/$($job.id)" -TimeoutSec 5
+            if ($result.state -ne 'RUNNING') { break }
+            Start-Sleep -Milliseconds 250
+        } while ([DateTime]::UtcNow -lt $deadline)
+        $result.state | Should Be DONE
+        $result.source | Should Be bilibili
+        $result.items[0].title | Should Be 'Fixture Bili'
+        $like=Invoke-RestMethod "$base/api/tracks/$($result.items[0].track_id)/like" -Method Post -ContentType application/json -Body '{}'
+        $like.wanted.state | Should Be WANTED
+        $details=Invoke-RestMethod "$base/api/tracks/$($result.items[0].track_id)"
+        $details.track.download_candidates[0].bvid | Should Be BV1xx411c7mD
     }
 }
