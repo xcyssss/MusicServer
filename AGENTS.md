@@ -63,7 +63,7 @@ The desktop gate consists of `cargo fmt --check`, `cargo check --locked`, `cargo
 ## Runtime and delivery
 
 - Default UI/API ports are 8790/8787. Reuse only a pair with current UI and API build markers. Respect foreign listeners and existing fallback pairs. Stop only the service tree owned by the APP; validate normal close, including during setup.
-- Downloader mutex/SQLite leases remain authoritative. Try usable local/direct sources first; search is bounded fallback. Provider rate limits stop requests to that provider and never cause unbounded retries. `UNAVAILABLE` remains terminal until an explicit retry.
+- Downloader mutex/SQLite leases remain authoritative. Try usable local/direct sources first; search is bounded fallback. Provider probes have expiring SQLite claims and release them on every completed outcome; distinguish an active probe or recovery cooldown from a real HTTP 412/429. Rate limits stop provider requests and never cause unbounded retries. `UNAVAILABLE` remains terminal until an explicit retry.
 - New runtime modules/assets must appear in staging, build identity, Rust manifest/watch lists, static routes where needed, and runtime fixtures. A release must boot without the checkout and contain no user data or credentials.
 - Runtime logging uses `Write-MusicServerLog` under `APP_HOME\logs` (4 MB with `.1`/`.2`). Log actionable transitions and sanitized failures; avoid per-poll noise. Discarded service stdout makes `Write-Host` insufficient.
 - Preserve unrelated work. Group coherent changes into local commits, push once to a `codex/` review branch after relevant local checks, then inspect CI once with `gh pr checks <PR>`. Report pending checks; never use `--watch`. Merge only with explicit user authorization.

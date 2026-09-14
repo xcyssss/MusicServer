@@ -103,7 +103,7 @@
 .rail-thumb svg { display: block; width: 100%; height: 100%; }
 .tree-navigation { height: 42px; flex: 0 0 42px; position: relative; display: flex; align-items: center; justify-content: flex-end; padding-right: 58px; }
 .tree-navigation #library-count { position: absolute; left: 18px; bottom: 12px; font-size: 10px; color: #849174; }
-.group-nav { position: fixed; left: 50%; bottom: 113px; transform: translateX(-50%); z-index: 25; display: flex; gap: 15px; align-items: center; font-size: 11px; color: #476347; white-space: nowrap; }
+.group-nav { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%); z-index: 25; display: flex; gap: 15px; align-items: center; font-size: 11px; color: #345749; white-space: nowrap; }
 .round-button { width: 32px; height: 32px; padding: 4px; }
 .round-button .ui-icon { width: 18px; height: 18px; }
 .tree-page .recommendation-panel { padding: 0; background: none; border: 0; display: flex; flex-direction: column; min-height: 0; gap: 0; overflow: visible; }
@@ -135,7 +135,9 @@
 .orbit-play { width: 25px; height: 25px; border: 0; background: #567345; color: #fff !important; border-radius: 50%; display: flex; align-items: center; justify-content: center; padding: 5px; margin-top: 4px; }
 .orbit-play .ui-icon { width: 13px; height: 13px; }
 .tree-page .wanted-callout { position: relative; margin: 0 auto 3px; padding: 0; border: none; min-height: 35px; flex: 0 0 35px; background: none; width: min(78%,360px); z-index: 20; }
-.tree-page .wanted-callout summary { display: flex; align-items: center; justify-content: center; list-style: none; gap: 9px; width: max-content; margin: 0 auto; border: 1px solid #b5bea1; border-radius: 25px; background: #f8f9e4ab; box-shadow: inset 0 1px #fffff4; padding: 7px 16px; font-size: 12px; cursor: pointer; }
+.tree-page .wanted-callout summary { display: flex; align-items: center; justify-content: center; list-style: none; gap: 9px; width: max-content; margin: 0 auto; color:#244d3e; border: 1px solid #75947e; border-radius: 25px; background: #eff6e5ed; box-shadow: inset 0 1px #fffff4,0 2px 6px #2e574b18; padding: 7px 16px; font-size: 12px; font-weight:600; cursor: pointer; transition:background 160ms,box-shadow 160ms; }
+.tree-page .wanted-callout summary:hover,.tree-page .wanted-callout[open] summary { color:#173e34; background:#f8fced; box-shadow:inset 0 1px #fff,0 2px 9px #2e574b26; }
+.tree-page .wanted-callout summary:focus-visible { outline:2px solid #4a765b; outline-offset:3px; }
 .tree-page .wanted-callout summary::-webkit-details-marker { display: none; }
 .tree-page .wanted-callout summary .ui-icon { width: 17px; height: 17px; }
 .tree-page .wanted-list { position: absolute; bottom: 43px; right: 0; width: min(430px,42vw); max-height: 300px; overflow-y: auto; background: #f5f7eafa; border: 1px solid #c6cfb6; border-radius: 19px; padding: 18px; color: var(--ink); box-shadow: 0 15px 55px #30442430; font-size: 12px; }
@@ -213,6 +215,7 @@
 .water-discover { position:absolute; inset:0; width:100%; height:100%; background:none; border:0; z-index:2; clip-path:polygon(49% 0,66% 24%,82% 43%,96% 66%,97% 79%,87% 94%,62% 99%,35% 98%,13% 90%,5% 74%,8% 56%,28% 28%); cursor:pointer; }
 .water-discover:focus-visible { background:#f7ffe330; outline:2px solid #8a9e66; outline-offset:-5px; }
 .water-ripples { position:absolute; inset:0; overflow:hidden; pointer-events:none; z-index:5; clip-path:polygon(49% 0,66% 24%,82% 43%,96% 66%,97% 79%,87% 94%,62% 99%,35% 98%,13% 90%,5% 74%,8% 56%,28% 28%); }
+.recommendation-water { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; z-index:2; clip-path:polygon(49% 0,66% 24%,82% 43%,96% 66%,97% 79%,87% 94%,62% 99%,35% 98%,13% 90%,5% 74%,8% 56%,28% 28%); }
 .discovery-wave { position:absolute; border:2px solid #ffffdf; border-radius:50%; box-shadow:0 0 12px #fcffd17a,inset 0 0 14px #d9e6aa66; pointer-events:none; }
 .tree-page #recommendation-list { pointer-events:none; }
 .ripple-focus,.ripple-orbit { pointer-events:auto; }

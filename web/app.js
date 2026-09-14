@@ -1494,7 +1494,10 @@ async function searchOnline() {
       const result = await fetchJson(`/api/search/${encodeURIComponent(job.id)}`, {signal});
       if (request !== state.online.request) return;
       if (result.state === 'ERROR') {
-        throw new Error(result.error === 'PROVIDER_UNAVAILABLE' ? '当前来源暂时限流，请稍后重试，或切换另一个来源。曲库仍可正常播放。' : '网络搜索暂时没有完成，请稍后重试。');
+        const retry = new Date(result.retry_at);
+        const when = result.retry_at && Number.isFinite(retry.getTime()) && retry > new Date() ? `可在 ${retry.toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'})} 后重试。` : '请稍后重试。';
+        const reasons = {PROVIDER_BUSY:'正在检查来源是否恢复，请稍后再搜一次。', PROVIDER_RATE_LIMITED:`B站返回了限流响应，${when}也可以切换网易云。`, PROVIDER_COOLDOWN:`上次连接没有完成，来源正在短暂冷却。${when}`, PROVIDER_UNAVAILABLE:`当前来源暂时不可用。${when}可以切换另一个来源。`};
+        throw new Error(reasons[result.error] || '网络搜索暂时没有完成，请稍后重试。');
       }
       if (result.state === 'DONE') {
         if (!Array.isArray(result.items)) throw new Error('搜索结果无法读取，请重试。');

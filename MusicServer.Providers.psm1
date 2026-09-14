@@ -80,12 +80,17 @@ function Claim-ProviderRequest {
         $blocked = $null
         if ($health.blocked_until) { $blocked = Convert-ToUtcDateTime $health.blocked_until }
         if ($blocked -and $blocked -gt $now) { return $false }
-        if (-not (Claim-HalfOpenProbeDb -Provider $Provider)) { return $false }
+        if (-not (Claim-HalfOpenProbeDb -Provider $Provider -LeaseMinutes $ProbeCooldownMinutes)) { return $false }
         Write-MusicServerEventDb -Provider $Provider -EventType 'CIRCUIT_HALF_OPEN' -Message 'cooldown elapsed; one real request probe permitted'
         return $true
     }
     if ([string]$health.state -eq 'HALF_OPEN') {
-        return [bool](Claim-HalfOpenProbeDb -Provider $Provider)
+        $claimed = [bool](Claim-HalfOpenProbeDb -Provider $Provider -LeaseMinutes $ProbeCooldownMinutes)
+        if ($claimed -and $health.probe_pending) {
+            Write-MusicServerEventDb -Provider $Provider -EventType 'CIRCUIT_PROBE_RECOVERED' -Message 'expired probe reclaimed; one bounded request permitted'
+            Write-MusicServerLog -Path (Join-Path $Config.LogDir 'musicserver-provider.log') -Message "[circuit] provider=$Provider expired_probe_reclaimed=true"
+        }
+        return $claimed
     }
     return $true
 }
@@ -105,6 +110,7 @@ function Record-ProviderSuccess {
     $health.state = 'CLOSED'
     $health.blocked_until = $null
     $health.probe_pending = $false
+    $health.last_error = ''
     if ($LatencyMs -gt 0) {
         if ([double]$health.average_latency_ms -le 0) { $health.average_latency_ms = $LatencyMs }
         else { $health.average_latency_ms = (([double]$health.average_latency_ms * $oldCount) + $LatencyMs) / ($oldCount + 1) }
@@ -126,7 +132,9 @@ function Record-ProviderFailure {
     $health.failure_count = [int]$health.failure_count + 1
     $health.consecutive_failures = [int]$health.consecutive_failures + 1
     $health.last_failure = Get-NowIso
-    if ($HttpStatus -eq 412) {
+    $health.last_error = $ErrorType
+    if ($HttpStatus -eq 412 -or $HttpStatus -eq 429) {
+        $health.last_error = "HTTP_$HttpStatus"
         $health.consecutive_412 = [int]$health.consecutive_412 + 1
         $health.last_412_at = Get-NowIso
         $minutes = [Math]::Min($MaxCooldownMinutes, $BaseCooldownMinutes * [Math]::Pow(2, [int]$health.consecutive_412 - 1))
@@ -134,8 +142,16 @@ function Record-ProviderFailure {
         $health.state = 'OPEN'
         $health.probe_pending = $false
         Save-ProviderHealth -Config $Config -Health $health | Out-Null
-        Write-MusicServerEventDb -Provider $Provider -EventType 'CIRCUIT_OPEN' -ErrorType 'HTTP_412' -HttpStatus 412 -Message "blocked_until=$($health.blocked_until); cooldown_minutes=$minutes"
+        Write-MusicServerEventDb -Provider $Provider -EventType 'CIRCUIT_OPEN' -ErrorType "HTTP_$HttpStatus" -HttpStatus $HttpStatus -Message "blocked_until=$($health.blocked_until); cooldown_minutes=$minutes"
     } else {
+        # Every completed probe releases its claim, including transport/parser
+        # errors. Otherwise HALF_OPEN would remain latched across APP upgrades.
+        if ([string]$health.state -eq 'HALF_OPEN') {
+            $health.state = 'OPEN'
+            $health.probe_pending = $false
+            $health.blocked_until = [DateTime]::UtcNow.AddMinutes($BaseCooldownMinutes).ToString('o')
+            Write-MusicServerEventDb -Provider $Provider -EventType 'CIRCUIT_PROBE_FAILED' -ErrorType $ErrorType -Message "blocked_until=$($health.blocked_until)"
+        }
         Save-ProviderHealth -Config $Config -Health $health | Out-Null
     }
     return $health
@@ -240,7 +256,9 @@ function Search-BilibiliCandidates {
         [string]$Query = '', [ValidateRange(1,20)][int]$Limit = 10,
         [ValidateRange(5,40)][int]$TimeoutSeconds = 40)
     if (-not (Claim-ProviderRequest -Config $Config -Provider 'bilibili_search')) {
-        return [pscustomobject]@{Candidates=@();Blocked=$true;Error='CIRCUIT_OPEN';HttpStatus=0}
+        $health = Get-ProviderHealth -Config $Config -Provider 'bilibili_search'
+        $reason = if ($health.state -eq 'HALF_OPEN') { 'PROVIDER_BUSY' } elseif ($health.last_error -match '^HTTP_(412|429)$' -or (-not $health.last_error -and $health.consecutive_412 -gt 0)) { 'PROVIDER_RATE_LIMITED' } else { 'PROVIDER_COOLDOWN' }
+        return [pscustomobject]@{Candidates=@();Blocked=$true;Error=$reason;HttpStatus=0}
     }
     $keyword=if ($Query) { $Query } else { [string](@(Get-SongSearchQueries -Title $Track.title -Artist $Track.artist -Max 1) | Select-Object -First 1) }
     $clock=[Diagnostics.Stopwatch]::StartNew()
@@ -268,9 +286,10 @@ function Search-BilibiliCandidates {
         if ($_.Exception.PSObject.Properties['Response'] -and $_.Exception.Response) {
             try { $status=[int]$_.Exception.Response.StatusCode } catch {}
         }
-        $code=if ($status -eq 412 -or $status -eq 429) { 'HTTP_412' } else { 'SEARCH_FAILED' }
-        Record-ProviderFailure -Config $Config -Provider bilibili_search -HttpStatus $(if ($code -eq 'HTTP_412') {412} else {$status}) -ErrorType $code -Message 'Bilibili metadata search failed' | Out-Null
-        return [pscustomobject]@{Candidates=@();Blocked=($code -eq 'HTTP_412');Error=$code;HttpStatus=$status}
+        $limited = $status -eq 412 -or $status -eq 429
+        $code=if ($limited) { 'PROVIDER_RATE_LIMITED' } else { 'SEARCH_FAILED' }
+        Record-ProviderFailure -Config $Config -Provider bilibili_search -HttpStatus $status -ErrorType $code -Message 'Bilibili metadata search failed' | Out-Null
+        return [pscustomobject]@{Candidates=@();Blocked=$limited;Error=$code;HttpStatus=$status}
     }
 }
 

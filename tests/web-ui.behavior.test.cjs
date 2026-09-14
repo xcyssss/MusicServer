@@ -56,11 +56,15 @@ const library = [{ id: 'library-a', title: '春天', artist: '测试歌手', alb
 
 test('source switching isolates requests and explains a blocked provider', async () => {
   const a=await app(); a.get('library-search').value='song';
-  a.context.fetchHandler=async(url,options)=>url==='/api/search'?json({id:JSON.parse(options.body).source}):json({state:'ERROR',error:'PROVIDER_UNAVAILABLE'});
+  a.context.fetchHandler=async(url,options)=>url==='/api/search'?json({id:JSON.parse(options.body).source}):json({state:'ERROR',error:'PROVIDER_RATE_LIMITED'});
   await a.get('search-bilibili').emit('click');await settle();
   assert.equal(JSON.parse(a.requests.find(r=>r.url==='/api/search').options.body).source,'bilibili');
-  assert.match(a.get('online-search-status').textContent,/暂时限流.*切换另一个来源/);
+  assert.match(a.get('online-search-status').textContent,/B站返回了限流.*切换网易云/);
   assert.equal(a.get('search-bilibili').getAttribute('aria-pressed'),'true');
+  a.context.fetchHandler=async(url,options)=>url==='/api/search'?json({id:'busy'}):json({state:'ERROR',error:'PROVIDER_BUSY'});
+  await a.get('search-bilibili').emit('click'); await settle();
+  assert.match(a.get('online-search-status').textContent,/正在检查来源/);
+  assert.doesNotMatch(a.get('online-search-status').textContent,/限流/);
 });
 
 test('Bilibili preview is attributed to the UP, stops on close, and downloaded copies use audio', async () => {

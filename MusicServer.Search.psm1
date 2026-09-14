@@ -76,7 +76,7 @@ function Invoke-OnlineMusicSearch {
     try {
         if ($Source -eq 'bilibili') {
             $result=Search-BilibiliCandidates -Config $Config -Track ([pscustomobject]@{title=$Query;artist=''}) -Query $Query -Limit 20 -TimeoutSeconds 17
-            if ($result.Error) { $code=if ($result.Blocked) { 'PROVIDER_UNAVAILABLE' } else { [string]$result.Error }; throw $code }
+            if ($result.Error) { $code=[string]$result.Error; throw $code }
             $tracks=@(ConvertFrom-BilibiliSearchCandidates -Candidates @($result.Candidates))
         } else {
             if (-not (Claim-ProviderRequest -Config $Config -Provider 'netease')) { $code='PROVIDER_UNAVAILABLE'; throw $code }
@@ -161,7 +161,9 @@ function Get-OnlineMusicSearch {
                 liked=($prefs[$track.id] -eq 'LIKE');local_status=$track.status;preview_source=@($track.preview_sources | Select-Object -First 1)[0]}
         })
     }
-    return @{id=$SearchId;query=$search.query;state=$search.state;error=$search.error_code;source=$search.source;items=$items}
+    $provider = if ($search.source -eq 'bilibili') { 'bilibili_search' } else { 'netease' }
+    $health = Get-ProviderHealthDb -Provider $provider
+    return @{id=$SearchId;query=$search.query;state=$search.state;error=$search.error_code;source=$search.source;items=$items;retry_at=$health.blocked_until}
 }
 
 function ConvertFrom-BilibiliSearchCandidates {

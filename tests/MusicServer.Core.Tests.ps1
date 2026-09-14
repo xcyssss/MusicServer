@@ -223,6 +223,22 @@ Describe 'MusicServer canonical state and queue' {
         (Claim-ProviderRequest -Config $Config -Provider 'bilibili_download') | Should Be $false
     }
 
+    It 'releases a failed half-open probe and permits recovery after its cooldown' {
+        $health = Get-ProviderHealth -Config $Config -Provider 'bilibili_search'
+        $health.state = 'HALF_OPEN'; $health.probe_pending = $true
+        Save-ProviderHealth -Config $Config -Health $health | Out-Null
+        $failed = Record-ProviderFailure -Config $Config -Provider 'bilibili_search' -ErrorType 'SEARCH_FAILED'
+        $failed.state | Should Be 'OPEN'
+        $failed.probe_pending | Should Be $false
+        $failed.last_error | Should Be 'SEARCH_FAILED'
+        (Claim-ProviderRequest -Config $Config -Provider 'bilibili_search') | Should Be $false
+        $failed.blocked_until = [DateTime]::UtcNow.AddSeconds(-1).ToString('o')
+        Save-ProviderHealth -Config $Config -Health $failed | Out-Null
+        (Claim-ProviderRequest -Config $Config -Provider 'bilibili_search') | Should Be $true
+        Record-ProviderSuccess -Config $Config -Provider 'bilibili_search' | Out-Null
+        (Get-ProviderHealth -Config $Config -Provider 'bilibili_search').state | Should Be 'CLOSED'
+    }
+
     It 'allows exactly one half-open probe and closes after success' {
         $health = Record-ProviderFailure -Config $Config -Provider 'bilibili_download' -HttpStatus 412
         $health.blocked_until = [DateTime]::UtcNow.AddMinutes(-1).ToString('o')
