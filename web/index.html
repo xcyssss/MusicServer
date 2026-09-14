@@ -51,7 +51,7 @@
           <section id="library" class="library-panel" aria-label="本地音乐库">
             <div class="section-heading"><div><span class="section-kicker">YOUR COLLECTION</span><h2>音乐库 <span id="library-nav-count" class="count-badge">0</span></h2></div><span class="panel-hint">随时播放，留在本地</span></div>
             <div class="library-tools">
-              <label class="search-box"><span aria-hidden="true">⌕</span><input id="library-search" type="search" aria-label="搜索音乐库" placeholder="搜索歌名、艺术家、专辑" autocomplete="off" /><kbd>Ctrl K</kbd></label>
+              <label class="search-box"><span aria-hidden="true">⌕</span><input id="library-search" type="search" aria-label="搜索音乐" placeholder="搜曲库 · 回车找网络歌曲" autocomplete="off" /><button id="online-search-button" class="search-online-button" type="button" aria-controls="online-search-panel" aria-expanded="false">搜网络</button><kbd>Ctrl K</kbd></label>
               <div class="library-options"><div class="play-mode" aria-label="播放顺序"><button class="mode-button active" data-mode="sequence" aria-pressed="true">顺序播放</button><button id="shuffle-button" class="shuffle-button" type="button" aria-pressed="false" aria-label="重新随机播放顺序">随机排列</button></div><label class="sort-select"><span class="sr-only">音乐库排序</span><select id="library-sort" aria-label="音乐库排序"><option value="default">默认排序</option><option value="added">最近入库</option></select></label></div>
             </div>
             <div class="list-caption"><span>歌曲 / 艺术家</span><span id="library-count" role="status">同步中…</span></div>
@@ -105,7 +105,13 @@
 
       <audio id="audio-player" preload="metadata"></audio>
     </footer>
-    <aside id="lyrics-panel" class="lyrics-panel" hidden aria-label="歌词">
+    <aside id="online-search-panel" class="online-search-panel" aria-label="网络歌曲搜索" hidden>
+    <div class="online-search-heading"><div><span class="section-kicker">FIND YOUR SOUND</span><h2>搜索音乐</h2></div><button id="online-search-close" class="icon-button" aria-label="关闭网络搜索">×</button></div>
+    <div class="online-search-tools"><button id="search-local" class="search-source" type="button">本地曲库</button><span class="search-source selected">网络 · 网易云</span><button id="online-search-retry" class="text-button" type="button">重新搜索</button></div>
+    <p id="online-search-status" class="online-search-status" role="status"></p><div id="online-search-results" class="online-search-results" aria-label="网络搜索结果"></div>
+    <p class="online-search-note">先试听，再留下喜欢的。点喜欢后自动下载，进度在「下载动态」。</p>
+  </aside>
+  <aside id="lyrics-panel" class="lyrics-panel" hidden aria-label="歌词">
       <div class="lyrics-heading"><div><span class="section-kicker">NOW PLAYING</span><h2>歌词</h2></div><button id="lyrics-close" class="icon-button" aria-label="关闭歌词">×</button></div>
       <div id="lyrics-content" class="lyrics-content"><span class="muted">播放歌曲后加载歌词</span></div>
     </aside>

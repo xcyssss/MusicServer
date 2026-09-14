@@ -1156,6 +1156,7 @@ function Handle-Request {
         '/music-tree.html' { Send-IndexHtml -Context $Context -RelativePath 'music-tree.html'; return }
         '/music-tree-ui.js' { Send-StaticFile -Context $Context -RelativePath 'music-tree-ui.js' -ContentType 'application/javascript; charset=utf-8'; return }
         '/onboarding.js' { Send-StaticFile -Context $Context -RelativePath 'onboarding.js' -ContentType 'application/javascript; charset=utf-8'; return }
+        '/pond-water.js' { Send-StaticFile -Context $Context -RelativePath 'pond-water.js' -ContentType 'application/javascript; charset=utf-8'; return }
         '/management.js' { Send-StaticFile -Context $Context -RelativePath 'management.js' -ContentType 'application/javascript; charset=utf-8'; return }
         '/music-tree.css' { Send-StaticFile -Context $Context -RelativePath 'music-tree.css' -ContentType 'text/css; charset=utf-8'; return }
         '/assets/muelsyse-water.png' { Send-StaticFile -Context $Context -RelativePath 'assets/muelsyse-water.png' -ContentType 'image/png'; return }

@@ -47,6 +47,7 @@ Import-Module (Join-Path $PSScriptRoot 'MusicServer.State.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Http.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Onboarding.psm1') -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Management.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Search.psm1') -Force
 $startupPhases['module_imports'] = $startupClock.Elapsed.TotalMilliseconds
 
 $Config = New-MusicServerConfig -Root $Root
@@ -76,6 +77,7 @@ Initialize-MusicServerDatabase -DbPath $DbPath -SqliteExe $SqliteExe
 $startupPhases['database_connect'] = $startupClock.Elapsed.TotalMilliseconds
 Initialize-MusicServerSchema
 Initialize-ManagementSchema
+Initialize-OnlineSearchSchema
 Reset-InterruptedManagementJobs -Config $Config
 $startupPhases['schema'] = $startupClock.Elapsed.TotalMilliseconds
 Apply-ConfiguredMusicDir -Config $Config
@@ -176,6 +178,17 @@ function Get-TrackLocalFile {
                 }
             }
         } catch {}
+    }
+    # Earlier installed builds saved the exact published filename but left the
+    # Navidrome id empty. Resolve that SQLite association, never a title guess.
+    if ($trackId -and [string](Get-OptionalProperty $Track 'status') -eq 'LOCAL') {
+        $files = @(Invoke-MusicServerParamSql -Template 'SELECT file_name FROM recommendation_files WHERE track_id=@id AND seed_source=@source;' -Params @{id=$trackId;source='wanted_worker'})
+        foreach ($row in $files) {
+            $name=[string]$row.file_name
+            if (-not $name -or [IO.Path]::GetFileName($name) -ne $name) { continue }
+            $path=Join-Path $Config.MusicDir $name
+            if ([IO.File]::Exists($path)) { return [IO.Path]::GetFullPath($path) }
+        }
     }
     return $null
 }
@@ -785,6 +798,17 @@ while ($true) {
             $sessionId = Get-ListeningSessionIdFromBody -Body $bodyText
             $body = Get-ListeningPlayResponse -LocalId $trackId -SessionId $sessionId
             Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 200 })
+        }
+        elseif ($method -eq 'POST' -and $path -eq '/api/search') {
+            $payload = if ($bodyText) { ConvertFrom-Json -InputObject $bodyText } else { @{} }
+            $result = Start-OnlineMusicSearch -Config $Config -Query (Get-OptionalProperty $payload 'query' $null)
+            Send-Json -Context ([pscustomobject]@{Response=$Context.Response;Body=$result.Body;StatusCode=$result.Status})
+        }
+        elseif ($method -eq 'GET' -and $path -match '^/api/search/([a-f0-9]{32})$') {
+            $result = Get-OnlineMusicSearch -SearchId $Matches[1]
+            $status = if ($result) { 200 } else { 404 }
+            $body = if ($result) { $result } else { @{error='SEARCH_NOT_FOUND'} }
+            Send-Json -Context ([pscustomobject]@{Response=$Context.Response;Body=$body;StatusCode=$status})
         }
         elseif ($method -eq 'GET' -and $path -eq '/api/library') {
             $allItems = @(Get-LocalListeningItems)

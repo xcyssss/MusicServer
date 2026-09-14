@@ -223,25 +223,16 @@
 .ripple-orbit[data-orbit="3"] { left:77%; top:57%; }
 .ripple-orbit[data-orbit="4"] { left:20%; top:79%; }
 .ripple-orbit[data-orbit="5"] { left:60%; top:81%; }
-/* Refracted sunlight: a cached organic light field moves slowly over the water. */
-.tree-page::before { background:radial-gradient(ellipse at 12% 10%,#fffbd5a0,transparent 50%),radial-gradient(ellipse at 85% 85%,#bbcda54d,transparent 45%); }
-.water-light { position:fixed; inset:-5%; pointer-events:none; opacity:.72; overflow:hidden; animation:water-sunlight 14s ease-in-out infinite alternate; will-change:transform; mask-image:linear-gradient(110deg,#000e,#0002 47%,#000c); }
-@keyframes water-sunlight { from { transform:translate(-1%,-1%) scale(1.02); opacity:.65; } to { transform:translate(2%,1.5%) scale(1.09); opacity:.88; } }
-.water-paused .water-light { animation-play-state:paused; }
-.tree-page .topbar,.tree-page .player-bar { background-color:#f5f6e7a0; }
-.water-art { filter:drop-shadow(0 2px 4px #b6aa5966); }
-.discovery-surface { width:100%; height:100%; overflow:visible; filter:drop-shadow(0 2px 2px #557640aa) drop-shadow(0 0 7px #fff4bc); }
+/* Sky and clouds share a single, unmasked surface across the workspace. */
+.tree-page { background:linear-gradient(168deg,#e5ede7 0%,#f2f5e7 43%,#c4d8cc 100%); --ink:#25493c; --glass-panel:linear-gradient(132deg,#fbfff6ed,#eaf4eae8); }
+.tree-page::before,.tree-page::after { display:none; }
+.pond-atmosphere { position:fixed; inset:0; pointer-events:none; overflow:hidden; }
+#pond-water { display:block; width:100%; height:100%; }
+.tree-page .topbar,.tree-page .player-bar { background:linear-gradient(115deg,#fcfff67a,#f5fff33d 52%,#f6fff56e); backdrop-filter:blur(9px); border-color:#fffffff0; box-shadow:inset 0 1px 0 #fff,inset 0 -1px 0 #89ae941c,0 3px 18px #547c6810; }
+.discovery-surface { width:100%; height:100%; overflow:visible; filter:drop-shadow(0 1px 1px #4d7c6244); }
 .discovery-wave { position:static; border:0; box-shadow:none; }
 .tree-page #recommendation-list { transition:opacity 320ms ease,filter 320ms ease; }
-.tree-page #recommendation-list.water-turning { opacity:.24; filter:blur(2px); }
-@media (prefers-reduced-motion:reduce) { .water-light { opacity:.35; } }
-
-/* Clear glass and responsive light; controls remain opaque enough to read. */
-.tree-page { background:radial-gradient(ellipse at 35% 38%,#faffeeea,transparent 53%),radial-gradient(ellipse at 92% 12%,#f9ffe9,transparent 45%),linear-gradient(135deg,#c4d3ad,#edf4dd 48%,#bdd0b2); }
-.tree-page::after { content:''; position:fixed; inset:0; pointer-events:none; background:radial-gradient(ellipse 380px 240px at var(--water-x,50%) var(--water-y,50%),#fffff0aa,transparent 75%); mix-blend-mode:soft-light; }
-.water-light svg { transform:translate(var(--water-drift-x,0px),var(--water-drift-y,0px)); transition:transform 650ms ease-out; opacity:.24; }
-.water-light .water-caustics { position:absolute; inset:-30px; width:calc(100% + 60px); height:calc(100% + 60px); opacity:1; transition:transform 900ms ease-out; }
-.tree-page .topbar,.tree-page .player-bar { background:linear-gradient(112deg,#ffffed73,#f7ffed20 44%,#ffffec52); backdrop-filter:blur(4px); border-color:#fffffff0; box-shadow:inset 0 1px 0 #fff,inset 0 -1px 0 #c1d0a14d,0 1px 10px #6f886118; }
+.tree-page #recommendation-list.water-turning { opacity:.48; filter:blur(1px); }
 /* Equal side tracks and symmetric padding keep the control axis at the window midpoint. */
 .tree-page .player-bar { grid-template-columns:minmax(0,1fr) minmax(0,40%) minmax(0,1fr); padding-inline:18px; }
 .leaf-body { stroke:#91a678; }.leaf-veins { opacity:.48; }
@@ -259,3 +250,56 @@
 .ripple-focus.playing { box-shadow:0 0 0 4px #fff8b735,0 0 0 6px #d9c57b94,inset 0 2px 9px #ffffffb0,inset 0 -8px 16px #8ca76526; }
 .ripple-orbit:hover { background:radial-gradient(ellipse at 27% 17%,#fff,transparent 55%),#effbd445; box-shadow:inset 0 0 0 3px #ffffec80,0 0 17px #f9ffdbb0; }
 @media(prefers-reduced-motion:reduce) { .tree-page::after { display:none; } .water-light svg { transform:none; } }
+
+/* Small growth at the stem joints. The song hit areas never move. */
+.trunk-shadow { stroke:#71958420; stroke-width:12; }
+.trunk-main { stroke-width:6.5; }
+.trunk-edge { stroke:#fffff1c7; stroke-width:1; }
+.sprig-body { fill:#b8d0ae78; stroke:#83a28c; stroke-width:.9; }
+.sprig-body.small { opacity:.72; }
+.sprig-vein { fill:none; stroke:#fbfff0; stroke-width:.7; opacity:.9; }
+.stem-dew { fill:#ffffffb0; stroke:#799c8180; stroke-width:.7; }
+.sprig-leaves { transform-box:fill-box; transform-origin:68% 100%; animation:sprig-breath 8s ease-in-out infinite; animation-delay:var(--sprig-delay); }
+@keyframes sprig-breath { 0%,65%,100% { transform:rotate(0deg); } 76% { transform:rotate(3deg); } 85% { transform:rotate(-1.8deg); } 94% { transform:rotate(.7deg); } }
+.tree-leaf .leaf-surface { --facing:1; transform-origin:99% 50%; transform:scaleX(var(--facing)); }
+.tree-leaf.is-right .leaf-surface { --facing:-1; transform-origin:50% 50%; }
+.tree-leaf:hover .leaf-surface { animation:leaf-greeting 950ms ease-out; }
+@keyframes leaf-greeting { 0%,100% { transform:scaleX(var(--facing)) rotate(0); } 25% { transform:scaleX(var(--facing)) rotate(-1.1deg); } 50% { transform:scaleX(var(--facing)) rotate(.65deg); } 75% { transform:scaleX(var(--facing)) rotate(-.25deg); } }
+.leaf-veins { opacity:.36; stroke:#ffffee; }
+.leaf-rim { stroke:#fffff4; }
+.leaf-body { stroke:#88a58c; stroke-width:1; }
+.water-art { filter:drop-shadow(0 4px 6px #577f7012); }
+.drop-reflection { filter:blur(1px); }
+.ripple-focus,.ripple-orbit { background:radial-gradient(ellipse at 29% 16%,#ffffffa1,transparent 44%),linear-gradient(155deg,#f8fff53b,#d8ece328); backdrop-filter:blur(2px); border-color:#fbfff5ee; box-shadow:inset 0 1px 4px #fffffff0,inset 0 -5px 12px #719e8620,0 0 0 1px #7ca58d36,0 4px 14px #5c88741b; }
+.ripple-focus { box-shadow:0 0 0 4px #fbfff233,0 0 0 5px #b6cba668,inset 0 2px 9px #ffffffe0,inset 0 -7px 13px #719e861c; }
+.ripple-focus.playing { box-shadow:0 0 0 4px #fffde338,0 0 0 5px #c5bd807a,inset 0 2px 9px #ffffffe0,inset 0 -7px 13px #719e8624; }
+.ripple-orbit:hover { background:radial-gradient(ellipse at 29% 16%,#ffffffd6,transparent 50%),#f1ffed59; }
+.tree-page .topbar { padding-inline:14px 18px; gap:18px; min-height:64px; height:64px; flex-basis:64px; }
+.tree-page .topbar-actions { gap:12px; flex-shrink:0; }
+.header-action { min-height:40px; padding:9px 10px; gap:8px; border-radius:14px; transition:background 180ms; }
+.header-action:hover,.header-action[aria-expanded="true"] { color:var(--ink); background:#fafff080; box-shadow:inset 0 1px 0 #ffffffc0; }
+.header-action.compact-action { padding-inline:8px; }
+.tree-page .search-box { gap:8px; min-width:230px; padding-right:9px; }
+.tree-page .search-box kbd { display:none; }
+.tree-page .preview-label { display:none; }
+.tree-page .listening-sidebar,.tree-page .settings-panel,.tree-page .lyrics-panel,.tree-page .onboarding-guide,.tree-page .online-search-panel { background:var(--glass-panel); backdrop-filter:blur(20px); color:var(--ink); border:1px solid #fffff2; box-shadow:0 14px 48px #42644f26,inset 0 1px 0 #fff; }
+.tree-page .secondary-button:hover,.tree-page .secondary-button:active,.tree-page .secondary-button:focus-visible,.tree-page .icon-button:hover,.tree-page .guide-secondary:hover { color:#23452f; background:#f6fbdcdb; border-color:#a6b987; box-shadow:inset 0 1px 0 #fff; }
+.tree-page .settings-panel,.tree-page .lyrics-panel { top:84px; }
+.tree-page .online-search-panel { top:86px; left:24px; width:min(710px,calc(100vw - 48px)); bottom:124px; }
+@media(max-width:1180px) {
+  .tree-page .topbar { display:grid; grid-template-columns:minmax(0,1fr) auto; grid-template-rows:40px 38px; flex-basis:100px; height:100px; padding:8px 12px; gap:6px 16px; }
+  .tree-brand { grid-column:1; grid-row:1; font-size:21px; }
+  .brand-leaf { width:36px; height:36px; }
+  .tree-page .topbar-actions { grid-column:2; grid-row:1; gap:12px; }
+  .tree-page .search-box { grid-column:1 / -1; grid-row:2; width:100%; height:36px; min-height:36px; margin:0; }
+  .tree-page .header-action span { display:inline; }
+  .tree-page .header-action { gap:7px; padding:7px 9px; }
+  .tree-page .online-search-panel,.tree-page .settings-panel,.tree-page .lyrics-panel { top:120px; }
+  .tree-page .onboarding-guide { top:122px; max-height:calc(100dvh - 248px); }
+}
+@media(max-width:800px) {
+  .tree-page .topbar-actions { gap:4px; }
+  .tree-page .header-action span { display:none; }
+  .tree-page .header-action { padding:8px; }
+}
+@media(prefers-reduced-motion:reduce) { .sprig-leaves,.tree-leaf:hover .leaf-surface { animation:none; } }
