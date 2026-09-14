@@ -57,7 +57,32 @@
     return items.find((item) => keyOf(item) === currentKey)?.track_id ?? focusId;
   }
 
-  if (typeof module === 'object' && module.exports) module.exports = { LeafWindow, orbitItems, PAGE_SIZE, nextRecommendationIndex, treeGeometry, playbackFocus };
+  // A bounded audio envelope emits travelling crests; silence adds no pulses.
+  class MusicRipples {
+    constructor() { this.clear(); }
+    clear() { this.rings = []; this.time = 0; this.last = -1000; this.envelope = 0; }
+    sample(bins, delta, active) {
+      if (!active) { this.clear(); return this.rings; }
+      this.time += Math.min(100, delta);
+      let power = 0;
+      const end = Math.min(bins?.length || 0, 90);
+      for (let i = 2; i < end; i++) power += (bins[i] / 255) ** 2;
+      // Remote media may be audible but unavailable to captureStream (CORS).
+      // Use quiet playback ripples then, not fabricated frequency samples.
+      const energy = bins ? Math.sqrt(power / Math.max(1, end - 2)) : .11;
+      const attack = energy - this.envelope;
+      this.envelope += (energy - this.envelope) * .28;
+      this.rings = this.rings.filter(ring => this.time - ring.born < 2200);
+      if (energy > .045 && this.time - this.last > (!bins ? 1500 : attack > .025 ? 430 : 1000)) {
+        this.rings.push({born:this.time, strength:Math.min(1,.15+energy*1.25)});
+        if (this.rings.length > 5) this.rings.shift();
+        this.last = this.time;
+      }
+      return this.rings;
+    }
+  }
+
+  if (typeof module === 'object' && module.exports) module.exports = { LeafWindow, orbitItems, PAGE_SIZE, nextRecommendationIndex, treeGeometry, playbackFocus, MusicRipples };
   if (typeof document === 'undefined') return;
   const el = (id) => document.getElementById(id);
   if (!el('tree-viewport')) return;
@@ -386,51 +411,95 @@
 
 
   const audio = el('audio-player');
+  const musicWater = document.createElement('canvas');
+  musicWater.className = 'recommendation-water'; musicWater.setAttribute('aria-hidden','true');
+  el('water-discover').parentElement.appendChild(musicWater);
+  const musicPaint = musicWater.getContext('2d');
+  const musicRipples = new MusicRipples();
+  let musicTime = null;
+  function clearMusicWater() {
+    musicRipples.clear();
+    musicTime = null;
+    musicPaint?.clearRect(0,0,musicWater.width,musicWater.height);
+  }
+  function drawMusicWater(delta) {
+    if (!musicPaint) return;
+    const playing = el('recommendation-list').querySelector('.ripple-focus.playing,.ripple-orbit.playing');
+    const progressing = musicTime == null || audio.currentTime > musicTime;
+    musicTime = audio.currentTime;
+    if (playing && (!progressing || audio.readyState < 3)) return;
+    const rings = musicRipples.sample(bins,delta,!!playing);
+    musicWater.dataset.mode = bins ? 'audio' : 'playback';
+    const box = musicWater.getBoundingClientRect(), ratio = Math.min(root.devicePixelRatio || 1,1.5);
+    const w = Math.round(box.width*ratio), h = Math.round(box.height*ratio);
+    if (musicWater.width !== w || musicWater.height !== h) { musicWater.width=w; musicWater.height=h; }
+    musicPaint.setTransform(ratio,0,0,ratio,0,0); musicPaint.clearRect(0,0,box.width,box.height);
+    if (!playing || !rings.length) return;
+    const origin = playing.getBoundingClientRect();
+    const x=origin.x+origin.width/2-box.x, y=origin.y+origin.height/2-box.y;
+    for (const ring of rings) {
+      const life=(musicRipples.time-ring.born)/2200;
+      const radius=origin.width*.46 + life*Math.min(box.width,box.height)*.52;
+      const alpha=Math.min(1,life*5)*(1-life)*ring.strength;
+      for (const [offset,color,width] of [[2,`rgba(34,91,75,${alpha*.35})`,2.8],[0,`rgba(255,255,224,${alpha*.95})`,1.8],[-5,`rgba(223,238,196,${alpha*.55})`,.8]]) {
+        musicPaint.beginPath();musicPaint.ellipse(x,y,radius+offset,(radius+offset)*.74,0,0,Math.PI*2);
+        musicPaint.strokeStyle=color;musicPaint.lineWidth=width;musicPaint.stroke();
+      }
+    }
+  }
   let spectrumContext = null, analyser = null, capture = null, bins = null, spectrumFrame = null, spectrumLast = 0;
   function stopSpectrum() {
     if (spectrumFrame != null) cancelAnimationFrame(spectrumFrame);
     spectrumFrame = null;
     list.querySelectorAll('.leaf-spectrum i').forEach(bar => bar.style.removeProperty('--level'));
+    clearMusicWater();
   }
   function drawSpectrum(now) {
     if (audio.paused || document.hidden || reducedMotion.matches) { stopSpectrum(); return; }
     if (now - spectrumLast > 45) {
+      const delta = Math.min(100, now - spectrumLast);
       spectrumLast = now;
-      analyser.getByteFrequencyData(bins);
+      if (analyser && bins) analyser.getByteFrequencyData(bins);
       list.querySelectorAll('.playing .leaf-spectrum i').forEach((bar,i) => {
+        if (!bins) return;
         const bin = Math.min(bins.length-1, Math.floor(2 * Math.pow(1.22,i)));
         bar.style.setProperty('--level', String(.05 + bins[bin]/255 * .95));
       });
+      drawMusicWater(delta);
     }
     spectrumFrame = requestAnimationFrame(drawSpectrum);
   }
   async function startSpectrum() {
     if (audio.paused || document.hidden || reducedMotion.matches) return;
     try {
-      if (!analyser) {
+      const sameOrigin = new URL(audio.currentSrc || audio.src, root.location.href).origin === root.location.origin;
+      if (!analyser && sameOrigin) {
         const captureAudio = audio.captureStream || audio.mozCaptureStream;
-        if (!captureAudio || !root.AudioContext) return;
-        capture = captureAudio.call(audio);
-        if (!capture.getAudioTracks().length) { capture.getTracks().forEach(track => track.stop()); capture=null; return; }
-        spectrumContext = new root.AudioContext();
-        analyser = spectrumContext.createAnalyser(); analyser.fftSize = 1024; analyser.smoothingTimeConstant=.82;
-        spectrumContext.createMediaStreamSource(capture).connect(analyser);
-        bins = new Uint8Array(analyser.frequencyBinCount);
+        if (captureAudio && root.AudioContext) {
+          capture = captureAudio.call(audio);
+          if (capture.getAudioTracks().length) {
+            spectrumContext = new root.AudioContext();
+            analyser = spectrumContext.createAnalyser(); analyser.fftSize = 1024; analyser.smoothingTimeConstant=.82;
+            spectrumContext.createMediaStreamSource(capture).connect(analyser);
+            bins = new Uint8Array(analyser.frequencyBinCount);
+          } else { capture.getTracks().forEach(track => track.stop()); capture=null; }
+        }
       }
       const context = spectrumContext;
-      await context.resume();
-      if (context !== spectrumContext || !analyser) return;
-      if (spectrumFrame == null && !audio.paused && !document.hidden) spectrumFrame=requestAnimationFrame(drawSpectrum);
-    } catch { stopSpectrum(); } // Visual enhancement must never interfere with playback.
+      if (context) await context.resume();
+      if (context !== spectrumContext) return;
+    } catch { resetSpectrum(); } // A missing capture must never interfere with playback.
+    if (spectrumFrame == null && !audio.paused && !document.hidden && !reducedMotion.matches) spectrumFrame=requestAnimationFrame(drawSpectrum);
   }
   function resetSpectrum() {
     stopSpectrum(); capture?.getTracks().forEach(track => track.stop()); capture=null;
-    void spectrumContext?.close(); spectrumContext=null; analyser=null;
+    void spectrumContext?.close(); spectrumContext=null; analyser=null; bins=null;
   }
   audio.addEventListener('emptied', resetSpectrum);
   audio.addEventListener('playing', startSpectrum);
   audio.addEventListener('pause', stopSpectrum);
   audio.addEventListener('ended', stopSpectrum);
+  reducedMotion.addEventListener('change', () => reducedMotion.matches ? stopSpectrum() : void startSpectrum());
   document.addEventListener('pointerdown', () => { if (spectrumContext?.state === 'suspended') void startSpectrum(); }, {passive:true});
   document.addEventListener('visibilitychange', () => document.hidden ? stopSpectrum() : void startSpectrum());
   let pointerFrame = null, pointerX = .5, pointerY = .5;

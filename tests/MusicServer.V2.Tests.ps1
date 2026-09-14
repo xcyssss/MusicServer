@@ -1,4 +1,4 @@
-$ProjectRoot = Split-Path -Parent $PSScriptRoot
+﻿$ProjectRoot = Split-Path -Parent $PSScriptRoot
 Import-Module (Join-Path $ProjectRoot 'MusicServer.Core.psm1') -Force
 Import-Module (Join-Path $ProjectRoot 'MusicServer.Providers.psm1') -Force
 
@@ -293,6 +293,16 @@ UPDATE wanted_queue SET lease_expires_epoch = @exp WHERE track_id = @tid;
         $p1 | Should Be $true
         $p2 = Claim-HalfOpenProbeDb -Provider 'bilibili_search'
         $p2 | Should Be $false
+    }
+
+    It 'reclaims an abandoned half-open probe atomically but preserves an active probe' {
+        $health = Get-ProviderHealthDb -Provider 'bilibili_search'
+        $health.state = 'HALF_OPEN'; $health.half_open_probe_claimed = 1
+        Save-ProviderHealthDb -Health $health | Out-Null
+        (Claim-HalfOpenProbeDb -Provider 'bilibili_search') | Should Be $false
+        Invoke-MusicServerParamNonQuery -Template 'UPDATE provider_health SET updated_at=@old WHERE provider=@p;' -Params @{p='bilibili_search';old=[DateTime]::UtcNow.AddMinutes(-16).ToString('o')} | Out-Null
+        (Claim-HalfOpenProbeDb -Provider 'bilibili_search') | Should Be $true
+        (Claim-HalfOpenProbeDb -Provider 'bilibili_search') | Should Be $false
     }
 
     It '412 backoff sets correct state' {

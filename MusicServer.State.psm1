@@ -2046,19 +2046,20 @@ VALUES (@p, @state, @sc, @fc, @cf, @c412, @ls, @lf, @l412, @bu, @alm, @hpp, @err
 }
 
 function Claim-HalfOpenProbeDb {
-    param([Parameter(Mandatory)][string]$Provider)
+    param([Parameter(Mandatory)][string]$Provider, [ValidateRange(1,60)][int]$LeaseMinutes = 15)
     $now = Get-NowIso
     $affected = Invoke-MusicServerParamNonQuery -Template @"
 UPDATE provider_health
 SET state = 'HALF_OPEN', half_open_probe_claimed = 1,
     revision = revision + 1, updated_at = @now
 WHERE provider = @p
-  AND half_open_probe_claimed = 0
+  AND (half_open_probe_claimed = 0 OR (state = 'HALF_OPEN'
+      AND (julianday(updated_at) IS NULL OR julianday(updated_at) <= julianday(@cutoff))))
   AND (
       state = 'HALF_OPEN'
       OR (state = 'OPEN' AND (blocked_until IS NULL OR blocked_until = '' OR blocked_until <= @now))
   );
-"@ -Params @{ p = $Provider; now = $now } -ReturnChanges
+"@ -Params @{ p = $Provider; now = $now; cutoff = [DateTime]::UtcNow.AddMinutes(-$LeaseMinutes).ToString('o') } -ReturnChanges
     return ($affected -eq 1)
 }
 

@@ -1,7 +1,23 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { LeafWindow, orbitItems, nextRecommendationIndex, treeGeometry, playbackFocus } = require('../web/music-tree-ui.js');
+const { LeafWindow, orbitItems, nextRecommendationIndex, treeGeometry, playbackFocus, MusicRipples } = require('../web/music-tree-ui.js');
 const tracks = Array.from({ length: 30 }, (_, i) => ({ id: `library-${i}`, track_id: `track-${i}` }));
+
+test('music water follows audio energy, stays bounded and clears when playback stops', () => {
+  const water=new MusicRipples(), silence=new Uint8Array(512), loud=new Uint8Array(512).fill(190);
+  for(let i=0;i<50;i++) water.sample(silence,50,true);
+  assert.equal(water.rings.length,0);
+  water.sample(loud,50,true); assert.equal(water.rings.length,1);
+  const strength=water.rings[0].strength;
+  for(let i=0;i<200;i++) { water.sample(i%20<5?loud:silence,50,true); assert.ok(water.rings.length<=5); }
+  water.sample(silence,50,false); assert.equal(water.rings.length,0);
+  water.sample(new Uint8Array(512).fill(25),50,true);
+  assert.ok(water.rings[0].strength<strength);
+  for(let i=0;i<50;i++) water.sample(silence,50,true);
+  assert.equal(water.rings.length,0);
+  water.sample(null,50,true); assert.equal(water.rings.length,1, 'uncapturable streams have a quiet playback ripple');
+  water.sample(null,50,false); assert.equal(water.rings.length,0);
+});
 
 test('the viewport holds seven songs, clamps at either end and keeps the final seven reachable', () => {
   const view = new LeafWindow(); view.setItems(tracks);

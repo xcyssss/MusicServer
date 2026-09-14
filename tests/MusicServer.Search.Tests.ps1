@@ -116,7 +116,27 @@ Describe 'Online search identities and state boundaries' {
         $fixture.Config.YtDlp=$fixture.Config.Sqlite
         Record-ProviderFailure -Config $fixture.Config -Provider bilibili_search -HttpStatus 412 | Out-Null
         Invoke-OnlineMusicSearch -Config $fixture.Config -SearchId $searchId -Query test -Source bilibili
-        (Get-OnlineMusicSearch -SearchId $searchId).error | Should Be PROVIDER_UNAVAILABLE
+        (Get-OnlineMusicSearch -SearchId $searchId).error | Should Be PROVIDER_RATE_LIMITED
         (Get-ProviderHealth -Config $fixture.Config -Provider bilibili_search).failure_count | Should Be 1
+    }
+
+    It 'recovers a stale installed search probe once and records the recovery' {
+        $health=Get-ProviderHealthDb -Provider bilibili_search
+        $health.state='HALF_OPEN'; $health.half_open_probe_claimed=1
+        Save-ProviderHealthDb -Health $health | Out-Null
+        Invoke-MusicServerParamNonQuery -Template 'UPDATE provider_health SET updated_at=@old WHERE provider=@p;' -Params @{p='bilibili_search';old=[DateTime]::UtcNow.AddDays(-10).ToString('o')} | Out-Null
+        (Claim-ProviderRequest -Config $fixture.Config -Provider bilibili_search) | Should Be $true
+        (Claim-ProviderRequest -Config $fixture.Config -Provider bilibili_search) | Should Be $false
+        @(Get-EventsDb | Where-Object { $_.event_type -eq 'CIRCUIT_PROBE_RECOVERED' }).Count | Should Be 1
+    }
+
+    It 'does not label an in-flight probe as a rate limit or issue a competing request' {
+        $health=Get-ProviderHealthDb -Provider bilibili_search
+        $health.state='HALF_OPEN'; $health.half_open_probe_claimed=1
+        Save-ProviderHealthDb -Health $health | Out-Null
+        Mock Invoke-RestMethod -ModuleName MusicServer.Providers { throw 'Must not compete' }
+        Invoke-OnlineMusicSearch -Config $fixture.Config -SearchId $searchId -Query song -Source bilibili
+        (Get-OnlineMusicSearch -SearchId $searchId).error | Should Be PROVIDER_BUSY
+        Assert-MockCalled Invoke-RestMethod -ModuleName MusicServer.Providers -Times 0 -Exactly -Scope It
     }
 }
