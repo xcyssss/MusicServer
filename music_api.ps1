@@ -801,7 +801,7 @@ while ($true) {
         }
         elseif ($method -eq 'POST' -and $path -eq '/api/search') {
             $payload = if ($bodyText) { ConvertFrom-Json -InputObject $bodyText } else { @{} }
-            $result = Start-OnlineMusicSearch -Config $Config -Query (Get-OptionalProperty $payload 'query' $null)
+            $result = Start-OnlineMusicSearch -Config $Config -Query (Get-OptionalProperty $payload 'query' $null) -Source (Get-OptionalProperty $payload 'source' 'netease')
             Send-Json -Context ([pscustomobject]@{Response=$Context.Response;Body=$result.Body;StatusCode=$result.Status})
         }
         elseif ($method -eq 'GET' -and $path -match '^/api/search/([a-f0-9]{32})$') {

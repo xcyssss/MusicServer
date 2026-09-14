@@ -107,8 +107,8 @@
     </footer>
     <aside id="online-search-panel" class="online-search-panel" aria-label="网络歌曲搜索" hidden>
     <div class="online-search-heading"><div><span class="section-kicker">FIND YOUR SOUND</span><h2>搜索音乐</h2></div><button id="online-search-close" class="icon-button" aria-label="关闭网络搜索">×</button></div>
-    <div class="online-search-tools"><button id="search-local" class="search-source" type="button">本地曲库</button><span class="search-source selected">网络 · 网易云</span><button id="online-search-retry" class="text-button" type="button">重新搜索</button></div>
-    <p id="online-search-status" class="online-search-status" role="status"></p><div id="online-search-results" class="online-search-results" aria-label="网络搜索结果"></div>
+    <div class="online-search-tools"><button id="search-local" class="search-source" type="button">本地曲库</button><button id="search-netease" class="search-source selected" type="button" aria-pressed="true">网易云</button><button id="search-bilibili" class="search-source" type="button" aria-pressed="false">B站</button><button id="online-search-retry" class="text-button" type="button">重新搜索</button></div>
+    <section id="online-video-preview" class="online-video-preview" hidden aria-label="B站视频预览"><div><span id="online-video-title"></span><button id="online-video-close" class="text-button" type="button">收起视频</button></div><iframe id="online-video-frame" title="B站视频预览" sandbox="allow-scripts allow-same-origin allow-presentation" allow="autoplay; fullscreen" referrerpolicy="no-referrer-when-downgrade" allowfullscreen></iframe><small>下载后可用底部播放器听歌；预览由 B 站提供。</small></section><p id="online-search-status" class="online-search-status" role="status"></p><div id="online-search-results" class="online-search-results" aria-label="网络搜索结果"></div>
     <p class="online-search-note">先试听，再留下喜欢的。点喜欢后自动下载，进度在「下载动态」。</p>
   </aside>
   <aside id="lyrics-panel" class="lyrics-panel" hidden aria-label="歌词">

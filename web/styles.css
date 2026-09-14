@@ -118,6 +118,13 @@ kbd { color:var(--muted); font-size:10px; white-space:nowrap; border:1px solid v
 .online-search-heading h2 { font-size:24px; margin:0; }
 .online-search-tools { display:flex; align-items:center; gap:8px; margin-top:18px; }
 .online-search-tools .text-button { margin-left:auto; }
+.online-search-tools { flex-wrap:wrap; }
+.online-video-preview { flex:none; padding-top:12px; }
+.online-video-preview[hidden] { display:none; }
+.online-video-preview>div { display:flex; align-items:center; gap:12px; font-size:12px; }
+.online-video-preview>div span { flex:1; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+.online-video-preview iframe { width:100%; height:210px; border:1px solid var(--line); border-radius:14px; margin:8px 0; background:#244b41; }
+.online-video-preview small { color:var(--muted); font-size:10px; }
 .search-source { padding:7px 13px; border:1px solid var(--line); border-radius:22px; color:inherit; background:transparent; font:inherit; font-size:11px; }
 .search-source.selected { background:#a6c4a430; border-color:#9cb99380; }
 .online-search-status { font-size:12px; padding:15px 0; color:var(--muted); line-height:1.6; flex:none; }

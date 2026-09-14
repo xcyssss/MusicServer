@@ -35,7 +35,7 @@ const state = {
   recommendationRevision: 0,
   libraryLimit: 200,
   searchQuery: '',
-  online: { items: [], query: '', phase: 'idle', message: '', request: 0 },
+  online: { items: [], query: '', source: 'netease', phase: 'idle', message: '', request: 0 },
   onlinePlaybackItems: [],
 };
 
@@ -1097,6 +1097,7 @@ function maybeRecordPlayback() {
 }
 
 async function playItem(item, collection = 'library') {
+  closeVideoPreview();
   const requestId = ++state.playRequest;
   let key = keyOf(item); const audio = $('#audio-player');
   if (!key) return;
@@ -1109,6 +1110,15 @@ async function playItem(item, collection = 'library') {
     source = resolvePlaybackSource(item);
     const hydratedKey = keyOf(item);
     if (hydratedKey) key = hydratedKey;
+  }
+  const video = bilibiliPreview(item);
+  if (!source && video) {
+    audio.pause(); setOnlineSearchOpen(true);
+    setPlaybackStatus('B站视频预览 · 在搜索面板中播放');
+    $('#online-video-frame').src = `https://player.bilibili.com/player.html?bvid=${video.bvid}&page=1&autoplay=1&high_quality=1`;
+    $('#online-video-title').textContent = item.title;
+    $('#online-video-preview').hidden = false;
+    return;
   }
   if (!source) { setPlaybackStatus(audio.paused ? '暂不可用 · 请选择其他歌曲' : '正在播放'); showToast('这首歌暂时没有可用试听源'); return; }
   const sourceUrl = new URL(source, window.location.href).href;
@@ -1419,24 +1429,40 @@ function syncTrackCopies(item) {
 }
 
 let onlineAbort = null;
+function bilibiliPreview(item) {
+  const preview = item?.preview_source?.provider === 'bilibili' ? item.preview_source : item?.track?.preview_sources?.find(source => source.provider === 'bilibili');
+  return /^BV[0-9A-Za-z]{10}$/.test(preview?.bvid || '') ? preview : null;
+}
+function closeVideoPreview() {
+  if (!$('#online-video-preview').hidden) setPlaybackStatus($('#audio-player').paused ? (state.currentKey ? '已暂停' : '准备就绪') : '正在播放');
+  $('#online-video-preview').hidden = true;
+  $('#online-video-frame').removeAttribute('src');
+}
 function setOnlineSearchOpen(open) {
   $('#online-search-panel').hidden = !open;
   $('#online-search-button').setAttribute('aria-expanded', String(open));
-  if (!open) { state.online.request++; onlineAbort?.abort(); $('#library-search').focus(); }
+  if (!open) { state.online.request++; onlineAbort?.abort(); closeVideoPreview(); $('#library-search').focus(); }
 }
 
 function renderOnlineSearch() {
   if (!$('#online-search-panel') || $('#online-search-panel').hidden) return;
   const { items, query, phase, message } = state.online;
+  for (const source of ['netease','bilibili']) {
+    $(`#search-${source}`).classList.toggle('selected', state.online.source === source);
+    $(`#search-${source}`).setAttribute('aria-pressed', String(state.online.source === source));
+  }
   const label = phase === 'loading' ? `正在网络中寻找「${query}」…` : phase === 'done' ? `「${query}」 · ${items.length ? `找到 ${items.length} 首` : '没有找到匹配歌曲，试试歌名加歌手。'}` : message || '输入歌名或歌手，按回车开始网络搜索。';
   $('#online-search-status').textContent = label;
   $('#online-search-panel').setAttribute('aria-busy', String(phase === 'loading'));
   const html = items.map((item, index) => {
     const text = formatTrackDisplay(item);
+    const video = bilibiliPreview(item);
+    if (video) { text.title=item.title; text.artist=video.uploader ? `UP主 · ${video.uploader}` : 'B站视频'; text.album=''; }
     const wanted = state.wanted.find(entry => entry.track_id === item.track_id) || item.wanted;
     const status = wanted?.state || item.local_status;
     const playing = keyOf(item) === state.currentKey && !$('#audio-player').paused;
-    return `<article class="online-song ${playing ? 'playing' : ''}" data-online-id="${escapeHtml(item.track_id)}"><span class="online-song-number">${String(index+1).padStart(2,'0')}</span><button class="online-song-play" type="button" data-online-action="play" aria-label="${playing ? '暂停' : '试听'} ${escapeHtml(text.title)}">${playing ? 'Ⅱ' : '▷'}</button><div class="online-song-meta"><strong>${escapeHtml(text.title)}</strong><small>${escapeHtml(text.artist)}${text.album ? ` · ${escapeHtml(text.album)}` : ''}</small><span class="online-song-state">${status && status !== 'REMOTE' ? escapeHtml(labels[status] || status) : '在线歌曲'}</span></div><span class="online-song-duration">${duration(item.duration)}</span><button class="online-song-like ${item.liked ? 'liked' : ''}" data-online-action="like" type="button" aria-label="${item.liked ? '取消喜欢' : '喜欢并下载'} ${escapeHtml(text.title)}" aria-pressed="${!!item.liked}" ${pendingLikes.has(item.track_id) ? 'disabled' : ''}><span aria-hidden="true">${item.liked ? '♥' : '♡'}</span><span>${item.liked ? '已喜欢' : '喜欢并下载'}</span></button></article>`;
+    const playLabel = video && status !== 'LOCAL' ? '预览视频' : playing ? '暂停' : '试听';
+    return `<article class="online-song ${playing ? 'playing' : ''}" data-online-id="${escapeHtml(item.track_id)}"><span class="online-song-number">${String(index+1).padStart(2,'0')}</span><button class="online-song-play" type="button" data-online-action="play" aria-label="${playLabel} ${escapeHtml(text.title)}">${playing ? 'Ⅱ' : '▷'}</button><div class="online-song-meta"><strong>${escapeHtml(text.title)}</strong><small>${escapeHtml(text.artist)}${text.album ? ` · ${escapeHtml(text.album)}` : ''}</small><span class="online-song-state">${status && status !== 'REMOTE' ? escapeHtml(labels[status] || status) : '在线歌曲'}</span></div><span class="online-song-duration">${duration(item.duration)}</span><button class="online-song-like ${item.liked ? 'liked' : ''}" data-online-action="like" type="button" aria-label="${item.liked ? '取消喜欢' : '喜欢并下载'} ${escapeHtml(text.title)}" aria-pressed="${!!item.liked}" ${pendingLikes.has(item.track_id) ? 'disabled' : ''}><span aria-hidden="true">${item.liked ? '♥' : '♡'}</span><span>${item.liked ? '已喜欢' : '喜欢并下载'}</span></button></article>`;
   }).join('');
   const list = $('#online-search-results');
   if (list._sig !== html) {
@@ -1449,6 +1475,7 @@ function renderOnlineSearch() {
 }
 
 async function searchOnline() {
+  closeVideoPreview();
   const query = $('#library-search').value.trim();
   onlineAbort?.abort(); onlineAbort = new AbortController();
   const signal = onlineAbort.signal, request = ++state.online.request;
@@ -1461,13 +1488,13 @@ async function searchOnline() {
   renderOnlineSearch();
   const began = Date.now();
   try {
-    const job = await fetchJson('/api/search', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({query}), signal});
+    const job = await fetchJson('/api/search', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({query, source:state.online.source}), signal});
     if (!job.id) throw new Error('搜索暂时无法启动，请重试。');
     while (request === state.online.request && Date.now() - began < 23000) {
       const result = await fetchJson(`/api/search/${encodeURIComponent(job.id)}`, {signal});
       if (request !== state.online.request) return;
       if (result.state === 'ERROR') {
-        throw new Error(result.error === 'PROVIDER_UNAVAILABLE' ? '网络来源暂时休息中，请稍后重试。曲库仍可正常播放。' : '网络搜索暂时没有完成，请稍后重试。');
+        throw new Error(result.error === 'PROVIDER_UNAVAILABLE' ? '当前来源暂时限流，请稍后重试，或切换另一个来源。曲库仍可正常播放。' : '网络搜索暂时没有完成，请稍后重试。');
       }
       if (result.state === 'DONE') {
         if (!Array.isArray(result.items)) throw new Error('搜索结果无法读取，请重试。');
@@ -1484,6 +1511,10 @@ async function searchOnline() {
 }
 
 $('#online-search-button').addEventListener('click', searchOnline);
+for (const source of ['netease','bilibili']) {
+  $(`#search-${source}`).addEventListener('click', () => { state.online.source=source; void searchOnline(); });
+}
+$('#online-video-close').addEventListener('click', closeVideoPreview);
 $('#online-search-retry').addEventListener('click', searchOnline);
 $('#online-search-close').addEventListener('click', () => setOnlineSearchOpen(false));
 $('#search-local').addEventListener('click', () => { setOnlineSearchOpen(false); scheduleSearch(); });
@@ -1694,8 +1725,8 @@ $('#audio-player').addEventListener('timeupdate', () => {
   if (!$('#lyrics-panel').hidden) renderLyrics($('#audio-player').currentTime);
 });
 $('#audio-player').addEventListener('loadedmetadata', updateProgressUI);
-$('#audio-player').addEventListener('play', () => { setPlayIcon(true); setPlaybackStatus('正在播放'); render(); });
-$('#audio-player').addEventListener('pause', () => { setPlayIcon(false); setPlaybackStatus('已暂停'); render(); });
+$('#audio-player').addEventListener('play', () => { closeVideoPreview(); setPlayIcon(true); setPlaybackStatus('正在播放'); render(); });
+$('#audio-player').addEventListener('pause', () => { setPlayIcon(false); setPlaybackStatus($('#online-video-preview').hidden ? '已暂停' : 'B站视频预览 · 在搜索面板中播放'); render(); });
 $('#audio-player').addEventListener('waiting', () => setPlaybackStatus('正在缓冲…'));
 $('#audio-player').addEventListener('playing', () => { setPlaybackStatus('正在播放'); globalThis.MusicServerGuide?.update(); });
 $('#audio-player').addEventListener('error', () => { if (state.currentKey) setPlaybackStatus('播放失败 · 可以重试或换一首'); });
