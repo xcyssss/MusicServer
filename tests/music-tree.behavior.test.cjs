@@ -1,11 +1,11 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { LeafWindow, orbitItems, nextRecommendationIndex, treeGeometry, playbackFocus, MusicRipples } = require('../web/music-tree-ui.js');
+const { LeafWindow, orbitItems, nextRecommendationIndex, treeGeometry, playbackFocus, MusicRipples, waterCurve } = require('../web/music-tree-ui.js');
 const tracks = Array.from({ length: 30 }, (_, i) => ({ id: `library-${i}`, track_id: `track-${i}` }));
 
 test('music water follows audio energy, stays bounded and clears when playback stops', () => {
   const water=new MusicRipples(), silence=new Uint8Array(512), loud=new Uint8Array(512).fill(190);
-  for(let i=0;i<50;i++) water.sample(silence,50,true);
+  for(let i=0;i<80;i++) water.sample(silence,50,true);
   assert.equal(water.rings.length,0);
   water.sample(loud,50,true); assert.equal(water.rings.length,1);
   const strength=water.rings[0].strength;
@@ -13,10 +13,24 @@ test('music water follows audio energy, stays bounded and clears when playback s
   water.sample(silence,50,false); assert.equal(water.rings.length,0);
   water.sample(new Uint8Array(512).fill(25),50,true);
   assert.ok(water.rings[0].strength<strength);
-  for(let i=0;i<50;i++) water.sample(silence,50,true);
+  for(let i=0;i<80;i++) water.sample(silence,50,true);
   assert.equal(water.rings.length,0);
   water.sample(null,50,true); assert.equal(water.rings.length,1, 'uncapturable streams have a quiet playback ripple');
   water.sample(null,50,false); assert.equal(water.rings.length,0);
+});
+
+test('water fronts have continuous bounded curvature and successive pulses do not repeat the same phase', () => {
+  const points=waterCurve(100,.8);
+  assert.ok(Math.hypot(points[0].x-points.at(-1).x,points[0].y-points.at(-1).y)<1e-8);
+  const radii=points.map(p=>Math.hypot(p.x,p.y/.7));
+  assert.ok(Math.max(...radii)-Math.min(...radii)>5);
+  assert.ok(radii.every(r=>r>92 && r<108));
+  const shifted=waterCurve(100,.801);
+  assert.ok(points.every((p,i)=>Math.hypot(p.x-shifted[i].x,p.y-shifted[i].y)<.02));
+  const water=new MusicRipples();
+  for(let i=0;i<55;i++)water.sample(new Uint8Array(512).fill(160),50,true);
+  assert.ok(water.rings.length>=2);
+  assert.equal(new Set(water.rings.map(r=>r.phase)).size,water.rings.length);
 });
 
 test('the viewport holds seven songs, clamps at either end and keeps the final seven reachable', () => {

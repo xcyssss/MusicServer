@@ -130,16 +130,27 @@ Describe 'MusicServer Tauri desktop shell' {
         $main | Should Match 'app\.dialog\(\)'
         $web | Should Match 'window\.__TAURI__\?\.core'
 
-        # Production navigates the Tauri WebView to the local PowerShell HTTP UI,
-        # which is a remote origin to Tauri's ACL. Keep IPC permission scoped to
-        # only the three owned UI ports instead of granting arbitrary web origins.
+        # The verified runtime origin receives IPC at runtime, including an
+        # OS-selected port when all legacy fixed pairs are occupied.
         $capability = ConvertFrom-Json -InputObject (Get-Content -LiteralPath (Join-Path $ProjectRoot 'src-tauri\capabilities\default.json') -Raw)
-        $remoteUrls = @($capability.remote.urls)
-        $remoteUrls.Count | Should Be 3
-        ($remoteUrls -contains 'http://127.0.0.1:8790') | Should Be $true
-        ($remoteUrls -contains 'http://127.0.0.1:8791') | Should Be $true
-        ($remoteUrls -contains 'http://127.0.0.1:8792') | Should Be $true
+        ($null -eq $capability.PSObject.Properties['remote']) | Should Be $true
+        $main | Should Match 'app.add_capability'
+        $main | Should Match 'verified-runtime-ui'
+        $main | Should Not Match '127\.0\.0\.1:\*'
         (@($capability.permissions) -contains 'dialog:allow-open') | Should Be $true
+    }
+
+    It 'keeps unavailable services out of the product UI and supports occupied fixed ports' {
+        $main = Get-Content -LiteralPath (Join-Path $ProjectRoot 'src-tauri\src\main.rs') -Raw
+        $config = ConvertFrom-Json -InputObject (Get-Content -LiteralPath (Join-Path $ProjectRoot 'src-tauri\tauri.conf.json') -Raw)
+        $boot = Get-Content -LiteralPath (Join-Path $ProjectRoot 'web\desktop-start.html') -Raw
+        $config.app.windows[0].url | Should Be 'desktop-start.html'
+        $main | Should Match 'desktop_startup::vacant_pair'
+        $main | Should Match 'MUSICSERVER_RUNTIME_SCOPE'
+        $main | Should Match 'desktop-start.html\?failed'
+        $main | Should Not Match 'document.body.innerHTML'
+        $boot | Should Not Match 'app.js|fetch\('
+        $boot | Should Match 'restart_desktop'
     }
 
     It 'keeps taskbar and tray together when minimized' {

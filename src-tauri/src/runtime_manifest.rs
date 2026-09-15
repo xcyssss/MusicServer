@@ -23,6 +23,7 @@ const REQUIRED: &[&str] = &[
     "MusicServer.Identity.psm1",
     "web/app.js",
     "web/index.html",
+    "web/desktop-start.html",
     "web/styles.css",
     "tools/sqlite3.exe",
 ];

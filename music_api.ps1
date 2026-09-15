@@ -725,6 +725,7 @@ function Resolve-RouteLikeTransaction {
 $script:requestCount = 0
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Identity.psm1') -Force
 $script:BuildMarker = Get-MusicServerBuildIdentity -Root $PSScriptRoot
+$script:RuntimeScope = [Environment]::GetEnvironmentVariable('MUSICSERVER_RUNTIME_SCOPE', 'Process')
 $startupPhases['build_identity'] = $startupClock.Elapsed.TotalMilliseconds
 
 $listener = [System.Net.HttpListener]::new()
@@ -1173,7 +1174,7 @@ while ($true) {
         elseif ($method -eq 'GET' -and $path -eq '/health') {
             $dbOk = $false
             try { [void](Get-DbStats); $dbOk = $true } catch {}
-            $body = @{ status = if ($dbOk) { 'ok' } else { 'degraded' }; db = $dbOk; build = $script:BuildMarker; uptime_requests = $script:requestCount }
+            $body = @{ status = if ($dbOk) { 'ok' } else { 'degraded' }; db = $dbOk; build = $script:BuildMarker; runtime_scope = $script:RuntimeScope; uptime_requests = $script:requestCount }
             $status = if ($dbOk) { 200 } else { 503 }
             Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = $status })
         }

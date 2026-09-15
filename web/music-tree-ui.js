@@ -60,7 +60,7 @@
   // A bounded audio envelope emits travelling crests; silence adds no pulses.
   class MusicRipples {
     constructor() { this.clear(); }
-    clear() { this.rings = []; this.time = 0; this.last = -1000; this.envelope = 0; }
+    clear() { this.rings = []; this.time = 0; this.last = -1200; this.envelope = 0; this.serial = 0; this.interval = 750; }
     sample(bins, delta, active) {
       if (!active) { this.clear(); return this.rings; }
       this.time += Math.min(100, delta);
@@ -72,9 +72,13 @@
       const energy = bins ? Math.sqrt(power / Math.max(1, end - 2)) : .11;
       const attack = energy - this.envelope;
       this.envelope += (energy - this.envelope) * .28;
-      this.rings = this.rings.filter(ring => this.time - ring.born < 2200);
-      if (energy > .045 && this.time - this.last > (!bins ? 1500 : attack > .025 ? 430 : 1000)) {
-        this.rings.push({born:this.time, strength:Math.min(1,.15+energy*1.25)});
+      this.rings = this.rings.filter(ring => this.time - ring.born < ring.life);
+      if (energy > .045 && this.time - this.last > (!bins ? 1750 : attack > .025 ? 580 : this.interval)) {
+        // Golden-angle phases give successive wave fronts a different current,
+        // without randomizing geometry every frame or synchronizing every crest.
+        const phase = this.serial++ * 2.399963;
+        this.rings.push({born:this.time, strength:Math.min(1,.13+energy*1.1), phase, life:3200+Math.sin(phase)*260});
+        this.interval = 1130 + Math.sin(phase + 1) * 170;
         if (this.rings.length > 5) this.rings.shift();
         this.last = this.time;
       }
@@ -82,7 +86,17 @@
     }
   }
 
-  if (typeof module === 'object' && module.exports) module.exports = { LeafWindow, orbitItems, PAGE_SIZE, nextRecommendationIndex, treeGeometry, playbackFocus, MusicRipples };
+  // Low-frequency curvature stays continuous through 2π. Shared by music and
+  // click waves, so neither effect looks like a scaled circular UI outline.
+  function waterCurve(radius, phase, from = 0, span = Math.PI * 2, flatten = .7) {
+    return Array.from({length:65}, (_, i) => {
+      const angle = from + span * i / 64;
+      const bend = 1 + .043*Math.sin(3*angle+phase) + .025*Math.cos(2*angle-phase*.7);
+      return {x:Math.cos(angle)*radius*bend, y:Math.sin(angle)*radius*flatten*bend};
+    });
+  }
+
+  if (typeof module === 'object' && module.exports) module.exports = { LeafWindow, orbitItems, PAGE_SIZE, nextRecommendationIndex, treeGeometry, playbackFocus, MusicRipples, waterCurve };
   if (typeof document === 'undefined') return;
   const el = (id) => document.getElementById(id);
   if (!el('tree-viewport')) return;
@@ -146,7 +160,7 @@
     <linearGradient id="stemGradient"><stop stop-color="#516d43"/><stop offset=".4" stop-color="#a9b078"/><stop offset=".6" stop-color="#e7deb0"/><stop offset="1" stop-color="#647c4c"/></linearGradient>
     <radialGradient id="goldBead" cx=".3" cy=".2" r=".8"><stop stop-color="#fffde4"/><stop offset=".45" stop-color="#dfcb83"/><stop offset="1" stop-color="#b09b52"/></radialGradient>
     <radialGradient id="dropThumb" cx=".35" cy=".3" r=".8"><stop stop-color="#f7fad9"/><stop offset=".57" stop-color="#d9e5b7"/><stop offset="1" stop-color="#a1b67a"/></radialGradient>
-    <radialGradient id="waterBody" cx=".45" cy=".55" r=".7"><stop stop-color="#f5fff0" stop-opacity=".06"/><stop offset=".55" stop-color="#b7d9c8" stop-opacity=".09"/><stop offset=".9" stop-color="#7fa28c" stop-opacity=".19"/><stop offset="1" stop-color="#fbfff0" stop-opacity=".6"/></radialGradient>
+    <radialGradient id="waterBody" cx=".36" cy=".42" r=".72"><stop stop-color="#f5fff0" stop-opacity=".025"/><stop offset=".48" stop-color="#c6e7d8" stop-opacity=".04"/><stop offset=".82" stop-color="#70a994" stop-opacity=".12"/><stop offset="1" stop-color="#b4d7be" stop-opacity=".07"/></radialGradient>
     <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5l11 7-11 7Z" fill="currentColor" stroke="none"/></symbol>
     <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14" stroke-width="3.5"/></symbol>
     <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="7.5"/><path d="m16 16 5 5"/></symbol>
@@ -308,7 +322,7 @@
     const playing = keyOf(item) === currentKey && !paused;
     recList.innerHTML = `<article class="ripple-focus ${playing ? 'playing' : ''}" data-track-id="${escape(item.track_id)}"><h3 class="focus-title" title="${escape(data.title)}">${escape(data.title)}</h3><span class="focus-artist" title="${escape(data.artist)}">${escape(data.artist || '为你推荐')}</span><button class="focus-play" data-action="play" aria-label="${playing ? '暂停' : '试听'} ${escape(data.title)}">${icon(playing ? 'pause' : 'play')}<span>${playing ? '暂停' : '试听'}</span></button><div class="focus-feedback"><button class="ripple-feedback ${item.liked ? 'liked' : ''}" data-action="like" aria-label="${item.liked ? '取消喜欢' : '喜欢'} ${escape(data.title)}" aria-pressed="${!!item.liked}" ${pendingLikes.has(item.track_id) ? 'disabled' : ''}>${icon('heart')}</button><button class="ripple-feedback ${item.disliked ? 'disliked' : ''}" data-action="dislike" aria-label="${item.disliked ? '取消讨厌' : '少推荐这首歌'}" aria-pressed="${!!item.disliked}" ${pendingDislikes.has(item.track_id) ? 'disabled' : ''}>${icon('dislike')}</button></div></article>${group.orbit.map((entry, index) => {
       const text = display(entry);
-      return `<article class="ripple-orbit" data-orbit="${index}" data-track-id="${escape(entry.track_id)}"><button class="orbit-select" data-action="select" title="${escape(text.title)}" aria-label="选择推荐 ${escape(text.title)}">${escape(text.title)}</button><button class="orbit-play" data-action="play" aria-label="试听 ${escape(text.title)}">${icon('play')}</button></article>`;
+      return `<article class="ripple-orbit ${keyOf(entry) === currentKey && !paused ? 'playing' : ''}" data-orbit="${index}" data-track-id="${escape(entry.track_id)}"><button class="orbit-select" data-action="select" title="${escape(text.title)}" aria-label="选择推荐 ${escape(text.title)}">${escape(text.title)}</button><button class="orbit-play" data-action="play" aria-label="试听 ${escape(text.title)}">${icon('play')}</button></article>`;
     }).join('')}`;
     if (before && !reducedMotion.matches) animateOrbits(before, remainingMotion);
     if (activeTrack && activeAction) {
@@ -330,7 +344,7 @@
     el('recommendation-list').querySelector('.focus-play')?.focus({ preventScroll: true });
   });
   function promoteRecommendation() {
-    orbitMotionDeadline = performance.now() + 560;
+    orbitMotionDeadline = performance.now() + 680;
     paintRecommendations();
   }
   function animateOrbits(before, duration) {
@@ -340,7 +354,7 @@
       if (old && now.width && now.height) row.animate([
         { transform: `translate(${old.x-now.x}px,${old.y-now.y}px) scale(${old.width/now.width},${old.height/now.height})`, opacity:.55 },
         { transform:'none', opacity:1 }
-      ], {duration, easing:'cubic-bezier(.2,.75,.2,1)'});
+      ], {duration, easing:'cubic-bezier(.22,.61,.36,1)'});
     }
   }
   function nextRecommendation(direction) {
@@ -366,11 +380,11 @@
     const svg = document.createElementNS(ns, 'svg');
     svg.setAttribute('viewBox', `0 0 ${box.width} ${box.height}`);
     svg.classList.add('discovery-surface');
+    svg.innerHTML = '<defs><linearGradient id="discovery-glint"><stop stop-color="#faffed" stop-opacity="0"/><stop offset=".24" stop-color="#faffed" stop-opacity=".75"/><stop offset=".56" stop-color="#effcce" stop-opacity=".2"/><stop offset=".82" stop-color="#faffed" stop-opacity=".65"/><stop offset="1" stop-color="#faffed" stop-opacity="0"/></linearGradient></defs>';
     const rings = Array.from({length: 3}, () => {
-      const ring = document.createElementNS(ns, 'circle');
-      ring.setAttribute('cx', x); ring.setAttribute('cy', y); ring.setAttribute('r', '0');
-      ring.setAttribute('fill', 'none'); ring.setAttribute('stroke', '#fff9ce');
-      ring.setAttribute('stroke-width', '3'); ring.classList.add('discovery-wave');
+      const ring = document.createElementNS(ns, 'path');
+      ring.setAttribute('fill', 'none'); ring.setAttribute('stroke', 'url(#discovery-glint)');
+      ring.setAttribute('stroke-width', '1.8'); ring.classList.add('discovery-wave');
       svg.append(ring); return ring;
     });
     layer.append(svg);
@@ -385,11 +399,12 @@
     function draw(now) {
       const elapsed = now - began;
       rings.forEach((ring, i) => {
-        const t = clamp((elapsed - i * 150) / 1550, 0, 1);
-        ring.setAttribute('r', String(radius * (1 - (1 - t) ** 2)));
-        ring.setAttribute('opacity', String((1 - t) * .95));
+        const t = clamp((elapsed - i * 210) / 2150, 0, 1);
+        const points = waterCurve(radius * (1 - (1 - t) ** 1.45), i*2.4+t*.65);
+        ring.setAttribute('d', points.map((p,index) => `${index ? 'L' : 'M'}${x+p.x} ${y+p.y}`).join(' '));
+        ring.setAttribute('opacity', String(Math.sin(Math.PI*t)**.8 * (1-t*.4)));
       });
-      if (elapsed < 1850) waterFrame = requestAnimationFrame(draw);
+      if (elapsed < 2580 && !document.hidden && !reducedMotion.matches) waterFrame = requestAnimationFrame(draw);
       else { waterFrame = null; layer.replaceChildren(); }
     }
     waterFrame = requestAnimationFrame(draw);
@@ -416,34 +431,52 @@
   el('water-discover').parentElement.appendChild(musicWater);
   const musicPaint = musicWater.getContext('2d');
   const musicRipples = new MusicRipples();
-  let musicTime = null;
+  let musicTime = null, musicOrigin = null;
   function clearMusicWater() {
     musicRipples.clear();
     musicTime = null;
+    musicOrigin = null;
     musicPaint?.clearRect(0,0,musicWater.width,musicWater.height);
   }
   function drawMusicWater(delta) {
     if (!musicPaint) return;
     const playing = el('recommendation-list').querySelector('.ripple-focus.playing,.ripple-orbit.playing');
+    const active = !!playing || !!recommendationView?.items.some(item => recommendationView.keyOf(item) === recommendationView.currentKey);
     const progressing = musicTime == null || audio.currentTime > musicTime;
     musicTime = audio.currentTime;
-    if (playing && (!progressing || audio.readyState < 3)) return;
-    const rings = musicRipples.sample(bins,delta,!!playing);
+    if (active && (!progressing || audio.readyState < 3)) return;
+    const rings = musicRipples.sample(bins,delta,active);
     musicWater.dataset.mode = bins ? 'audio' : 'playback';
     const box = musicWater.getBoundingClientRect(), ratio = Math.min(root.devicePixelRatio || 1,1.5);
     const w = Math.round(box.width*ratio), h = Math.round(box.height*ratio);
     if (musicWater.width !== w || musicWater.height !== h) { musicWater.width=w; musicWater.height=h; }
     musicPaint.setTransform(ratio,0,0,ratio,0,0); musicPaint.clearRect(0,0,box.width,box.height);
-    if (!playing || !rings.length) return;
-    const origin = playing.getBoundingClientRect();
-    const x=origin.x+origin.width/2-box.x, y=origin.y+origin.height/2-box.y;
+    if (!active || !rings.length) return;
+    const origin = playing?.getBoundingClientRect();
+    const target = origin ? {x:origin.x+origin.width/2-box.x,y:origin.y+origin.height/2-box.y,width:origin.width} : {x:box.width*.52,y:box.height*.64,width:box.width*.46};
+    if (!musicOrigin) musicOrigin = target;
+    else for (const key of ['x','y','width']) musicOrigin[key] += (target[key]-musicOrigin[key]) * (1-Math.exp(-delta/260));
+    const {x,y} = musicOrigin;
+    musicPaint.lineCap='round'; musicPaint.lineJoin='round';
     for (const ring of rings) {
-      const life=(musicRipples.time-ring.born)/2200;
-      const radius=origin.width*.46 + life*Math.min(box.width,box.height)*.52;
-      const alpha=Math.min(1,life*5)*(1-life)*ring.strength;
-      for (const [offset,color,width] of [[2,`rgba(34,91,75,${alpha*.35})`,2.8],[0,`rgba(255,255,224,${alpha*.95})`,1.8],[-5,`rgba(223,238,196,${alpha*.55})`,.8]]) {
-        musicPaint.beginPath();musicPaint.ellipse(x,y,radius+offset,(radius+offset)*.74,0,0,Math.PI*2);
-        musicPaint.strokeStyle=color;musicPaint.lineWidth=width;musicPaint.stroke();
+      const life=(musicRipples.time-ring.born)/ring.life;
+      const radius=musicOrigin.width*.42 + (1-(1-life)**1.5)*Math.min(box.width,box.height)*.48;
+      const alpha=Math.sin(Math.PI*life)**1.2 * (1-life*.55)*ring.strength;
+      const phase=ring.phase+life*.65;
+      const driftX=Math.sin(ring.phase)*life*9, driftY=-life*8;
+      // Light catches only sections of the crest; the rest dissolves into the
+      // shared pond. No rigid concentric outline, no expanding song controls.
+      for (const [start,span] of [[phase*.16,Math.PI*1.12],[phase*.16+Math.PI*1.35,Math.PI*.44]]) {
+        const points=waterCurve(radius,phase,start,span,.72+Math.sin(ring.phase)*.035);
+        const first=points[0],last=points[points.length-1];
+        const shine=musicPaint.createLinearGradient(x+first.x,y+first.y,x+last.x,y+last.y);
+        shine.addColorStop(0,'rgba(250,255,231,0)'); shine.addColorStop(.25,`rgba(250,255,231,${alpha*.92})`);
+        shine.addColorStop(.65,`rgba(239,250,217,${alpha*.6})`); shine.addColorStop(1,'rgba(250,255,231,0)');
+        for (const [offset,color,width] of [[2,`rgba(43,103,84,${alpha*.12})`,3],[0,shine,1.6]]) {
+          musicPaint.beginPath();
+          points.forEach((p,index)=>musicPaint[index ? 'lineTo' : 'moveTo'](x+p.x+driftX,y+p.y+driftY+offset));
+          musicPaint.strokeStyle=color;musicPaint.lineWidth=width;musicPaint.stroke();
+        }
       }
     }
   }

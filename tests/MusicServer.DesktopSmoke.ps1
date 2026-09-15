@@ -33,3 +33,25 @@ function Stop-MusicServerSmokeDesktop {
         Write-Warning "taskkill returned $killExitCode, but the installed APP has exited; service shutdown must still be verified."
     }
 }
+
+# The APP selects ports, not the smoke runner. Require this process and APP home,
+# then validate both live endpoints so a stale report cannot count as readiness.
+function Get-MusicServerSmokePair {
+    param([Parameter(Mandatory)][string]$AppHome,
+          [Parameter(Mandatory)][string]$BuildMarker,
+          [Parameter(Mandatory)][int]$DesktopProcessId)
+    try {
+        $report = Get-Content -LiteralPath (Join-Path $AppHome 'logs\desktop-startup.json') -Raw -ErrorAction Stop | ConvertFrom-Json
+        if ($report.state -ne 'ready' -or $report.pid -ne $DesktopProcessId -or $report.build -ne $BuildMarker) { return $null }
+        if ($report.ui_port -lt 1 -or $report.ui_port -gt 65535 -or $report.api_port -lt 1 -or $report.api_port -gt 65535) { return $null }
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try {
+            $normalized = $AppHome.Replace('\','/').TrimEnd('/').ToLowerInvariant()
+            $scope = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($normalized))).Replace('-','').ToLowerInvariant()
+        } finally { $sha.Dispose() }
+        $ui = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$($report.ui_port)/app.js" -TimeoutSec 3
+        $health = Invoke-RestMethod -Uri "http://127.0.0.1:$($report.api_port)/health" -TimeoutSec 3
+        if ($ui.StatusCode -ne 200 -or -not $ui.Content.Contains($BuildMarker) -or $health.build -ne $BuildMarker -or $health.runtime_scope -ne $scope) { return $null }
+        return [pscustomobject]@{ UiPort = [int]$report.ui_port; ApiPort = [int]$report.api_port }
+    } catch { return $null }
+}
