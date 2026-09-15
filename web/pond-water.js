@@ -12,7 +12,7 @@
   // An opaque backing prevents overlapping refracted strips from compounding
   // alpha into horizontal seams on WebView2's canvas compositor.
   const depth=paint.createLinearGradient(0,0,0,850);
-  depth.addColorStop(0,'#a3c0b6'); depth.addColorStop(.38,'#e6ecda'); depth.addColorStop(.68,'#adc8bd'); depth.addColorStop(1,'#648f83');
+  depth.addColorStop(0,'#d8dfc8'); depth.addColorStop(.38,'#f0efda'); depth.addColorStop(.68,'#d2dfc7'); depth.addColorStop(1,'#95b09b');
   paint.fillStyle=depth;paint.fillRect(0,0,1200,850);
   function glow(x,y,rx,ry,color) {
     paint.save(); paint.translate(x,y); paint.scale(rx,ry);
@@ -22,7 +22,7 @@
   }
   // Broad cloud reflections and cooler depths. The middle remains quiet for type.
   [[150,130,350,170],[750,100,460,170],[320,450,420,125],[1060,535,290,150],[650,790,540,90]].forEach(([x,y,rx,ry])=>glow(x,y,rx,ry,'rgba(255,255,239,.75)'));
-  [[60,600,270,310],[1120,180,180,370],[900,820,320,110]].forEach(([x,y,rx,ry])=>glow(x,y,rx,ry,'rgba(36,93,81,.27)'));
+  [[60,600,270,310],[1120,180,180,370],[900,820,320,110]].forEach(([x,y,rx,ry])=>glow(x,y,rx,ry,'rgba(63,91,60,.22)'));
   // Soft reflections of shore leaves, sparse and outside the reading area.
   paint.filter='blur(9px)';
   for (const side of [0,1]) for(let i=0;i<12;i++) {
@@ -34,8 +34,8 @@
   let width=0,height=0,frame=null,last=0,clock=0,lastWake=0;
   let pointer={x:.5,y:.5},drift={x:.5,y:.5};
   const wakes=[];
-  const drops=Array.from({length:42},(_,i)=>({x:Math.random(),y:.15+Math.random()*.82,phase:Math.random(),speed:.30+Math.random()*.45,depth:.45+Math.random()*.55}));
-  function impact(x,y,scale=1) { wakes.push({x,y,age:0,scale});if(wakes.length>55) wakes.shift(); }
+  const drops=Array.from({length:28},(_,i)=>({x:Math.random(),y:.15+Math.random()*.82,phase:Math.random(),speed:.25+Math.random()*.35,depth:.45+Math.random()*.55}));
+  function impact(x,y,scale=1) { wakes.push({x,y,age:0,scale,phase:Math.random()*Math.PI*2});if(wakes.length>55) wakes.shift(); }
   // Short separate runners frame the glass instead of covering the controls.
   const vines=document.createElement('div'); vines.className='pond-vines';vines.setAttribute('aria-hidden','true');
   const leaf='<path d="M0 0C-5-7-15-6-17-17L-8-14-7-24 0-19 7-24 8-14 17-17C15-6 5-7 0 0Z"/><path class="ivy-vein" d="M0 0V-19M0-7l-10-8M0-7l10-8"/>';
@@ -82,13 +82,26 @@
     for(let i=wakes.length-1;i>=0;i--) {
       const wake=wakes[i]; wake.age+=delta;
       if(wake.age>2900) { wakes.splice(i,1); continue; }
-      const life=wake.age/2900, radius=(5+life*110)*(wake.scale||1);
-      for(let ring=0;ring<3;ring++) {
-        const r=radius-ring*12;if(r<3) continue;
-        ctx.beginPath();ctx.ellipse(wake.x*width,wake.y*height,r,r*.32,0,0,Math.PI*2);
-        ctx.strokeStyle=`rgba(34,83,73,${(1-life)*.16})`;ctx.lineWidth=2.2;ctx.stroke();
-        ctx.beginPath();ctx.ellipse(wake.x*width,wake.y*height-1,r,r*.32,0,0,Math.PI*2);
-        ctx.strokeStyle=`rgba(249,255,233,${(1-life)*.65})`;ctx.lineWidth=.9;ctx.stroke();
+      const life=wake.age/2900, radius=(5+(1-(1-life)**1.5)*100)*(wake.scale||1);
+      for(let ring=0;ring<2;ring++) {
+        const r=radius-ring*15;if(r<3) continue;
+        const x=wake.x*width+Math.sin(wake.phase)*life*4, y=wake.y*height;
+        // Only light-facing portions of an undulating crest are visible.
+        // A rain impact dissipates into the reflections, never a stamped target.
+        const alpha=Math.sin(Math.PI*life)**.6*(1-life);
+        for(const start of [wake.phase,wake.phase+Math.PI*1.1]) {
+          const shine=ctx.createLinearGradient(x-r,y,x+r,y);
+          shine.addColorStop(0,'rgba(255,255,237,0)');shine.addColorStop(.4,`rgba(255,255,237,${alpha*.58})`);shine.addColorStop(1,'rgba(255,255,237,0)');
+          for(const [offset,color,line] of [[1.3,`rgba(63,88,56,${alpha*.08})`,2.3],[0,shine,1]]) {
+            ctx.beginPath();
+            for(let j=0;j<=36;j++) {
+              const a=start+j/36*Math.PI*.88;
+              const bend=1+.035*Math.sin(a*3+wake.phase+life*.4);
+              ctx[j?'lineTo':'moveTo'](x+Math.cos(a)*r*bend,y+Math.sin(a)*r*.34*bend+offset);
+            }
+            ctx.strokeStyle=color;ctx.lineWidth=line;ctx.stroke();
+          }
+        }
       }
       if(life<.13) { ctx.beginPath();ctx.ellipse(wake.x*width,wake.y*height,1.5,4*(1-life/.13),0,0,Math.PI*2);ctx.fillStyle='rgba(255,255,245,.65)';ctx.fill(); }
     }

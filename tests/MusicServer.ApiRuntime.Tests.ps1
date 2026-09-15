@@ -198,13 +198,18 @@ Describe 'R: runtime hardening of the real HTTP API (concurrent processes, real 
 
     It 'R0: live server baseline - health 200, POST like 200 QUEUED, DELETE unlike 200 IDLE_REMOVED, GET wanted' {
         $tid = New-SeedTrack
-        $api = Start-MusicApi -Root $script:T.Root
+        $oldScope = $env:MUSICSERVER_RUNTIME_SCOPE
+        try {
+            $env:MUSICSERVER_RUNTIME_SCOPE = 'isolated-runtime-scope'
+            $api = Start-MusicApi -Root $script:T.Root
+        } finally { $env:MUSICSERVER_RUNTIME_SCOPE = $oldScope }
         $base = $api.BaseUrl
 
         $health = Invoke-Http -BaseUrl $base -Method 'GET' -Path '/health'
         $health.Status | Should Be 200
         $health.Json.status | Should Be 'ok'
         $health.Json.db | Should Be $true
+        $health.Json.runtime_scope | Should Be 'isolated-runtime-scope'
 
         $like = Invoke-Http -BaseUrl $base -Method 'POST' -Path "/api/tracks/$tid/like"
         $like.Status | Should Be 200

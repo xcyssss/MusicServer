@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>MusicServer · 正在准备</title>
+<style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(ellipse at 24% 16%,#fffdeb,transparent 62%),#e4edda;color:#294839;font:16px "Segoe UI","Microsoft YaHei UI",sans-serif}main{max-width:480px;padding:44px;line-height:1.8}h1{font-size:30px;font-weight:600;margin:0 0 14px}p{color:#536951}button{font:inherit;color:#294839;border:1px solid #8ba67a;border-radius:24px;background:#fcfff0;padding:9px 23px;cursor:pointer}small{display:block;color:#6c795d;margin-top:18px}[hidden]{display:none}</style></head>
+<body><main><h1 id="title">让音乐，慢慢醒来。</h1><p id="message" role="status">正在连接本地音乐服务，准备音乐库与今日推荐…</p><button id="retry" hidden>重新启动连接</button><small id="hint">你的音乐和喜欢记录会保留在原来的位置。</small></main>
+<script>
+const failed=new URLSearchParams(location.search).has('failed');
+if(failed){document.title='MusicServer · 连接需要恢复';document.querySelector('#title').textContent='音乐服务暂时未连接';document.querySelector('#message').textContent='本地服务未能完成启动。请重试；如果仍失败，可在应用数据目录的 logs/desktop-startup.json 查看具体原因。';document.querySelector('#retry').hidden=false;}
+document.querySelector('#retry').addEventListener('click',async()=>{try{await window.__TAURI__.core.invoke('restart_desktop');}catch(e){document.querySelector('#message').textContent='重启未成功，请关闭窗口后重新打开 MusicServer。';}});
+</script></body></html>
