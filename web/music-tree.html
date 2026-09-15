@@ -70,15 +70,19 @@
             <div id="water-ripples" class="water-ripples" aria-hidden="true"></div>
             <img class="muelsyse-portrait" src="/assets/muelsyse-water.png" alt="" aria-hidden="true" />
             <svg class="water-art" viewBox="0 0 600 700" preserveAspectRatio="none" aria-hidden="true">
-              <defs><clipPath id="dropClip"><path d="M291 4C275 118 164 213 81 361C-10 523 51 663 237 682C413 704 546 641 571 518C597 389 458 229 373 130C328 77 303 39 291 4Z" /></clipPath></defs>
-              <path d="M291 4C275 118 164 213 81 361C-10 523 51 663 237 682C413 704 546 641 571 518C597 389 458 229 373 130C328 77 303 39 291 4Z" fill="url(#waterBody)" stroke="#b5ba8c" stroke-width="2" />
-              <path d="M291 15C273 128 169 221 89 366C1 522 60 654 239 674C411 695 537 635 562 517C588 393 451 236 367 136C326 84 304 49 291 15Z" fill="none" stroke="#ffffe9" stroke-width="1.5" opacity=".85" />
+              <defs>
+                <path id="water-contour" d="M338 24C327 24 319 85 285 121C243 168 174 194 122 270C66 350 38 457 64 541C89 623 176 657 270 664C374 672 477 651 528 583C581 512 550 417 504 348C461 283 395 227 365 157C344 107 351 26 338 24Z" />
+                <clipPath id="dropClip"><use href="#water-contour" /></clipPath>
+                <clipPath id="water-silhouette" clipPathUnits="objectBoundingBox"><use href="#water-contour" transform="scale(.001666667 .001428571)" /></clipPath>
+                <linearGradient id="water-edge" x1="0" y1="0" x2=".85" y2="1"><stop stop-color="#faffed" stop-opacity=".1"/><stop offset=".32" stop-color="#fbfff3" stop-opacity=".75"/><stop offset=".57" stop-color="#628d7a" stop-opacity=".08"/><stop offset=".85" stop-color="#faffef" stop-opacity=".56"/><stop offset="1" stop-color="#a1c6ae" stop-opacity="0"/></linearGradient>
+              </defs>
+              <use href="#water-contour" class="water-meniscus" fill="url(#waterBody)" stroke="url(#water-edge)" stroke-width="1.3" />
               <g clip-path="url(#dropClip)" fill="none" stroke-linecap="round">
-                <path class="drop-reflection" d="M100 380C173 297 193 282 254 209M68 450C40 534 116 627 213 646" stroke="#fffef0" stroke-width="5" opacity=".6" />
-                <path d="M449 306C555 443 569 556 465 621" stroke="#638d7e" stroke-width="9" opacity=".08" />
-                <path d="M112 604C172 654 363 689 484 609" stroke="#fcfff5" stroke-width="1.4" opacity=".7" />
+                <path class="drop-reflection" d="M310 100C280 162 202 192 153 254M70 469C65 550 112 605 177 625" stroke="#fbfff0" stroke-width="3" opacity=".42" />
+                <path class="drop-shade" d="M497 351C540 419 562 485 536 544" stroke="#4d8976" stroke-width="15" opacity=".07" />
+                <path d="M199 651C277 670 369 662 424 644" stroke="#fcfff5" stroke-width="1.2" opacity=".5" />
               </g>
-              <g class="water-leaves" fill="url(#leafBody)" stroke="#edf0d8" stroke-width="1"><path d="M128 341Q144 287 187 265Q178 316 128 341Z"/><path d="M436 651Q484 605 495 565Q449 587 436 651Z"/><path d="M435 651Q385 660 373 633Q405 626 435 651Z"/></g>
+              <g class="water-leaves" fill="url(#leafBody)" stroke="#edf0d8" stroke-width=".8" opacity=".48"><path d="M458 646Q490 611 495 581Q460 598 458 646Z"/><path d="M457 645Q417 651 398 631Q430 625 457 645Z"/></g>
             </svg>
             <div class="drop-heading"><h2>今日推荐</h2><p>点击水面，换一批推荐</p><div class="rec-navigation"><button id="rec-previous" aria-label="上一批推荐"><svg class="ui-icon"><use href="#i-left" /></svg></button><span id="rec-position"></span><button id="rec-next" aria-label="下一批推荐"><svg class="ui-icon"><use href="#i-right" /></svg></button></div></div>
             <div id="recommendation-list" class="track-list" aria-label="推荐歌曲"></div>

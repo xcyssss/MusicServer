@@ -46,6 +46,7 @@ Read the relevant section when changing that subsystem. Code and regression suit
 
 - Seven leaves and the trunk share the continuous `treeGeometry` coordinate curve; scrolling changes that curve and its decorative sprigs. Recommendation focus follows next/previous/autoplay as well as direct selection, without resetting deliberate browsing on pause/poll.
 - Group navigation aligns with the left music-tree panel midpoint. The circular player remains centered in the window. Keep labels readable through hover/active states. Decorative art never intercepts clicks or obscures song controls.
+- Recommendation water uses one shared curved silhouette for its artwork, click area and wave clipping. Unequal water surfaces may change gently; text and hit targets stay still. Keep all seven songs usable at small window sizes. Playback waves continue while browsing another recommendation group, with smooth origin movement and bounded, fading crests.
 - Rain, ripples and vines have bounded particle/frame budgets; stop animation on hidden/reduced-motion pages. Spectrum reads a captured audio copy and never reroutes playback. Recommendation waves use real audio energy where capture is allowed; uncapturable remote streams have quiet playback-progress ripples, never synthetic frequency bars. Pause clears waves; buffering does not advance them.
 - Actual APP validation can attach Playwright to an isolated WebView2 via process-local debug-port and user-data-folder variables. Never enable those flags in production defaults or reuse the user's live state for tests.
 
