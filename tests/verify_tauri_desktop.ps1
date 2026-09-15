@@ -2,6 +2,7 @@
 param(
     [string]$Root = '',
     [string]$Executable = '',
+    [string]$AppHome = '',
     [switch]$Launch,
     [switch]$CloseLaunchedApp,
     [switch]$ExercisePlayback
@@ -118,20 +119,13 @@ function Send-JsonPost {
     return $null
 }
 
+if (-not $AppHome) {
+    Import-Module (Join-Path $Root 'MusicServer.Core.psm1') -Force
+    $AppHome = (New-MusicServerConfig -Root $Root).AppHome
+}
 function Find-CurrentServicePair {
-    foreach ($pair in @(
-        [pscustomobject]@{ UiPort = 8790; ApiPort = 8787 },
-        [pscustomobject]@{ UiPort = 8791; ApiPort = 8788 },
-        [pscustomobject]@{ UiPort = 8792; ApiPort = 8789 }
-    )) {
-        $app = Get-HttpResult -Uri "http://127.0.0.1:$($pair.UiPort)/app.js"
-        $health = Get-HttpResult -Uri "http://127.0.0.1:$($pair.ApiPort)/health"
-        if ($app -and $health -and $app.StatusCode -eq 200 -and $health.StatusCode -eq 200 -and
-            $app.Text.Contains($BuildMarker) -and $health.Text.Contains($BuildMarker)) {
-            $pair
-            return
-        }
-    }
+    $desktopId = if ($launchedDesktopPid) { $launchedDesktopPid } else { (@(Get-DesktopProcess) | Select-Object -First 1).ProcessId }
+    if ($desktopId) { Get-MusicServerSmokePair -AppHome $AppHome -BuildMarker $BuildMarker -DesktopProcessId $desktopId }
 }
 
 if ($CloseLaunchedApp -and -not $Launch) {

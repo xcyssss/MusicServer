@@ -29,7 +29,7 @@ Consult [engineering contracts](docs/engineering-contracts.md) when changing the
 
 ## Verification proportional to the change
 
-Use disposable fixtures with no production state, then fix failures caused by the requested change and rerun the affected checks. UI changes must also be exercised in the **actual Tauri APP**, including relevant interactions and small-window layout. Browser-only screenshots are supplementary.
+Use disposable fixtures with no production state, then fix failures caused by the requested change and rerun the affected checks. UI changes must also be exercised in the **actual Tauri APP**, including normal automatic startup, relevant interactions and small-window layout. Manually starting services or navigating the WebView to a test URL does not validate startup. Browser-only screenshots are supplementary.
 
 | Changed surface | Relevant checks |
 | --- | --- |
@@ -58,7 +58,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/run_groups.ps1 -St
 - One suite has a 300-second bound; a group/background test has at most 900 seconds. Investigate a timeout instead of extending it or blindly repeating it. A missing suite result is a runner error, not a pass.
 - Keep progress observable. Do not pipe long runs into `Select-Object -Last`. Child processes, ports and temporary APPs must be cleaned on success, failure and timeout. Local-runtime-dependent tests carry `RequiresLocalRuntime`.
 
-The desktop gate consists of `cargo fmt --check`, `cargo check --locked`, `cargo test --locked`, a Tauri NSIS build, installer existence, silent temporary installation, launch with source runtime disabled, current UI/API markers and bundled SQLite, normal APP exit with owned services stopped, and installer artifact upload. CI's `desktop-build` implements this gate; static source checks do not replace it. Do not run a silent installer in a user session with an active MusicServer: NSIS terminates matching processes by name. Use a clean runner for that check.
+The desktop gate consists of `cargo fmt --check`, `cargo check --locked`, `cargo test --locked`, a Tauri NSIS build, installer existence, silent temporary installation, launch with source runtime disabled and all fixed ports occupied, current UI/API markers plus matching APP-home scope and bundled SQLite, normal APP exit with owned services stopped, and installer artifact upload. Read the selected ports from `logs/desktop-startup.json` and verify its process ID and live endpoints. CI's `desktop-build` implements this gate; static source checks do not replace it. Do not run a silent installer in a user session with an active MusicServer: NSIS terminates matching processes by name. Use a clean runner for that check.
 
 ## Runtime and delivery
 

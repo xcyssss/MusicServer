@@ -14,6 +14,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 mod background_process;
+mod desktop_startup;
 mod runtime_manifest;
 mod startup_probe;
 mod startup_trace;
@@ -62,12 +63,17 @@ fn http_contains(port: u16, path: &str, marker: &str) -> bool {
     )
 }
 
-fn api_is_current(port: u16) -> bool {
-    http_contains(port, "/health", BUILD_MARKER)
+fn api_is_current(port: u16, scope: &str) -> bool {
+    startup_probe::contains_all(
+        port,
+        "/health",
+        &[BUILD_MARKER, scope],
+        Instant::now() + Duration::from_millis(1200),
+    )
 }
 
-fn service_is_current(ui_port: u16, api_port: u16) -> bool {
-    http_contains(ui_port, "/app.js", BUILD_MARKER) && api_is_current(api_port)
+fn service_is_current(ui_port: u16, api_port: u16, scope: &str) -> bool {
+    http_contains(ui_port, "/app.js", BUILD_MARKER) && api_is_current(api_port, scope)
 }
 
 fn has_launcher(path: &Path) -> bool {
@@ -412,6 +418,10 @@ fn spawn_launcher(root: &Path, ui_port: u16, api_port: u16) -> Option<Child> {
     // hand, but a launch path that lost the environment (installer RunAsUser) must
     // still hand the API, the worker and the daily generator exactly one home.
     command.env(APP_HOME_ENV, root);
+    command.env(
+        "MUSICSERVER_RUNTIME_SCOPE",
+        desktop_startup::runtime_scope(root),
+    );
 
     if sqlite_path.is_file() {
         command.env("MUSICSERVER_SQLITE", sqlite_path);
@@ -438,7 +448,20 @@ fn ensure_ui_ready(
 ) -> Option<String> {
     let mut pairs = vec![(DEFAULT_UI_PORT, DEFAULT_API_PORT)];
     pairs.extend_from_slice(FALLBACK_PAIRS);
+    for _ in 0..2 {
+        if let Ok(pair) = desktop_startup::vacant_pair() {
+            pairs.push(pair);
+        }
+    }
+    let scope = desktop_startup::runtime_scope(app_home);
     let mut runtime_staged = false;
+    desktop_startup::record(
+        app_home,
+        "starting",
+        "Checking local services",
+        None,
+        BUILD_MARKER,
+    );
 
     for (ui_port, api_port) in pairs {
         let started = Instant::now();
@@ -452,9 +475,16 @@ fn ensure_ui_ready(
         trace.record("port_probe", started);
         if ui_open {
             let started = Instant::now();
-            let current = api_open && service_is_current(ui_port, api_port);
+            let current = api_open && service_is_current(ui_port, api_port, &scope);
             trace.record("existing_pair_identity", started);
             if current {
+                desktop_startup::record(
+                    app_home,
+                    "ready",
+                    "Reusing this app home's current services",
+                    Some((ui_port, api_port)),
+                    BUILD_MARKER,
+                );
                 return Some(endpoint_url(ui_port));
             }
             continue;
@@ -464,7 +494,7 @@ fn ensure_ui_ready(
         // safe to reuse when only its UI port is free.
         if api_open {
             let started = Instant::now();
-            let current = api_is_current(api_port);
+            let current = api_is_current(api_port, &scope);
             trace.record("existing_api_identity", started);
             if !current {
                 continue;
@@ -476,6 +506,13 @@ fn ensure_ui_ready(
             if let Err(error) = stage_runtime_traced(bundle_runtime, app_home, trace) {
                 trace.record("runtime_stage_failed", started);
                 eprintln!("failed to stage MusicServer runtime: {error}");
+                desktop_startup::record(
+                    app_home,
+                    "failed",
+                    &format!("Runtime deployment failed: {error}"),
+                    None,
+                    BUILD_MARKER,
+                );
                 return None;
             }
             runtime_staged = true;
@@ -488,6 +525,13 @@ fn ensure_ui_ready(
         }
         drop(guard);
         trace.record("launcher_spawn", started);
+        desktop_startup::record(
+            app_home,
+            "starting",
+            "Waiting for owned UI/API",
+            Some((ui_port, api_port)),
+            BUILD_MARKER,
+        );
 
         // Include network time in the per-pair budget, not just sleep time.
         let started = Instant::now();
@@ -495,15 +539,31 @@ fn ensure_ui_ready(
         while Instant::now() < deadline {
             let probe_deadline = deadline.min(Instant::now() + Duration::from_millis(1200));
             if startup_probe::contains(ui_port, "/app.js", BUILD_MARKER, probe_deadline)
-                && startup_probe::contains(
+                && startup_probe::contains_all(
                     api_port,
                     "/health",
-                    BUILD_MARKER,
+                    &[BUILD_MARKER, &scope],
                     deadline.min(Instant::now() + Duration::from_millis(1200)),
                 )
             {
                 trace.record("services_ready", started);
+                desktop_startup::record(
+                    app_home,
+                    "ready",
+                    "Owned services ready",
+                    Some((ui_port, api_port)),
+                    BUILD_MARKER,
+                );
                 return Some(endpoint_url(ui_port));
+            }
+            if state
+                .child
+                .lock()
+                .unwrap()
+                .as_mut()
+                .is_none_or(|child| child.try_wait().ok().flatten().is_some())
+            {
+                break;
             }
             std::thread::sleep(
                 Duration::from_millis(500).min(deadline.saturating_duration_since(Instant::now())),
@@ -515,7 +575,19 @@ fn ensure_ui_ready(
         trace.record("launcher_stop", started);
     }
 
+    desktop_startup::record(
+        app_home,
+        "failed",
+        "No verified service pair became ready; check musicserver-ui.log and musicserver-api.log",
+        None,
+        BUILD_MARKER,
+    );
     None
+}
+
+#[tauri::command]
+fn restart_desktop(app: tauri::AppHandle) {
+    app.restart();
 }
 
 #[tauri::command]
@@ -650,7 +722,12 @@ fn main() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![open_folder, pick_folder, restore_backup])
+        .invoke_handler(tauri::generate_handler![
+            open_folder,
+            pick_folder,
+            restore_backup,
+            restart_desktop
+        ])
         .manage(AppState {
             child: Mutex::new(None),
         })
@@ -667,28 +744,69 @@ fn main() {
             let started = Instant::now();
             let tray_ready = install_tray_icon(app.handle());
             trace.record(
-                if tray_ready { "tray_icon" } else { "tray_icon_unavailable" },
+                if tray_ready {
+                    "tray_icon"
+                } else {
+                    "tray_icon_unavailable"
+                },
                 started,
             );
 
-            let ui_url = bundle_runtime
+            let mut ui_url = bundle_runtime
                 .as_deref()
                 .and_then(|runtime| ensure_ui_ready(runtime, &app_home, &state, &mut trace));
 
-            let outcome = if ui_url.is_some() { "services_ready" } else { "startup_failed" };
+            // Only this verified endpoint gets native IPC. Never grant every
+            // localhost port, or depend on a fixed-port list for folder access.
+            if let Some(url) = &ui_url {
+                let capability = tauri::ipc::CapabilityBuilder::new("verified-runtime-ui")
+                    .local(false)
+                    .window(MAIN_WINDOW)
+                    .remote(url.trim_end_matches('/').to_string())
+                    .permission("core:default")
+                    .permission("shell:allow-open")
+                    .permission("dialog:allow-open")
+                    .permission("allow-pick-folder")
+                    .permission("allow-open-folder")
+                    .permission("allow-restore-backup");
+                if let Err(error) = app.add_capability(capability) {
+                    desktop_startup::record(
+                        &app_home,
+                        "failed",
+                        &format!("Native capability setup failed: {error}"),
+                        None,
+                        BUILD_MARKER,
+                    );
+                    stop_owned_launcher(&state);
+                    ui_url = None;
+                }
+            } else if bundle_runtime.is_none() {
+                desktop_startup::record(
+                    &app_home,
+                    "failed",
+                    "Packaged runtime is missing",
+                    None,
+                    BUILD_MARKER,
+                );
+            }
+
+            let outcome = if ui_url.is_some() {
+                "services_ready"
+            } else {
+                "startup_failed"
+            };
 
             if let Some(window) = app.get_webview_window("main") {
                 if let Some(ui_url) = ui_url {
                     let started = Instant::now();
-                    let _ = window.navigate(
-                        ui_url.parse::<tauri::Url>().expect("invalid ui url"),
-                    );
+                    let _ = window.navigate(ui_url.parse::<tauri::Url>().expect("invalid ui url"));
                     trace.record("navigation_request", started);
                 } else {
-                    let app_home_text = app_home.to_string_lossy().replace('\\', "\\\\");
-                    let _ = window.eval(&format!(
-                        "document.body.innerHTML='<div style=\"font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;background:#0b0f14;color:#f4f7fb;text-align:center;padding:32px;\">MusicServer runtime 启动失败。<br><small style=\"opacity:.65\">APP home: {app_home_text}</small></div>';"
-                    ));
+                    let _ = window.navigate(
+                        "http://tauri.localhost/desktop-start.html?failed=1"
+                            .parse()
+                            .expect("invalid startup url"),
+                    );
                 }
             }
             let _ = trace.finish(BUILD_MARKER, outcome);
