@@ -3,6 +3,27 @@ const assert = require('node:assert/strict');
 const { LeafWindow, orbitItems, nextRecommendationIndex, treeGeometry, playbackFocus, MusicRipples, waterCurve } = require('../web/music-tree-ui.js');
 const tracks = Array.from({ length: 30 }, (_, i) => ({ id: `library-${i}`, track_id: `track-${i}` }));
 
+test('twenty daily songs are browsed once before any song is repeated', () => {
+  const daily = tracks.slice(0, 20), seen = new Set();
+  let index = 0;
+  for (let page = 0; page < 3; page++) {
+    const group = orbitItems(daily, daily[index].track_id);
+    for (const song of [group.focus, ...group.orbit]) {
+      assert.ok(!seen.has(song.track_id), `repeated before finishing the day: ${song.track_id}`);
+      seen.add(song.track_id);
+    }
+    index = nextRecommendationIndex(index, daily.length, 1);
+  }
+  assert.equal(seen.size, 20);
+  assert.equal(index, 0);
+});
+
+test('promoting a daily song swaps focus inside its batch instead of repopulating the other songs', () => {
+  const ids = group => [group.focus, ...group.orbit].map(x => x.track_id).sort();
+  assert.deepEqual(ids(orbitItems(tracks, 'track-0')), ids(orbitItems(tracks, 'track-4')));
+  assert.equal(nextRecommendationIndex(4, 30, 1), 7);
+});
+
 test('music water follows audio energy, stays bounded and clears when playback stops', () => {
   const water=new MusicRipples(), silence=new Uint8Array(512), loud=new Uint8Array(512).fill(190);
   for(let i=0;i<80;i++) water.sample(silence,50,true);
@@ -66,16 +87,16 @@ test('recommendation ripples never duplicate the focus, including short and refr
   const one = orbitItems(tracks.slice(0, 1), null); assert.equal(one.orbit.length, 0);
   const two = orbitItems(tracks.slice(0, 2), 'track-1'); assert.equal(two.focus.track_id, 'track-1'); assert.equal(two.orbit[0].track_id, 'track-0');
   const many = orbitItems(tracks, 'track-29');
-  assert.equal(many.orbit.length, 6);
-  assert.equal(new Set([many.focus, ...many.orbit].map(x => x.track_id)).size, 7);
+  assert.equal(many.orbit.length, 1);
+  assert.equal(new Set([many.focus, ...many.orbit].map(x => x.track_id)).size, 2);
   assert.equal(orbitItems(tracks.slice(0, 3), 'removed').focus.track_id, 'track-0');
 });
 
 test('recommendation batches advance seven, wrap, and remain usable for short days', () => {
   assert.equal(nextRecommendationIndex(0, 30, 1), 7);
-  assert.equal(nextRecommendationIndex(28, 30, 1), 5);
-  assert.equal(nextRecommendationIndex(0, 30, -1), 23);
-  assert.equal(nextRecommendationIndex(0, 7, 1), 1);
+  assert.equal(nextRecommendationIndex(28, 30, 1), 0);
+  assert.equal(nextRecommendationIndex(0, 30, -1), 28);
+  assert.equal(nextRecommendationIndex(0, 7, 1), 0);
   assert.equal(nextRecommendationIndex(0, 0, 1), 0);
 });
 

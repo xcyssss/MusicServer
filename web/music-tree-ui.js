@@ -27,13 +27,19 @@
   function orbitItems(items, focusId) {
     if (!items.length) return { focus: null, orbit: [], index: -1 };
     const index = Math.max(0, items.findIndex((item) => String(item.track_id) === String(focusId)));
-    return { focus: items[index], index, orbit: Array.from({ length: Math.min(6, items.length - 1) }, (_, offset) => items[(index + offset + 1) % items.length]) };
+    const start = Math.floor(index / PAGE_SIZE) * PAGE_SIZE;
+    const batch = items.slice(start, start + PAGE_SIZE);
+    // Promotion swaps positions within a stable batch; the final partial batch
+    // must never wrap and pull already-seen songs back into the current group.
+    [batch[0], batch[index - start]] = [batch[index - start], batch[0]];
+    return { focus: batch[0], index, orbit: batch.slice(1) };
   }
 
   function nextRecommendationIndex(index, length, direction) {
     if (!length) return 0;
-    const step = length > 7 ? 7 : 1;
-    return (index + direction * step + length) % length;
+    const pages = Math.ceil(length / PAGE_SIZE);
+    const page = Math.floor(clamp(index, 0, length - 1) / PAGE_SIZE);
+    return ((page + Math.sign(direction) + pages) % pages) * PAGE_SIZE;
   }
 
   // A continuous stem in library coordinates: scrolling samples a different
@@ -307,9 +313,16 @@
     const nextSignature = JSON.stringify([focusId, currentKey, paused, items.map(item => [item.track_id, display(item), item.liked, item.disliked, pendingLikes.has(item.track_id), pendingDislikes.has(item.track_id)])]);
     if (recommendationSignature === nextSignature) return;
     recommendationSignature = nextSignature;
-    el('rec-position').textContent = items.length ? `${group.index + 1} / ${items.length}` : '';
-    el('rec-previous').disabled = el('rec-next').disabled = items.length < 2;
-    el('water-discover').disabled = items.length < 2;
+    const page = Math.floor(group.index / PAGE_SIZE) + 1;
+    const pages = Math.ceil(items.length / PAGE_SIZE);
+    el('rec-position').textContent = items.length ? `${page} / ${pages} 组 · ${items.length} 首` : '';
+    const nextLabel = page === pages ? '已看完今日推荐，重新浏览第一组' : '下一批推荐';
+    const previousLabel = page === 1 ? '浏览今日推荐的最后一组' : '上一批推荐';
+    for (const [id, label] of [['rec-next', nextLabel], ['rec-previous', previousLabel], ['water-discover', `泛起波纹，${nextLabel}`]]) {
+      el(id).setAttribute('aria-label', label);
+      el(id).title = pages <= 1 ? '今日推荐已全部展示' : label;
+      el(id).disabled = pages <= 1;
+    }
     const recList = el('recommendation-list');
     const remainingMotion = orbitMotionDeadline - performance.now();
     const before = remainingMotion > 0 ? new Map(Array.from(recList.children, row => [row.dataset.trackId, row.getBoundingClientRect()])) : null;
