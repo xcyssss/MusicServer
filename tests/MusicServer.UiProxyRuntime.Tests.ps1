@@ -130,6 +130,46 @@ Describe 'MusicServer live UI API proxy' {
         $script:ProxyTest.OldAppHome = $null
     }
 
+    It 'uses the external music directory on first startup before a database exists and refreshes new files' {
+        $oldMusicDir = [Environment]::GetEnvironmentVariable('MUSICSERVER_MUSIC_DIR')
+        $oldTasks = [Environment]::GetEnvironmentVariable('MUSICSERVER_DISABLE_SCHEDULED_TASKS')
+        try {
+            $root = $script:ProxyTest.Root
+            $db = Join-Path $root 'DailyMix_data\state\musicserver.db'
+            foreach ($file in @($db, ($db + '-wal'), ($db + '-shm'))) {
+                Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+            }
+            (Test-Path -LiteralPath $db) | Should Be $false
+            $external = Join-Path $root 'external-music'
+            New-Item -ItemType Directory -Path $external -Force | Out-Null
+            $song = Join-Path $external 'first-start.wav'
+            [IO.File]::WriteAllBytes($song, (New-Object byte[] 4096))
+            [Environment]::SetEnvironmentVariable('MUSICSERVER_MUSIC_DIR', $external)
+            [Environment]::SetEnvironmentVariable('MUSICSERVER_DISABLE_SCHEDULED_TASKS', '1')
+
+            $apiPort = Get-TestFreePort
+            do { $uiPort = Get-TestFreePort } while ($apiPort -eq $uiPort)
+            $apiPrefix = "http://127.0.0.1:$apiPort/"
+            $uiPrefix = "http://127.0.0.1:$uiPort/"
+            $args = @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $root 'start_musicserver_ui.ps1'),'-ApiPrefix',$apiPrefix,'-UiPrefix',$uiPrefix,'-NoBrowser')
+            $ui = Start-Process -FilePath (Get-TestTermExe) -ArgumentList $args -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $root 'ui.out.log') -RedirectStandardError (Join-Path $root 'ui.err.log')
+            $script:ProxyTest.Processes += $ui
+            Wait-TestHealth -BaseUrl $uiPrefix
+            $settings = Invoke-RestMethod -Uri ($uiPrefix + 'api/settings/music-library') -TimeoutSec 10
+            $settings.path | Should Be $external
+            $library = Invoke-RestMethod -Uri ($uiPrefix + 'api/library?refresh=1') -TimeoutSec 10
+            @($library.items).Count | Should Be 1
+            $library.items[0].file | Should Be $song
+
+            [IO.File]::WriteAllBytes((Join-Path $external 'added-later.wav'), (New-Object byte[] 4096))
+            $refreshed = Invoke-RestMethod -Uri ($uiPrefix + 'api/library?refresh=1') -TimeoutSec 10
+            @($refreshed.items).Count | Should Be 2
+        } finally {
+            [Environment]::SetEnvironmentVariable('MUSICSERVER_MUSIC_DIR', $oldMusicDir)
+            [Environment]::SetEnvironmentVariable('MUSICSERVER_DISABLE_SCHEDULED_TASKS', $oldTasks)
+        }
+    }
+
     It 'forwards browser-style JSON-body POST like requests through the UI gateway' {
         $app = Get-Content -LiteralPath (Join-Path $ProjectRoot 'web\app.js') -Raw
         $app | Should Match "headers:\s*\{\s*'Content-Type':\s*'application/json; charset=utf-8'\s*\}"
