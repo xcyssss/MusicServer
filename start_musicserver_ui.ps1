@@ -422,12 +422,14 @@ try {
     $uiDbPath = Join-Path $Config.StateDir 'musicserver.db'
     if (Test-Path -LiteralPath $uiDbPath -PathType Leaf) {
         Connect-MusicServerDatabase -DbPath $uiDbPath -SqliteExe $Config.Sqlite
-        Apply-ConfiguredMusicDir -Config $Config
         # The artist cache is read while assembling every library response, so
         # create it here rather than waiting for the API process or the backfill.
         Initialize-LocalTrackArtistSchema
     }
 } catch {}
+# Resolve even before the API creates the first database: an environment-provided
+# library must be shared by the UI and API on their very first startup.
+Apply-ConfiguredMusicDir -Config $Config | Out-Null
 try { Initialize-MusicServerLibrary -Config $Config | Out-Null } catch {}
 $startupPhases['config_library'] = $startupClock.Elapsed.TotalMilliseconds
 
