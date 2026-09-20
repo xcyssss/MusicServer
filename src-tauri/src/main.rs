@@ -10,6 +10,7 @@ use std::fs;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::Child;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -37,6 +38,7 @@ const TRAY_ID: &str = "musicserver-tray";
 struct AppState {
     /// 由本应用拉起的 launcher 进程（若有）。
     child: Mutex<Option<Child>>,
+    stopping: AtomicBool,
 }
 
 fn port_open(port: u16) -> bool {
@@ -380,6 +382,35 @@ mod tests {
             PathBuf::from(r"C:\local").join(PACKAGED_APP_HOME_DIR)
         );
     }
+
+    #[test]
+    fn closing_desktop_prevents_late_service_startup() {
+        let state = AppState {
+            child: Mutex::new(None),
+            stopping: AtomicBool::new(false),
+        };
+        shutdown_desktop(&state);
+        let absent = std::env::temp_dir().join(format!(
+            "musicserver-closed-startup-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let result = ensure_ui_ready(
+            &absent,
+            &absent,
+            &state,
+            &mut startup_trace::Trace::from_env(),
+        );
+        assert!(result.is_none());
+        assert!(
+            !absent.exists(),
+            "closed APP must not stage or write reports"
+        );
+        assert!(state.child.lock().unwrap().is_none());
+    }
 }
 
 /// 拉起指定端口的 launcher 并返回子进程。失败返回 None（调用方会继续尝试）。
@@ -437,6 +468,13 @@ fn stop_owned_launcher(state: &AppState) {
     }
 }
 
+fn shutdown_desktop(state: &AppState) {
+    // Publish before taking the child lock. Startup checks under the same lock,
+    // so an exit either prevents a spawn or collects the child it just created.
+    state.stopping.store(true, Ordering::Release);
+    stop_owned_launcher(state);
+}
+
 /// 确保当前版本的 UI/API 可用。若已有当前版本服务则直接复用，不触碰
 /// runtime 文件；只有需要启动自己的服务树时才把 bundle runtime 同步到
 /// APP home。旧版服务占用默认端口时使用隔离端口。
@@ -446,6 +484,9 @@ fn ensure_ui_ready(
     state: &AppState,
     trace: &mut startup_trace::Trace,
 ) -> Option<String> {
+    if state.stopping.load(Ordering::Acquire) {
+        return None;
+    }
     let mut pairs = vec![(DEFAULT_UI_PORT, DEFAULT_API_PORT)];
     pairs.extend_from_slice(FALLBACK_PAIRS);
     for _ in 0..2 {
@@ -464,6 +505,9 @@ fn ensure_ui_ready(
     );
 
     for (ui_port, api_port) in pairs {
+        if state.stopping.load(Ordering::Acquire) {
+            return None;
+        }
         let started = Instant::now();
         // Probe ownership once. A closed UI needs no HTTP identity request;
         // repeated closed-port connects on Windows each consume their timeout.
@@ -520,6 +564,9 @@ fn ensure_ui_ready(
 
         let started = Instant::now();
         let mut guard = state.child.lock().unwrap();
+        if state.stopping.load(Ordering::Acquire) {
+            return None;
+        }
         if guard.is_none() {
             *guard = spawn_launcher(app_home, ui_port, api_port);
         }
@@ -537,6 +584,9 @@ fn ensure_ui_ready(
         let started = Instant::now();
         let deadline = started + Duration::from_secs(30);
         while Instant::now() < deadline {
+            if state.stopping.load(Ordering::Acquire) {
+                return None;
+            }
             let probe_deadline = deadline.min(Instant::now() + Duration::from_millis(1200));
             if startup_probe::contains(ui_port, "/app.js", BUILD_MARKER, probe_deadline)
                 && startup_probe::contains_all(
@@ -730,11 +780,11 @@ fn main() {
         ])
         .manage(AppState {
             child: Mutex::new(None),
+            stopping: AtomicBool::new(false),
         })
         .setup(|app| {
             let mut trace = startup_trace::Trace::from_env();
             let started = Instant::now();
-            let state: tauri::State<AppState> = app.state();
             let resource_dir = app.path().resource_dir().ok();
             let bundle_runtime = resolve_bundled_runtime(resource_dir);
             let app_home = resolve_app_home();
@@ -752,64 +802,75 @@ fn main() {
                 started,
             );
 
-            let mut ui_url = bundle_runtime
-                .as_deref()
-                .and_then(|runtime| ensure_ui_ready(runtime, &app_home, &state, &mut trace));
+            // Return setup immediately so WebView2 can paint the opening page
+            // while service probes and staging run. No cosmetic startup delay.
+            let app = app.handle().clone();
+            std::thread::spawn(move || {
+                let state: tauri::State<AppState> = app.state();
+                let mut ui_url = bundle_runtime
+                    .as_deref()
+                    .and_then(|runtime| ensure_ui_ready(runtime, &app_home, &state, &mut trace));
 
-            // Only this verified endpoint gets native IPC. Never grant every
-            // localhost port, or depend on a fixed-port list for folder access.
-            if let Some(url) = &ui_url {
-                let capability = tauri::ipc::CapabilityBuilder::new("verified-runtime-ui")
-                    .local(false)
-                    .window(MAIN_WINDOW)
-                    .remote(url.trim_end_matches('/').to_string())
-                    .permission("core:default")
-                    .permission("shell:allow-open")
-                    .permission("dialog:allow-open")
-                    .permission("allow-pick-folder")
-                    .permission("allow-open-folder")
-                    .permission("allow-restore-backup");
-                if let Err(error) = app.add_capability(capability) {
+                // Only this verified endpoint gets native IPC. Never grant every
+                // localhost port, or depend on a fixed-port list for folder access.
+                if let Some(url) = &ui_url {
+                    let capability = tauri::ipc::CapabilityBuilder::new("verified-runtime-ui")
+                        .local(false)
+                        .window(MAIN_WINDOW)
+                        .remote(url.trim_end_matches('/').to_string())
+                        .permission("core:default")
+                        .permission("shell:allow-open")
+                        .permission("dialog:allow-open")
+                        .permission("allow-pick-folder")
+                        .permission("allow-open-folder")
+                        .permission("allow-restore-backup");
+                    if let Err(error) = app.add_capability(capability) {
+                        desktop_startup::record(
+                            &app_home,
+                            "failed",
+                            &format!("Native capability setup failed: {error}"),
+                            None,
+                            BUILD_MARKER,
+                        );
+                        stop_owned_launcher(&state);
+                        ui_url = None;
+                    }
+                } else if bundle_runtime.is_none() {
                     desktop_startup::record(
                         &app_home,
                         "failed",
-                        &format!("Native capability setup failed: {error}"),
+                        "Packaged runtime is missing",
                         None,
                         BUILD_MARKER,
                     );
-                    stop_owned_launcher(&state);
-                    ui_url = None;
                 }
-            } else if bundle_runtime.is_none() {
-                desktop_startup::record(
-                    &app_home,
-                    "failed",
-                    "Packaged runtime is missing",
-                    None,
-                    BUILD_MARKER,
-                );
-            }
 
-            let outcome = if ui_url.is_some() {
-                "services_ready"
-            } else {
-                "startup_failed"
-            };
-
-            if let Some(window) = app.get_webview_window("main") {
-                if let Some(ui_url) = ui_url {
-                    let started = Instant::now();
-                    let _ = window.navigate(ui_url.parse::<tauri::Url>().expect("invalid ui url"));
-                    trace.record("navigation_request", started);
+                let outcome = if ui_url.is_some() {
+                    "services_ready"
                 } else {
-                    let _ = window.navigate(
-                        "http://tauri.localhost/desktop-start.html?failed=1"
-                            .parse()
-                            .expect("invalid startup url"),
-                    );
+                    "startup_failed"
+                };
+
+                if state.stopping.load(Ordering::Acquire) {
+                    return;
                 }
-            }
-            let _ = trace.finish(BUILD_MARKER, outcome);
+
+                if let Some(window) = app.get_webview_window("main") {
+                    if let Some(ui_url) = ui_url {
+                        let started = Instant::now();
+                        let _ =
+                            window.navigate(ui_url.parse::<tauri::Url>().expect("invalid ui url"));
+                        trace.record("navigation_request", started);
+                    } else {
+                        let _ = window.navigate(
+                            "http://tauri.localhost/desktop-start.html?failed=1"
+                                .parse()
+                                .expect("invalid startup url"),
+                        );
+                    }
+                }
+                let _ = trace.finish(BUILD_MARKER, outcome);
+            });
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -818,7 +879,7 @@ fn main() {
                 tauri::WindowEvent::Destroyed if window.label() == MAIN_WINDOW => {
                     let app = window.app_handle();
                     let state: tauri::State<AppState> = app.state();
-                    stop_owned_launcher(&state);
+                    shutdown_desktop(&state);
                 }
                 // Native minimize retains the taskbar entry; the tray stays available.
                 _ => {}
@@ -832,7 +893,7 @@ fn main() {
         // service tree at the application exit boundary as well.
         if matches!(event, tauri::RunEvent::Exit) {
             let state: tauri::State<AppState> = app.state();
-            stop_owned_launcher(&state);
+            shutdown_desktop(&state);
         }
     });
 }

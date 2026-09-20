@@ -1,6 +1,24 @@
-/* Rain on a reflecting garden pond. Cached sky, bounded drops and impact rings. */
+/* Rain and suspended leaves on a reflecting pond. One bounded animation clock. */
 (function (root) {
   'use strict';
+  const LEAF_COUNT = 22;
+  function pondLeaf(index, time, width, height, wind = 0) {
+    const seed = (index * .61803398875) % 1;
+    const depth = .48 + (index % 5) * .13;
+    const duration = 29000 + (index % 7) * 3700;
+    const phase = (seed + time / duration) % 1;
+    const sway = time / (3100 + index * 117) + index * 2.4;
+    return {
+      x: (.035 + ((index * .38196601125) % 1) * .93) * width + Math.sin(sway) * (10 + depth * 18) + wind * 18 * depth,
+      y: phase * (height + 100) - 50,
+      rotation: Math.sin(sway * .7) * .6 + phase * 1.8 + index * 2.4,
+      tilt: .72 + Math.sin(sway * .83) * .24,
+      scale: .62 + depth * .68,
+      alpha: Math.min(1, phase * 12, (1 - phase) * 12) * (.26 + depth * .19),
+      color: ['#86a85c', '#b2c568', '#6f9866', '#a0b966'][index % 4]
+    };
+  }
+  if (typeof module === 'object' && module.exports) module.exports = { pondLeaf, LEAF_COUNT };
   if (typeof document === 'undefined') return;
   const canvas = document.getElementById('pond-water');
   if (!canvas) return;
@@ -34,6 +52,8 @@
   let width=0,height=0,frame=null,last=0,clock=0,lastWake=0;
   let pointer={x:.5,y:.5},drift={x:.5,y:.5};
   const wakes=[];
+  // Same silhouette as the liquid garden, with staggered depth and phase.
+  const driftingLeaf = new Path2D('M0 0C-10-1-14-10-11-17C-1-16 5-8 0 0Z');
   const drops=Array.from({length:28},(_,i)=>({x:Math.random(),y:.15+Math.random()*.82,phase:Math.random(),speed:.25+Math.random()*.35,depth:.45+Math.random()*.55}));
   function impact(x,y,scale=1) { wakes.push({x,y,age:0,scale,phase:Math.random()*Math.PI*2});if(wakes.length>55) wakes.shift(); }
   // Short separate runners frame the glass instead of covering the controls.
@@ -104,6 +124,13 @@
         }
       }
       if(life<.13) { ctx.beginPath();ctx.ellipse(wake.x*width,wake.y*height,1.5,4*(1-life/.13),0,0,Math.PI*2);ctx.fillStyle='rgba(255,255,245,.65)';ctx.fill(); }
+    }
+    for(let i=0;i<LEAF_COUNT;i++) {
+      const leaf=pondLeaf(i,clock,width,height,drift.x-.5);
+      ctx.save();ctx.translate(leaf.x,leaf.y);ctx.rotate(leaf.rotation);ctx.scale(leaf.scale*leaf.tilt,leaf.scale);
+      ctx.globalAlpha=leaf.alpha;ctx.fillStyle=leaf.color;ctx.fill(driftingLeaf);
+      ctx.strokeStyle='rgba(247,255,215,.65)';ctx.lineWidth=.65;
+      ctx.beginPath();ctx.moveTo(-.5,-.8);ctx.quadraticCurveTo(-8,-5,-10,-15);ctx.stroke();ctx.restore();
     }
   }
   function tick(now) {

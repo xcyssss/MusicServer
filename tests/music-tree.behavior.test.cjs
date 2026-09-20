@@ -2,6 +2,47 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { LeafWindow, orbitItems, nextRecommendationIndex, treeGeometry, playbackFocus, MusicRipples, waterCurve } = require('../web/music-tree-ui.js');
 const tracks = Array.from({ length: 30 }, (_, i) => ({ id: `library-${i}`, track_id: `track-${i}` }));
+const { pondLeaf, LEAF_COUNT } = require('../web/pond-water.js');
+
+test('pond leaves sink continuously and recycle only while invisible', () => {
+  assert.ok(LEAF_COUNT <= 24);
+  const speeds = new Set();
+  for (let i = 0; i < LEAF_COUNT; i++) {
+    const a = pondLeaf(i, 4000, 1440, 900), b = pondLeaf(i, 4042, 1440, 900);
+    speeds.add((b.y - a.y).toFixed(4));
+    assert.ok(b.y > a.y && b.y - a.y < 2);
+    for (let time = 0; time < 110000; time += 42) {
+      const before = pondLeaf(i, time, 960, 640), after = pondLeaf(i, time + 42, 960, 640);
+      assert.ok(before.alpha >= 0 && before.alpha < .5);
+      if (after.y < before.y) assert.ok(before.alpha < .01 && after.alpha < .01, 'visible leaf teleported');
+    }
+  }
+  assert.ok(speeds.size > 3, 'leaves should not descend as one sheet');
+});
+
+test('the pond stops its shared animation clock when hidden or reduced and resumes without accumulating callbacks', () => {
+  const vm = require('node:vm'), fs = require('node:fs');
+  const callbacks = new Map(), events = {}, preferenceEvents = {};
+  let serial = 0, paintCount = 0, now = 0;
+  const gradient = {addColorStop(){}};
+  const context = new Proxy({}, {get:(_,name) => name.startsWith('create') ? () => gradient : () => {paintCount++;}, set:()=>true});
+  const canvas = {getContext:()=>context, parentElement:{appendChild(){}}};
+  const preference = {matches:false, addEventListener:(type,fn)=>preferenceEvents[type]=fn};
+  const doc = {hidden:false, getElementById:()=>canvas, createElement:()=>({getContext:()=>context,setAttribute(){}}),addEventListener:(type,fn)=>events[type]=fn};
+  const sandbox = {document:doc, matchMedia:()=>preference, Path2D:class {}, innerWidth:960,innerHeight:640,performance:{now:()=>now},
+    requestAnimationFrame:fn=>{callbacks.set(++serial,fn);return serial;},cancelAnimationFrame:id=>callbacks.delete(id),addEventListener:(type,fn)=>events[type]=fn};
+  vm.runInNewContext(fs.readFileSync(require.resolve('../web/pond-water.js'),'utf8'),sandbox);
+  assert.equal(callbacks.size,1);
+  const tick=()=>{now+=50;const [id,fn]=callbacks.entries().next().value;callbacks.delete(id);fn(now);};
+  tick(); assert.equal(callbacks.size,1);
+  doc.hidden=true;events.visibilitychange();assert.equal(callbacks.size,0);
+  const stopped=paintCount;now+=60000;assert.equal(paintCount,stopped);
+  doc.hidden=false;events.visibilitychange();events.visibilitychange();assert.equal(callbacks.size,1);
+  preference.matches=true;preferenceEvents.change();assert.equal(callbacks.size,0);
+  events.resize();assert.equal(callbacks.size,0);
+  preference.matches=false;preferenceEvents.change();assert.equal(callbacks.size,1);
+  events.pagehide();assert.equal(callbacks.size,0);
+});
 
 test('twenty daily songs are browsed once before any song is repeated', () => {
   const daily = tracks.slice(0, 20), seen = new Set();
