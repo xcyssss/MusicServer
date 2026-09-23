@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8" /><meta name="viewport" content="width=device-width, initial-scale=1" /><title>MusicServer · 任务栏歌词</title>
+<link rel="stylesheet" href="taskbar-player.css" /><script src="taskbar-player.js" defer></script></head>
+<body><main class="dock" aria-label="任务栏歌词播放器">
+  <button id="restore" class="leaf" title="回到 MusicServer" aria-label="显示主窗口"><svg viewBox="0 0 40 40" aria-hidden="true"><path d="M7 32C3 15 18 6 34 5c0 16-8 32-27 27Z"/><path d="M7 32 28 11M16 23l-1-10m1 10 12 1"/></svg></button>
+  <div id="dock-text" class="copy" title="拖动调整位置 · 双击显示主窗口"><div class="track"><span id="dock-title">MusicServer</span><span id="dock-artist"></span></div><div id="dock-lyric">让音乐，从一片叶子开始</div></div>
+  <nav aria-label="播放控制"><button id="previous" aria-label="上一首" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5v14M18 5 8 12l10 7Z"/></svg></button><button id="toggle" class="play" aria-label="播放" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7Z"/></svg></button><button id="next" aria-label="下一首" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 5v14M6 5l10 7-10 7Z"/></svg></button><button id="like" class="heart" aria-label="喜欢当前歌曲" aria-pressed="false" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20 3.8 12A5.2 5.2 0 0 1 12 5.6 5.2 5.2 0 0 1 20.2 12Z"/></svg></button><button id="hide" class="close" title="隐藏任务栏歌词" aria-label="隐藏任务栏歌词">×</button></nav>
+  <span id="dock-status" role="status" class="status"></span>
+</main></body></html>
