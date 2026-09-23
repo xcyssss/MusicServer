@@ -129,7 +129,8 @@ function Invoke-Http {
     param(
         [Parameter(Mandatory)][string]$BaseUrl,
         [Parameter(Mandatory)][string]$Method,
-        [Parameter(Mandatory)][string]$Path
+        [Parameter(Mandatory)][string]$Path,
+        [string]$Body = ''
     )
     $url = $BaseUrl + $Path
     $text = ''
@@ -144,6 +145,12 @@ function Invoke-Http {
         # Content-Length or the HttpListener answers 411 Length Required.
         # PS 5.1 (.NET 4.x) HttpWebRequest has no ContentLength64; .NET Core has both.
         if ($request.GetType().GetProperty('ContentLength64')) { $request.ContentLength64 = 0 } else { $request.ContentLength = 0 }
+        if ($Body) {
+            $bytes = [Text.Encoding]::UTF8.GetBytes($Body)
+            $request.ContentLength = $bytes.Length
+            $stream = $request.GetRequestStream()
+            try { $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }
+        }
         $response = $request.GetResponse()
         $stream = $response.GetResponseStream()
         $ms = [System.IO.MemoryStream]::new()
@@ -441,6 +448,25 @@ Describe 'R: runtime hardening of the real HTTP API (concurrent processes, real 
         $get.Json.playback_source.type | Should Be 'preview'
         (($get.Json.playback_source.url) -like '*music.163.com*') | Should Be $true
 
+        Stop-AllApiServers
+    }
+
+    It 'desktop preferences reject wrong types and survive a service restart' {
+        $api = Start-MusicApi -Root $script:T.Root
+        $initial = Invoke-Http -BaseUrl $api.BaseUrl -Method 'GET' -Path '/api/settings/desktop'
+        $initial.Status | Should Be 200
+        $initial.Json.tray_only | Should Be $false
+        $initial.Json.taskbar_lyrics | Should Be $false
+        $saved = Invoke-Http -BaseUrl $api.BaseUrl -Method 'PUT' -Path '/api/settings/desktop' -Body '{"tray_only":true,"taskbar_lyrics":true}'
+        $saved.Status | Should Be 200
+        foreach ($body in @('{"tray_only":"false","taskbar_lyrics":false}', '{"tray_only":false}', 'null')) {
+            (Invoke-Http -BaseUrl $api.BaseUrl -Method 'PUT' -Path '/api/settings/desktop' -Body $body).Status | Should Be 400
+        }
+        Stop-AllApiServers
+        $restarted = Start-MusicApi -Root $script:T.Root
+        $restored = Invoke-Http -BaseUrl $restarted.BaseUrl -Method 'GET' -Path '/api/settings/desktop'
+        $restored.Json.tray_only | Should Be $true
+        $restored.Json.taskbar_lyrics | Should Be $true
         Stop-AllApiServers
     }
 

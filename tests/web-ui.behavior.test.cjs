@@ -318,6 +318,22 @@ test('obsolete lyrics requests are aborted and cannot replace newer lyrics', asy
   assert.match(a.get('lyrics-content').innerHTML, /New lyrics/); assert.doesNotMatch(a.get('lyrics-content').innerHTML, /Old lyrics/);
 });
 
+test('browsing another song lyrics cannot replace or cancel the taskbar playback lyrics', async () => {
+  const a = await app(), playing = deferred();
+  a.run("state.currentKey = 'playing'");
+  a.context.fetchHandler = url => url === '/playing' ? playing.promise : Promise.resolve(json({ available: true, text: '[00:01.00]Other song', format: 'lrc' }));
+  const pending = a.run("loadLyrics('/playing', false)");
+  await a.run("loadLyrics('/other', true)");
+  assert.equal(a.requests[0].options.signal.aborted, false);
+  playing.resolve(json({ available: true, text: '[00:01.00]Playing song', format: 'lrc' }));
+  await pending;
+  assert.equal(a.run('state.playbackLyrics.entries[0].text'), 'Playing song');
+  assert.match(a.get('lyrics-content').innerHTML, /Other song/);
+  a.run("state.currentKey = 'next'");
+  await a.run("loadLyrics('', false)");
+  assert.equal(a.run('state.playbackLyrics.available'), false);
+});
+
 test('hidden windows skip data polling and resume without polling listening statistics', async () => {
   const a = await app(); a.context.document.hidden = true; a.intervals[0](); await settle(); assert.equal(a.requests.length, 0);
   a.context.document.hidden = false; a.events.get('visibilitychange')(); await settle();

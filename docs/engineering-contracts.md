@@ -18,7 +18,7 @@ Read the relevant section when changing that subsystem. Code and regression suit
 - Rust passes the resolved APP_HOME to the launcher, which exports the same value for all children. The registry pin survives uninstall; tests use an isolated `MUSICSERVER_APP_HOME_PIN_KEY`. WebView2's separate cache directory is not runtime state.
 - A missing daily mix self-heals even when scheduled-task registration fails. Task identity includes APP_HOME. Direct generation uses its existing bounded lease so restarts do not duplicate work.
 - The API preflight probe is 400 ms; owned-child readiness uses a monotonic 27-second budget with bounded probes and early child-exit detection. Optional startup traces measure script phases, not rendered UI readiness, and never overwrite existing reports.
-- Reclaim owned services on both main-window destruction and `RunEvent::Exit`; forced tree termination is test cleanup, not proof of normal shutdown. Minimize retains the taskbar and tray; tray click restores/unminimizes/focuses.
+- Reclaim owned services on both main-window destruction and `RunEvent::Exit`; forced tree termination is test cleanup, not proof of normal shutdown. Ordinary minimize retains the taskbar and tray; SQLite desktop preferences can opt into tray-only. Hide only when the tray exists; tray click restores/unminimizes/focuses. Closing the main window exits the companion too.
 
 ## Identity, library presentation and lyrics
 
@@ -43,6 +43,9 @@ Read the relevant section when changing that subsystem. Code and regression suit
 - Preview provider comes from its source record. UI hydration must prefer a newly downloaded local binding; stale searches, likes or playback responses must not overwrite newer state. Failures keep likes and expose finite retries in download details.
 
 ## Desktop visuals
+
+- The optional taskbar companion is a local, frameless WebView aligned inside the main monitor's work area, never an Explorer child or a second player. Main owns audio, track identity, lyrics and the atomic like/download flow; the companion receives bounded snapshots and sends actions carrying the observed track key. Ignore stale-song commands. Manual lyric browsing cannot replace the playing song's companion lyrics. Only the verified main origin can publish snapshots/change native preferences; the local companion gets read/action capabilities only.
+- Desktop settings live in SQLite `app_settings.desktop_preferences`; native state is a cache applied after load. Failed saves restore native behavior and the visible checkboxes. The companion has no taskbar entry; its text area drags horizontally while it remains above the taskbar. Monitor work-area changes are checked every two seconds without an additional audio or animation clock.
 
 - Seven leaves and the trunk share the continuous `treeGeometry` coordinate curve; scrolling changes that curve and its decorative sprigs. Recommendation focus follows next/previous/autoplay as well as direct selection, without resetting deliberate browsing on pause/poll.
 - Group navigation aligns with the left music-tree panel midpoint. The circular player remains centered in the window. Keep labels readable through hover/active states. Decorative art never intercepts clicks or obscures song controls.

@@ -24,6 +24,10 @@ const REQUIRED: &[&str] = &[
     "web/app.js",
     "web/index.html",
     "web/desktop-start.html",
+    "web/desktop-bridge.js",
+    "web/taskbar-player.html",
+    "web/taskbar-player.js",
+    "web/taskbar-player.css",
     "web/styles.css",
     "tools/sqlite3.exe",
 ];

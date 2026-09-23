@@ -153,7 +153,7 @@ Describe 'MusicServer Tauri desktop shell' {
         $boot | Should Match 'restart_desktop'
     }
 
-    It 'keeps taskbar and tray together when minimized' {
+    It 'keeps the normal taskbar mode and offers tray-only with a recovery entry' {
         $main = Get-Content -LiteralPath (Join-Path $ProjectRoot 'src-tauri\src\main.rs') -Raw
         $cargo = Get-Content -LiteralPath (Join-Path $ProjectRoot 'src-tauri\Cargo.toml') -Raw
 
@@ -165,6 +165,10 @@ Describe 'MusicServer Tauri desktop shell' {
         $main | Should Not Match 'window\.hide\(\)'
         $main | Should Not Match 'should_hide_to_tray'
         $main | Should Match 'window\.unminimize\(\)'
+        $main | Should Match 'tray_only && window.is_minimized'
+        $controls = Get-Content -LiteralPath (Join-Path $ProjectRoot 'src-tauri\src\desktop_controls.rs') -Raw
+        $controls | Should Match 'tray_by_id\(super::TRAY_ID\).is_none'
+        $controls | Should Match 'window.hide\(\)'
         # Closing the window still exits and stops this APP's owned service tree:
         # minimize-to-tray must not turn the close button into a second hide.
         $main | Should Match 'tauri::WindowEvent::Destroyed'

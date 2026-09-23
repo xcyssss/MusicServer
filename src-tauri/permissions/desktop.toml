@@ -1,0 +1,9 @@
+[[permission]]
+identifier = "allow-desktop-main"
+description = "Main player controls desktop preferences and publishes playback state."
+commands.allow = ["minimize_to_tray", "apply_desktop_preferences", "publish_desktop_player"]
+
+[[permission]]
+identifier = "allow-desktop-player"
+description = "The local companion can read playback and request bounded player actions."
+commands.allow = ["desktop_player_snapshot", "desktop_player_action", "shift_desktop_player"]

@@ -15,6 +15,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 mod background_process;
+mod desktop_controls;
 mod desktop_startup;
 mod runtime_manifest;
 mod startup_probe;
@@ -749,8 +750,44 @@ fn install_tray_icon(app: &tauri::AppHandle) -> bool {
     let Some(icon) = app.default_window_icon().cloned() else {
         return false;
     };
+    let menu = (|| {
+        let show =
+            tauri::menu::MenuItem::with_id(app, "show", "显示 MusicServer", true, None::<&str>)?;
+        let hide = tauri::menu::MenuItem::with_id(app, "hide", "仅收起到托盘", true, None::<&str>)?;
+        let lyrics = tauri::menu::MenuItem::with_id(
+            app,
+            "lyrics",
+            "显示 / 隐藏任务栏歌词",
+            true,
+            None::<&str>,
+        )?;
+        let separator = tauri::menu::PredefinedMenuItem::separator(app)?;
+        let quit =
+            tauri::menu::MenuItem::with_id(app, "quit", "退出 MusicServer", true, None::<&str>)?;
+        tauri::menu::Menu::with_items(app, &[&show, &hide, &lyrics, &separator, &quit])
+    })();
+    let Ok(menu) = menu else {
+        return false;
+    };
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon)
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "show" => restore_main_window(app),
+            "hide" => {
+                let _ = desktop_controls::hide_to_tray(app);
+            }
+            "lyrics" => {
+                let _ = desktop_controls::desktop_player_action(
+                    app.clone(),
+                    "toggle-dock".into(),
+                    String::new(),
+                );
+            }
+            "quit" => app.exit(0),
+            _ => {}
+        })
         .tooltip("MusicServer（单击显示主窗口）")
         .on_tray_icon_event(|tray, event| {
             // 只认左键抬起。Windows 上一次双击会先送来一次 Click，单击恢复已经覆盖
@@ -776,8 +813,15 @@ fn main() {
             open_folder,
             pick_folder,
             restore_backup,
-            restart_desktop
+            restart_desktop,
+            desktop_controls::minimize_to_tray,
+            desktop_controls::apply_desktop_preferences,
+            desktop_controls::publish_desktop_player,
+            desktop_controls::desktop_player_snapshot,
+            desktop_controls::desktop_player_action,
+            desktop_controls::shift_desktop_player
         ])
+        .manage(desktop_controls::DesktopControls::default())
         .manage(AppState {
             child: Mutex::new(None),
             stopping: AtomicBool::new(false),
@@ -802,6 +846,20 @@ fn main() {
                 started,
             );
 
+            // Follow monitor work-area / taskbar changes without moving the
+            // Explorer taskbar or creating another audio player.
+            let dock_app = app.handle().clone();
+            std::thread::spawn(move || {
+                while !dock_app
+                    .state::<AppState>()
+                    .stopping
+                    .load(Ordering::Acquire)
+                {
+                    let _ = desktop_controls::position_dock(&dock_app);
+                    std::thread::sleep(Duration::from_secs(2));
+                }
+            });
+
             // Return setup immediately so WebView2 can paint the opening page
             // while service probes and staging run. No cosmetic startup delay.
             let app = app.handle().clone();
@@ -823,6 +881,7 @@ fn main() {
                         .permission("dialog:allow-open")
                         .permission("allow-pick-folder")
                         .permission("allow-open-folder")
+                        .permission("allow-desktop-main")
                         .permission("allow-restore-backup");
                     if let Err(error) = app.add_capability(capability) {
                         desktop_startup::record(
@@ -880,8 +939,30 @@ fn main() {
                     let app = window.app_handle();
                     let state: tauri::State<AppState> = app.state();
                     shutdown_desktop(&state);
+                    app.exit(0);
                 }
-                // Native minimize retains the taskbar entry; the tray stays available.
+                tauri::WindowEvent::Resized(_) if window.label() == MAIN_WINDOW => {
+                    let app = window.app_handle();
+                    let controls = app.state::<desktop_controls::DesktopControls>();
+                    let tray_only = controls
+                        .preferences
+                        .lock()
+                        .map(|p| p.tray_only)
+                        .unwrap_or(false);
+                    if tray_only && window.is_minimized().unwrap_or(false) {
+                        let _ = desktop_controls::hide_to_tray(app);
+                    }
+                }
+                tauri::WindowEvent::CloseRequested { api, .. }
+                    if window.label() == desktop_controls::DOCK =>
+                {
+                    api.prevent_close();
+                    let _ = desktop_controls::desktop_player_action(
+                        window.app_handle().clone(),
+                        "hide".into(),
+                        String::new(),
+                    );
+                }
                 _ => {}
             }
         })
