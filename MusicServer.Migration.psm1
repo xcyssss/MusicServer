@@ -4,9 +4,9 @@
 # Legacy files are read only before the marker is written. The import itself
 # is one SQLite transaction; the source files are never deleted or rewritten.
 
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.Database.psm1') -Force
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.Core.psm1') -Force
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.State.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Database.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Core.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.State.psm1') -DisableNameChecking -Force
 
 $script:RecommendationMigrationKey = 'recommendation_state_v2'
 $script:MigrationConflictCategories = @(

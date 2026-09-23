@@ -132,7 +132,7 @@ function Start-OnlineMusicSearch {
         [void]$ps.AddScript({
             param($root,$config,$id,$queryText,$source)
             try { [Console]::OutputEncoding=[Text.Encoding]::UTF8 } catch {}
-            foreach ($name in @('Core','Providers','Database','State','Search')) { Import-Module (Join-Path $root "MusicServer.$name.psm1") }
+            foreach ($name in @('Core','Providers','Database','State','Search')) { Import-Module (Join-Path $root "MusicServer.$name.psm1") -DisableNameChecking }
             Connect-MusicServerDatabase -DbPath (Join-Path $config.StateDir 'musicserver.db') -SqliteExe $config.Sqlite
             Invoke-OnlineMusicSearch -Config $config -SearchId $id -Query $queryText -Source $source
         }).AddArgument($PSScriptRoot).AddArgument($Config).AddArgument($id).AddArgument($queryText).AddArgument($Source)

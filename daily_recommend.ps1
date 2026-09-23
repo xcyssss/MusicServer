@@ -40,12 +40,12 @@ $ErrorActionPreference = 'Continue'
 $ProgressPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.Core.psm1') -Force
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.Database.psm1') -Force
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.State.psm1') -Force
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.Providers.psm1') -Force
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.Migration.psm1') -Force
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.Onboarding.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Core.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Database.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.State.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Providers.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Migration.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Onboarding.psm1') -DisableNameChecking -Force
 
 $Config = New-MusicServerConfig -Root $Root -AppHome $AppHome
 $dbPath = Join-Path $Config.StateDir 'musicserver.db'

@@ -24,9 +24,9 @@ $ErrorActionPreference = 'Continue'
 $ProgressPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.Core.psm1') -Force
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.State.psm1') -Force
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.Providers.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Core.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.State.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Providers.psm1') -DisableNameChecking -Force
 $Config = New-MusicServerConfig -Root $Root
 Initialize-MusicServerState -Config $Config -SkipLibrary
 Initialize-MusicServerDatabase -DbPath (Join-Path $Config.StateDir 'musicserver.db') -SqliteExe $Config.Sqlite

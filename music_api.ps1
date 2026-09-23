@@ -40,14 +40,14 @@ try { Add-Type -AssemblyName System.Web -ErrorAction SilentlyContinue } catch {}
 # 所有 -Force 导入必须在 Initialize-MusicServerDatabase 之前完成（模块实例重置律）。
 # Legacy migration is an explicit maintenance action owned by daily_recommend.ps1;
 # API startup must never import or rewrite legacy recommendation state.
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.Core.psm1') -Force
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.Providers.psm1') -Force
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.Database.psm1') -Force
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.State.psm1') -Force
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.Http.psm1') -Force
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.Onboarding.psm1') -Force
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.Management.psm1') -Force
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.Search.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Core.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Providers.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Database.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.State.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Http.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Onboarding.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Management.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Search.psm1') -DisableNameChecking -Force
 $startupPhases['module_imports'] = $startupClock.Elapsed.TotalMilliseconds
 
 $Config = New-MusicServerConfig -Root $Root
@@ -726,7 +726,7 @@ function Resolve-RouteLikeTransaction {
 }
 
 $script:requestCount = 0
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.Identity.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Identity.psm1') -DisableNameChecking -Force
 $script:BuildMarker = Get-MusicServerBuildIdentity -Root $PSScriptRoot
 $script:RuntimeScope = [Environment]::GetEnvironmentVariable('MUSICSERVER_RUNTIME_SCOPE', 'Process')
 $startupPhases['build_identity'] = $startupClock.Elapsed.TotalMilliseconds

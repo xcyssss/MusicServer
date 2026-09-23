@@ -378,13 +378,13 @@ function Initialize-MusicServerScheduledTasks {
     Start-MusicServerDailyRecommendBackfill -AppHome $AppHome -Count $scheduleCount
 }
 
-Import-Module (Join-Path $Root 'MusicServer.Core.psm1') -Force
-Import-Module (Join-Path $Root 'MusicServer.Database.psm1') -Force
-Import-Module (Join-Path $Root 'MusicServer.State.psm1') -Force
-Import-Module (Join-Path $Root 'MusicServer.Http.psm1') -Force
-Import-Module (Join-Path $Root 'MusicServer.Providers.psm1') -Force
-Import-Module (Join-Path $Root 'MusicServer.Identity.psm1') -Force
-Import-Module (Join-Path $Root 'MusicServer.Management.psm1') -Force
+Import-Module (Join-Path $Root 'MusicServer.Core.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $Root 'MusicServer.Database.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $Root 'MusicServer.State.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $Root 'MusicServer.Http.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $Root 'MusicServer.Providers.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $Root 'MusicServer.Identity.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $Root 'MusicServer.Management.psm1') -DisableNameChecking -Force
 $startupPhases['module_imports'] = $startupClock.Elapsed.TotalMilliseconds
 $script:BuildMarker = Get-MusicServerBuildIdentity -Root $Root
 $startupPhases['build_identity'] = $startupClock.Elapsed.TotalMilliseconds
