@@ -1,10 +1,10 @@
 ﻿param([Parameter(Mandatory)][string]$AppHome, [string]$JobId='', [string]$RestoreBackup='')
 $ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'
 [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.Core.psm1') -Force
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.Database.psm1') -Force
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.State.psm1') -Force
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.Management.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Core.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Database.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.State.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Management.psm1') -DisableNameChecking -Force
 $config=New-MusicServerConfig -Root $PSScriptRoot -AppHome $AppHome
 $db=Join-Path $config.StateDir 'musicserver.db'
 Connect-MusicServerDatabase -DbPath $db -SqliteExe $config.Sqlite

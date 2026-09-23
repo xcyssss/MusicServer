@@ -1,6 +1,6 @@
-﻿Import-Module (Join-Path $PSScriptRoot 'MusicServer.Core.psm1') -Force
+﻿Import-Module (Join-Path $PSScriptRoot 'MusicServer.Core.psm1') -DisableNameChecking -Force
 Set-StrictMode -Version 3.0
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.State.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.State.psm1') -DisableNameChecking -Force
 
 function New-DownloadCandidate {
     param(

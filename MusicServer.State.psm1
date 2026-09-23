@@ -4,8 +4,8 @@
 # Provides: schema, migration, CAS, worker claim/lease, crash recovery,
 #           transactional like/unlike/download-completion, provider health.
 
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.Database.psm1') -Force
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.Core.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Database.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Core.psm1') -DisableNameChecking -Force
 
 $script:SchemaVersion = 6
 
