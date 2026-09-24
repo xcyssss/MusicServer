@@ -20,6 +20,8 @@ mod desktop_startup;
 mod runtime_manifest;
 mod startup_probe;
 mod startup_trace;
+#[cfg(windows)]
+mod taskbar_host;
 
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::Manager;
@@ -846,8 +848,8 @@ fn main() {
                 started,
             );
 
-            // Follow monitor work-area / taskbar changes without moving the
-            // Explorer taskbar or creating another audio player.
+            // Keep the reversible embedded taskbar reservation in sync with
+            // Explorer geometry; the main window remains the only player.
             let dock_app = app.handle().clone();
             std::thread::spawn(move || {
                 while !dock_app
@@ -855,6 +857,7 @@ fn main() {
                     .stopping
                     .load(Ordering::Acquire)
                 {
+                    desktop_controls::recover_dock(&dock_app);
                     let _ = desktop_controls::position_dock(&dock_app);
                     std::thread::sleep(Duration::from_secs(2));
                 }
@@ -935,6 +938,11 @@ fn main() {
         .on_window_event(|window, event| {
             match event {
                 // 主窗口关闭时，停掉本应用拉起的 launcher（其 finally 会停掉 API）。
+                tauri::WindowEvent::CloseRequested { .. } if window.label() == MAIN_WINDOW => {
+                    #[cfg(windows)]
+                    taskbar_host::detach();
+                    window.app_handle().exit(0);
+                }
                 tauri::WindowEvent::Destroyed if window.label() == MAIN_WINDOW => {
                     let app = window.app_handle();
                     let state: tauri::State<AppState> = app.state();
@@ -973,6 +981,8 @@ fn main() {
         // event. Tauri exits the process without dropping state, so reclaim our
         // service tree at the application exit boundary as well.
         if matches!(event, tauri::RunEvent::Exit) {
+            #[cfg(windows)]
+            taskbar_host::detach();
             let state: tauri::State<AppState> = app.state();
             shutdown_desktop(&state);
         }
