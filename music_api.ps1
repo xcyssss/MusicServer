@@ -1170,15 +1170,18 @@ while ($true) {
             $saved = $null
             try { $saved = Get-AppSettingDb -Key 'desktop_preferences' | ConvertFrom-Json } catch {}
             $body = @{ tray_only = ($saved -and $saved.tray_only -is [bool] -and $saved.tray_only); taskbar_lyrics = ($saved -and $saved.taskbar_lyrics -is [bool] -and $saved.taskbar_lyrics) }
+            $width = Get-OptionalProperty $saved 'taskbar_width' 420
+            $body.taskbar_width = if (($width -is [int] -or $width -is [long]) -and $width -ge 360 -and $width -le 800) { $width } else { 420 }
             Send-Json -Context ([pscustomobject]@{ Response=$Context.Response; Body=$body; StatusCode=200 })
         }
         elseif ($method -eq 'PUT' -and $path -eq '/api/settings/desktop') {
             $preferences = $null
             try { $preferences = ConvertFrom-Json -InputObject $bodyText } catch {}
-            if (-not $preferences -or $preferences.tray_only -isnot [bool] -or $preferences.taskbar_lyrics -isnot [bool]) {
-                Send-Json -Context ([pscustomobject]@{ Response=$Context.Response; Body=@{error='INVALID_DESKTOP_PREFERENCES';message='Both desktop preferences must be booleans.'}; StatusCode=400 })
+            $width = Get-OptionalProperty $preferences 'taskbar_width' 420
+            if (($width -isnot [int] -and $width -isnot [long]) -or $width -lt 360 -or $width -gt 800 -or -not $preferences -or $preferences.tray_only -isnot [bool] -or $preferences.taskbar_lyrics -isnot [bool]) {
+                Send-Json -Context ([pscustomobject]@{ Response=$Context.Response; Body=@{error='INVALID_DESKTOP_PREFERENCES';message='Expected boolean preferences and an integer taskbar_width between 360 and 800.'}; StatusCode=400 })
             } else {
-                $body = @{ tray_only=[bool]$preferences.tray_only; taskbar_lyrics=[bool]$preferences.taskbar_lyrics }
+                $body = @{ tray_only=[bool]$preferences.tray_only; taskbar_lyrics=[bool]$preferences.taskbar_lyrics; taskbar_width=$width }
                 Set-AppSettingDb -Key 'desktop_preferences' -Value ($body | ConvertTo-Json -Compress)
                 Write-ApiLog ('Desktop preferences updated: tray_only={0}, taskbar_lyrics={1}' -f $body.tray_only,$body.taskbar_lyrics)
                 Send-Json -Context ([pscustomobject]@{ Response=$Context.Response; Body=$body; StatusCode=200 })

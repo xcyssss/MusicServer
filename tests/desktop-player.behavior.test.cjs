@@ -36,3 +36,13 @@ test('failed settings save restores the native mode and checkbox instead of hidi
   const applied=f.calls.filter(c=>c.name==='apply_desktop_preferences').map(c=>c.args.preferences.tray_only);
   assert.deepEqual(applied,[true,false]);assert.equal(tray.checked,false);assert.match(f.element('#desktop-settings-status').textContent,/未能保存/);
 });
+
+test('taskbar width is saved with preferences and rolled back when saving fails',async()=>{
+  for(const failSave of [false,true]) {
+    const f=fixture({failSave});await settle();f.calls.length=0;
+    const width=f.element('#desktop-width');assert.equal(width.value,420);
+    width.value='560';await width.change();await settle();
+    const applied=f.calls.filter(c=>c.name==='apply_desktop_preferences').map(c=>c.args.preferences.taskbar_width);
+    assert.deepEqual(applied,failSave?[560,420]:[560]);assert.equal(width.value,failSave?420:560);
+  }
+});

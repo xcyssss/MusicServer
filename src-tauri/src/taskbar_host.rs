@@ -31,11 +31,17 @@ unsafe fn bounds(hwnd: HWND) -> Result<RECT, String> {
 fn same(a: RECT, b: RECT) -> bool {
     a.left == b.left && a.top == b.top && a.right == b.right && a.bottom == b.bottom
 }
-fn layout(original: RECT, bar: RECT, scale: f64, offset: f64) -> Result<(RECT, RECT), String> {
+fn layout(
+    original: RECT,
+    bar: RECT,
+    scale: f64,
+    offset: f64,
+    width: u32,
+) -> Result<(RECT, RECT), String> {
     if bar.bottom - bar.top > bar.right - bar.left {
         return Err("TASKBAR_VERTICAL_UNSUPPORTED".into());
     }
-    let width = (600.0 * scale).round() as i32;
+    let width = (width.clamp(360, 800) as f64 * scale).round() as i32;
     if original.right - original.left < width + (180.0 * scale) as i32 {
         return Err("TASKBAR_NO_SPACE".into());
     }
@@ -88,7 +94,7 @@ pub fn detach() {
     }
 }
 
-pub fn attach(child: HWND, offset: f64) -> Result<(), String> {
+pub fn attach(child: HWND, offset: f64, width: u32) -> Result<(), String> {
     let mut slot = HOST.lock().map_err(|_| "TASKBAR_STATE_LOCKED")?;
     unsafe {
         let bar = FindWindowW(wide("Shell_TrayWnd").as_ptr(), std::ptr::null());
@@ -130,7 +136,7 @@ pub fn attach(child: HWND, offset: f64) -> Result<(), String> {
             .map(|r| r.original)
             .unwrap_or(current);
         let scale = GetDpiForWindow(bar) as f64 / 96.0;
-        let (applied, dock) = layout(original, br, scale, offset)?;
+        let (applied, dock) = layout(original, br, scale, offset, width)?;
         let style = previous
             .map(|r| r.style)
             .unwrap_or_else(|| GetWindowLongPtrW(child, GWL_STYLE));
@@ -186,7 +192,7 @@ mod tests {
                     right: -300,
                     bottom: 1448,
                 };
-                let (list, dock) = layout(original, bar, scale, offset).unwrap();
+                let (list, dock) = layout(original, bar, scale, offset, 420).unwrap();
                 assert!(dock.left >= original.left && dock.right <= original.right);
                 assert!(dock.top >= bar.top && dock.bottom <= bar.bottom);
                 assert!(list.right <= dock.left || list.left >= dock.right);
@@ -205,13 +211,13 @@ mod tests {
             right: 300,
             bottom: 40,
         };
-        assert!(layout(narrow, narrow, 1.0, 0.0).is_err());
+        assert!(layout(narrow, narrow, 1.0, 0.0, 420).is_err());
         let vertical = RECT {
             left: 0,
             top: 0,
             right: 40,
             bottom: 1080,
         };
-        assert!(layout(vertical, vertical, 1.0, 0.0).is_err());
+        assert!(layout(vertical, vertical, 1.0, 0.0, 420).is_err());
     }
 }

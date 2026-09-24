@@ -12,6 +12,10 @@
     $('toggle').querySelector('path').setAttribute('d', state.playing ? 'M8 5v14M16 5v14' : 'm8 5 11 7-11 7Z');
     $('toggle').setAttribute('aria-label', state.playing ? '暂停' : '播放');
     for (const action of ['previous', 'toggle', 'next']) $(action).disabled = !state.can_play;
+    $('mode').title = state.random ? '随机播放 · 点击切换顺序' : '顺序播放 · 点击切换随机';
+    $('mode').setAttribute('aria-label', $('mode').title);
+    $('mode').setAttribute('aria-pressed', String(!!state.random));
+    $('mode').querySelector('path').setAttribute('d', state.random ? 'M4 6h3l10 12h3m-4-4 4 4-4 3M4 18h3L17 6h3m-4-3 4 3-4 4' : 'M4 7h16m-4-3 4 3-4 3M20 17H4m4-3-4 3 4 3');
     $('like').disabled = !state.can_like;
     $('like').hidden = !state.can_like;
     $('like').setAttribute('aria-pressed', String(state.liked));
@@ -23,7 +27,7 @@
     try { await invoke('desktop_player_action', { action: name, key: snapshot.key }); }
     catch { $('dock-status').textContent = '控制未送达，请重试或打开主窗口'; }
   }
-  for (const name of ['restore','previous','toggle','next','like','hide']) $(name).addEventListener('click', () => action(name));
+  for (const name of ['restore','previous','toggle','next','mode','like','hide']) $(name).addEventListener('click', () => action(name));
   $('dock-text').addEventListener('dblclick', () => action('restore'));
   let last = null, pending = 0, moving = false;
   async function shift() {

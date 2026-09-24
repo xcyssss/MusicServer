@@ -555,3 +555,16 @@ test('download diagnostics explain exhausted retries without promising another a
   assert.match(text, /5\/5/);
   assert.match(text, /停止自动重试/);
 });
+
+test('random playback keeps a stable reversible queue and sequence restores source order',async()=>{
+  const a=await app();
+  a.run("state.currentCollection='recommendations';state.items=['a','b','c','d'].map(track_id=>({track_id,title:track_id}));reshuffleLibrary()");
+  const order=a.run('playbackCollection().map(keyOf).join()');
+  assert.equal(a.run('playbackCollection().map(keyOf).join()'),order);
+  assert.equal(a.run('new Set(playbackCollection().map(keyOf)).size'),4);
+  a.run('state.currentKey=keyOf(playbackCollection()[1])');
+  assert.equal(a.run('keyOf(adjacentItem(1))'),a.run('keyOf(playbackCollection()[2])'));
+  assert.equal(a.run('keyOf(adjacentItem(-1))'),a.run('keyOf(playbackCollection()[0])'));
+  a.run("setPlaybackMode('sequence')");
+  assert.equal(a.run('playbackCollection().map(x=>x.track_id).join()'),'a,b,c,d');
+});

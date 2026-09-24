@@ -478,9 +478,10 @@ Describe 'R: runtime hardening of the real HTTP API (concurrent processes, real 
         $initial.Status | Should Be 200
         $initial.Json.tray_only | Should Be $false
         $initial.Json.taskbar_lyrics | Should Be $false
-        $saved = Invoke-Http -BaseUrl $api.BaseUrl -Method 'PUT' -Path '/api/settings/desktop' -Body '{"tray_only":true,"taskbar_lyrics":true}'
+        $initial.Json.taskbar_width | Should Be 420
+        $saved = Invoke-Http -BaseUrl $api.BaseUrl -Method 'PUT' -Path '/api/settings/desktop' -Body '{"tray_only":true,"taskbar_lyrics":true,"taskbar_width":560}'
         $saved.Status | Should Be 200
-        foreach ($body in @('{"tray_only":"false","taskbar_lyrics":false}', '{"tray_only":false}', 'null')) {
+        foreach ($body in @('{"tray_only":false,"taskbar_lyrics":false,"taskbar_width":359}', '{"tray_only":false,"taskbar_lyrics":false,"taskbar_width":801}', '{"tray_only":false,"taskbar_lyrics":false,"taskbar_width":"560"}', '{"tray_only":"false","taskbar_lyrics":false}', '{"tray_only":false}', 'null')) {
             (Invoke-Http -BaseUrl $api.BaseUrl -Method 'PUT' -Path '/api/settings/desktop' -Body $body).Status | Should Be 400
         }
         Stop-AllApiServers
@@ -488,6 +489,7 @@ Describe 'R: runtime hardening of the real HTTP API (concurrent processes, real 
         $restored = Invoke-Http -BaseUrl $restarted.BaseUrl -Method 'GET' -Path '/api/settings/desktop'
         $restored.Json.tray_only | Should Be $true
         $restored.Json.taskbar_lyrics | Should Be $true
+        $restored.Json.taskbar_width | Should Be 560
         Stop-AllApiServers
     }
 

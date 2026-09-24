@@ -715,7 +715,7 @@ function setPlaybackMode(mode) {
 
 function reshuffleLibrary() {
   const source = state.librarySequence.length ? state.librarySequence : state.library;
-  if (!source.length) { showToast('音乐库还在同步，请稍后再随机'); return; }
+  randomPlaybackQueues.clear();
   state.mode = 'random';
   state.library = shuffled(source);
   localStorage.setItem('musicserver-play-mode', state.mode);
@@ -876,11 +876,22 @@ function listeningCollection() {
   return [...new Map(items.map((item) => [keyOf(item), item])).values()];
 }
 
+const randomPlaybackQueues = new Map();
 function playbackCollection() {
-  if (state.currentCollection === 'online') return state.onlinePlaybackItems;
-  if (state.currentCollection === 'recommendations') return state.items;
-  if (state.currentCollection === 'listening') return listeningCollection();
-  return sortLibraryVisible(filteredLibrary());
+  let items;
+  if (state.currentCollection === 'online') items = state.onlinePlaybackItems;
+  else if (state.currentCollection === 'recommendations') items = state.items;
+  else if (state.currentCollection === 'listening') items = listeningCollection();
+  else return sortLibraryVisible(filteredLibrary());
+  if (state.mode !== 'random') return items;
+  const signature = items.map(keyOf).join('\n');
+  let saved = randomPlaybackQueues.get(state.currentCollection);
+  if (!saved || saved.signature !== signature) {
+    saved = { signature, keys: shuffled(items).map(keyOf) };
+    randomPlaybackQueues.set(state.currentCollection, saved);
+  }
+  const current = new Map(items.map(item => [keyOf(item), item]));
+  return saved.keys.map(key => current.get(key)).filter(Boolean);
 }
 
 function updateNavigationButtons() {
@@ -1949,9 +1960,10 @@ globalThis.MusicServerDesktop?.connect({
     return { key: state.currentKey || '', title: display.title.slice(0, 240), artist: display.artist.slice(0, 160),
       lyric: item ? globalThis.MusicServerDesktop.lyricLine(state.playbackLyrics, audio.currentTime || 0).slice(0, 500) : '让音乐，从一片叶子开始',
       playing: !!item && !audio.paused, can_play: !!item && !$('#play-toggle').disabled,
-      can_like: !!(item?.canonical_track_id ?? item?.track_id), liked: !!item?.liked };
+      random: state.mode === 'random', can_like: !!(item?.canonical_track_id ?? item?.track_id), liked: !!item?.liked };
   },
   action: (action) => {
+    if (action === 'mode') { state.mode === 'random' ? setPlaybackMode('sequence') : reshuffleLibrary(); return; }
     if (action === 'like') { if (state.currentItem?.track_id) void toggleLike(state.currentItem); return; }
     const buttons = { previous: '#previous-button', toggle: '#play-toggle', next: '#next-button' };
     const button = buttons[action] && $(buttons[action]);

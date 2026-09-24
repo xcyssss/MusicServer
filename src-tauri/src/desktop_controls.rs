@@ -4,10 +4,25 @@ use tauri::{Emitter, Manager};
 
 pub const DOCK: &str = "taskbar-player";
 
-#[derive(Clone, Copy, Default, Deserialize, Serialize)]
+#[derive(Clone, Copy, Deserialize, Serialize)]
 pub struct Preferences {
     pub tray_only: bool,
     pub taskbar_lyrics: bool,
+    #[serde(default = "default_width")]
+    pub taskbar_width: u32,
+}
+
+fn default_width() -> u32 {
+    420
+}
+impl Default for Preferences {
+    fn default() -> Self {
+        Self {
+            tray_only: false,
+            taskbar_lyrics: false,
+            taskbar_width: default_width(),
+        }
+    }
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -20,6 +35,8 @@ pub struct PlayerSnapshot {
     pub can_play: bool,
     pub can_like: bool,
     pub liked: bool,
+    #[serde(default)]
+    pub random: bool,
 }
 
 #[derive(Default)]
@@ -64,11 +81,19 @@ pub fn position_dock(app: &tauri::AppHandle) -> Result<(), String> {
         return Ok(());
     }
     let dock = app.get_webview_window(DOCK).ok_or("DOCK_MISSING")?;
+    let width = state
+        .preferences
+        .lock()
+        .map_err(|_| "STATE_LOCKED")?
+        .taskbar_width;
     let offset = *state.horizontal.lock().map_err(|_| "STATE_LOCKED")?;
     #[cfg(windows)]
     {
-        let result =
-            super::taskbar_host::attach(dock.hwnd().map_err(|e| e.to_string())?.0 as _, offset);
+        let result = super::taskbar_host::attach(
+            dock.hwnd().map_err(|e| e.to_string())?.0 as _,
+            offset,
+            width,
+        );
         if result.is_err() {
             let _ = dock.hide();
             super::taskbar_host::detach();
@@ -77,7 +102,7 @@ pub fn position_dock(app: &tauri::AppHandle) -> Result<(), String> {
     }
     #[cfg(not(windows))]
     {
-        let _ = (dock, offset);
+        let _ = (dock, offset, width);
         Err("TASKBAR_LAYOUT_UNSUPPORTED".into())
     }
 }
@@ -121,6 +146,9 @@ pub fn apply_desktop_preferences(
     preferences: Preferences,
 ) -> Result<(), String> {
     main_only(&window)?;
+    if !(360..=800).contains(&preferences.taskbar_width) {
+        return Err("INVALID_TASKBAR_WIDTH".into());
+    }
     let app = window.app_handle();
     *app.state::<DesktopControls>()
         .preferences
@@ -189,7 +217,16 @@ pub fn desktop_player_action(
         super::restore_main_window(&app);
         return Ok(());
     }
-    if !["previous", "toggle", "next", "like", "hide", "toggle-dock"].contains(&action.as_str())
+    if ![
+        "previous",
+        "toggle",
+        "next",
+        "like",
+        "mode",
+        "hide",
+        "toggle-dock",
+    ]
+    .contains(&action.as_str())
         || key.len() > 1024
     {
         return Err("INVALID_PLAYER_ACTION".into());

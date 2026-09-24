@@ -19,19 +19,23 @@
     group.innerHTML = `<label>窗口与任务栏</label>
       <label class="settings-option"><input id="desktop-tray-only" type="checkbox" disabled /><span class="settings-option-body"><strong>仅最小化到托盘</strong><small>最小化后从任务栏收起，单击托盘图标恢复。</small></span></label>
       <label class="settings-option"><input id="desktop-taskbar-lyrics" type="checkbox" disabled /><span class="settings-option-body"><strong>任务栏歌词</strong><small>嵌入任务栏内部；拖动文字区切换左侧或右侧，双击回到主窗口。</small></span></label>
+      <label class="settings-option"><span>任务栏歌词宽度 <output id="desktop-width-value">420</output> px</span><input id="desktop-width" type="range" min="360" max="800" step="20" value="420" aria-label="任务栏歌词宽度" disabled /></label>
       <div class="settings-actions"><button id="desktop-hide-now" class="secondary-button" type="button">现在收起到托盘</button><button id="desktop-retry" class="text-button" type="button" hidden>重试</button></div>
       <p id="desktop-settings-status" class="settings-hint" role="status">正在读取桌面设置…</p>`;
     container.prepend(group);
     const tray = group.querySelector('#desktop-tray-only');
     const dock = group.querySelector('#desktop-taskbar-lyrics');
     const status = group.querySelector('#desktop-settings-status');
+    const width = group.querySelector('#desktop-width');
+    const widthValue = group.querySelector('#desktop-width-value');
     const retry = group.querySelector('#desktop-retry');
-    let preferences = { tray_only: false, taskbar_lyrics: false }, ready = false;
+    let preferences = { tray_only: false, taskbar_lyrics: false, taskbar_width: 420 }, ready = false;
     let writes = Promise.resolve(), sent = '', sending = false, dirty = false;
     const unlisteners = [];
     function controls(busy = false, shown = preferences) {
       tray.checked = shown.tray_only; dock.checked = shown.taskbar_lyrics;
-      tray.disabled = dock.disabled = busy || !ready;
+      tray.disabled = dock.disabled = width.disabled = busy || !ready;
+      width.value = shown.taskbar_width; widthValue.textContent = shown.taskbar_width;
     }
     async function publish() {
       if (!ready || !preferences.taskbar_lyrics) return;
@@ -66,12 +70,14 @@
       retry.hidden = true;
       try {
         const data = await host.request('/api/settings/desktop');
-        preferences = { tray_only: data.tray_only === true, taskbar_lyrics: data.taskbar_lyrics === true };
+        preferences = { tray_only: data.tray_only === true, taskbar_lyrics: data.taskbar_lyrics === true, taskbar_width: Number.isInteger(data.taskbar_width) ? data.taskbar_width : 420 };
         await invoke('apply_desktop_preferences', { preferences });
         ready = true; controls(); void publish();
         status.textContent = '普通最小化保留任务栏入口，也可选择只留在托盘。';
       } catch (error) { status.textContent = String(error).includes('TASKBAR_') ? '当前任务栏不支持内嵌或空间不足，请调整后重试。' : '桌面设置暂时无法读取，请重试。'; retry.hidden = false; }
     }
+    width.addEventListener('input', () => { widthValue.textContent = width.value; });
+    width.addEventListener('change', () => save({ taskbar_width: Number(width.value) }));
     tray.addEventListener('change', () => save({ tray_only: tray.checked }));
     dock.addEventListener('change', () => save({ taskbar_lyrics: dock.checked }));
     retry.addEventListener('click', load);
