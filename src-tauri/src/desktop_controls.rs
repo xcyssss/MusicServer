@@ -53,34 +53,6 @@ pub fn minimize_to_tray(window: tauri::WebviewWindow) -> Result<(), String> {
     hide_to_tray(window.app_handle())
 }
 
-// Physical coordinates include negative monitor origins; scale only dimensions.
-fn dock_bounds(
-    x: i32,
-    y: i32,
-    width: u32,
-    height: u32,
-    scale: f64,
-    offset: f64,
-) -> (i32, i32, u32, u32) {
-    let inset = (6.0 * scale).round() as i32;
-    let w = ((540.0 * scale).round() as u32)
-        .min(width.saturating_sub((inset * 2) as u32))
-        .max(1);
-    let h = ((74.0 * scale).round() as u32).min(height).max(1);
-    let room = (width as i32 - w as i32 - inset * 2).max(0);
-    let fraction = if offset.is_finite() {
-        (offset + 0.5).clamp(0.0, 1.0)
-    } else {
-        0.5
-    };
-    (
-        x + inset + (f64::from(room) * fraction).round() as i32,
-        y + (height as i32 - h as i32 - inset).max(0),
-        w,
-        h,
-    )
-}
-
 pub fn position_dock(app: &tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<DesktopControls>();
     if !state
@@ -91,34 +63,56 @@ pub fn position_dock(app: &tauri::AppHandle) -> Result<(), String> {
     {
         return Ok(());
     }
-    let main = app
-        .get_webview_window(super::MAIN_WINDOW)
-        .ok_or("MAIN_WINDOW_MISSING")?;
-    let monitor = main
-        .current_monitor()
-        .map_err(|e| e.to_string())?
-        .or(app.primary_monitor().map_err(|e| e.to_string())?)
-        .ok_or("MONITOR_MISSING")?;
-    let work = monitor.work_area();
-    let offset = *state.horizontal.lock().map_err(|_| "STATE_LOCKED")?;
-    let (x, y, w, h) = dock_bounds(
-        work.position.x,
-        work.position.y,
-        work.size.width,
-        work.size.height,
-        monitor.scale_factor(),
-        offset,
-    );
     let dock = app.get_webview_window(DOCK).ok_or("DOCK_MISSING")?;
-    let size = tauri::PhysicalSize::new(w, h);
-    let position = tauri::PhysicalPosition::new(x, y);
-    if dock.outer_size().ok() != Some(size) {
-        dock.set_size(size).map_err(|e| e.to_string())?;
+    let offset = *state.horizontal.lock().map_err(|_| "STATE_LOCKED")?;
+    #[cfg(windows)]
+    {
+        let result =
+            super::taskbar_host::attach(dock.hwnd().map_err(|e| e.to_string())?.0 as _, offset);
+        if result.is_err() {
+            let _ = dock.hide();
+            super::taskbar_host::detach();
+        }
+        result
     }
-    if dock.outer_position().ok() != Some(position) {
-        dock.set_position(position).map_err(|e| e.to_string())?;
+    #[cfg(not(windows))]
+    {
+        let _ = (dock, offset);
+        Err("TASKBAR_LAYOUT_UNSUPPORTED".into())
     }
-    Ok(())
+}
+
+// Called only by the background host loop: synchronous WebView construction
+// inside a window-event handler can deadlock the Windows event loop.
+pub fn recover_dock(app: &tauri::AppHandle) {
+    let enabled = app
+        .state::<DesktopControls>()
+        .preferences
+        .lock()
+        .map(|p| p.taskbar_lyrics)
+        .unwrap_or(false);
+    if enabled
+        && app.get_webview_window(DOCK).is_none()
+        && app.get_webview_window(super::MAIN_WINDOW).is_some()
+    {
+        #[cfg(windows)]
+        super::taskbar_host::detach();
+        let _ = tauri::WebviewWindowBuilder::new(
+            app,
+            DOCK,
+            tauri::WebviewUrl::App("taskbar-player.html".into()),
+        )
+        .title("MusicServer 任务栏歌词")
+        .inner_size(420.0, 36.0)
+        .visible(false)
+        .focused(false)
+        .decorations(false)
+        .transparent(true)
+        .shadow(false)
+        .resizable(false)
+        .skip_taskbar(true)
+        .build();
+    }
 }
 
 #[tauri::command]
@@ -135,8 +129,9 @@ pub fn apply_desktop_preferences(
     let dock = app.get_webview_window(DOCK).ok_or("DOCK_MISSING")?;
     if preferences.taskbar_lyrics {
         position_dock(app)?;
-        dock.show().map_err(|e| e.to_string())?;
     } else {
+        #[cfg(windows)]
+        super::taskbar_host::detach();
         dock.hide().map_err(|e| e.to_string())?;
     }
     if preferences.tray_only && window.is_minimized().unwrap_or(false) {
@@ -218,17 +213,4 @@ pub fn shift_desktop_player(window: tauri::WebviewWindow, delta: f64) -> Result<
     *horizontal = (*horizontal + delta.clamp(-0.1, 0.1)).clamp(-0.5, 0.5);
     drop(horizontal);
     position_dock(app)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn dock_respects_work_area_dpi_negative_monitor_and_drag_bounds() {
-        assert_eq!(dock_bounds(0, 0, 1920, 1040, 1.0, 0.0), (690, 960, 540, 74));
-        let (x, y, w, h) = dock_bounds(-1920, -200, 1920, 1000, 1.5, -9.0);
-        assert!(x >= -1920 && x + w as i32 <= 0 && y >= -200 && y + h as i32 <= 800);
-        let (x, y, w, h) = dock_bounds(0, 0, 400, 300, 2.0, 9.0);
-        assert!(x >= 0 && x + w as i32 <= 400 && y + h as i32 <= 300);
-    }
 }
