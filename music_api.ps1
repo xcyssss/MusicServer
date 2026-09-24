@@ -301,7 +301,19 @@ function Get-NavidromeLibraryItem {
 }
 
 function Get-LocalCanonicalTrackMap {
-    try { return Get-CanonicalLocalTrackMapDb } catch { return @{} }
+    $map = Get-CanonicalLocalTrackMapDb
+    # Exact download receipts cover files published before Navidrome indexed them.
+    # Never match by title: different recordings can share a title.
+    $receipts = @(Invoke-MusicServerSqlJson -Query "SELECT f.file_name, c.id FROM recommendation_files f JOIN canonical_tracks c ON c.id=f.track_id WHERE f.seed_source='wanted_worker';")
+    foreach ($receipt in $receipts) {
+        $name = [string]$receipt.file_name
+        if (-not $name -or [IO.Path]::GetFileName($name) -ne $name) { continue }
+        $key = 'file:' + [IO.Path]::GetFullPath((Join-Path $Config.MusicDir $name))
+        if ($map.ContainsKey($key) -and [string]$map[$key].id -ne [string]$receipt.id) {
+            $map[$key] = $null # Ambiguous receipts must not toggle another recording.
+        } else { $map[$key] = $receipt }
+    }
+    return $map
 }
 
 function New-ListeningLibraryItem {
@@ -316,6 +328,11 @@ function New-ListeningLibraryItem {
     $canonical = $null
     $rowId = [string](Get-OptionalProperty $Row 'id')
     if ($rowId -and $CanonicalByLocalId.ContainsKey($rowId)) { $canonical = $CanonicalByLocalId[$rowId] }
+    if (-not $canonical) {
+        foreach ($candidate in @($LocalId, [IO.Path]::GetFullPath($File), ('file:' + [IO.Path]::GetFullPath($File)))) {
+            if ($CanonicalByLocalId.ContainsKey($candidate)) { $canonical = $CanonicalByLocalId[$candidate]; break }
+        }
+    }
     $identity = if ($canonical) { [string]$canonical.id } else { Get-StableLocalIdentity -File $File }
     $title = [string](Get-OptionalProperty $Row 'name' (Get-OptionalProperty $Row 'title'))
     $artist = [string](Get-OptionalProperty $Row 'artist')
@@ -425,6 +442,12 @@ function Get-LocalListeningItems {
             $localId = Get-StableLocalIdentity -File $file
             [void]$items.Add((New-ListeningLibraryItem -Row $row -File $file -Source 'local' -LocalId $localId -CanonicalByLocalId $canonicalByLocalId))
         }
+    }
+    $preferences = Get-TrackPreferenceMapDb
+    foreach ($item in $items) {
+        $id = [string]$item.canonical_track_id
+        $known = $id -and $preferences.ContainsKey($id)
+        $item | Add-Member -NotePropertyName liked -NotePropertyValue $(if ($known) { $preferences[$id] -eq 'LIKE' } else { $null }) -Force
     }
     return @(Add-ResolvedArtist -Items @($items))
 }

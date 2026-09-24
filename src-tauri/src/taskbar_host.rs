@@ -35,7 +35,7 @@ fn layout(original: RECT, bar: RECT, scale: f64, offset: f64) -> Result<(RECT, R
     if bar.bottom - bar.top > bar.right - bar.left {
         return Err("TASKBAR_VERTICAL_UNSUPPORTED".into());
     }
-    let width = (420.0 * scale).round() as i32;
+    let width = (600.0 * scale).round() as i32;
     if original.right - original.left < width + (180.0 * scale) as i32 {
         return Err("TASKBAR_NO_SPACE".into());
     }
@@ -94,6 +94,16 @@ pub fn attach(child: HWND, offset: f64) -> Result<(), String> {
         let bar = FindWindowW(wide("Shell_TrayWnd").as_ptr(), std::ptr::null());
         if bar.is_null() {
             return Err("TASKBAR_NOT_READY".into());
+        }
+        // An already-running copy owns its reservation. Never shrink its area again.
+        let other = FindWindowExW(
+            bar,
+            null_mut(),
+            std::ptr::null(),
+            wide("MusicServer 任务栏歌词").as_ptr(),
+        );
+        if !other.is_null() && other != child {
+            return Err("TASKBAR_ALREADY_IN_USE".into());
         }
         let rebar = find(bar, "ReBarWindow32");
         let list = find(rebar, "MSTaskSwWClass");

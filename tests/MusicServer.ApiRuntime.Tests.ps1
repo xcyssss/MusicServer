@@ -203,6 +203,27 @@ Describe 'R: runtime hardening of the real HTTP API (concurrent processes, real 
         Remove-AllState
     }
 
+    It 'restores a downloaded local file to its canonical favorite and honors unlike' {
+        $tid = New-SeedTrack
+        [void][IO.Directory]::CreateDirectory($script:Cfg.MusicDir)
+        [IO.File]::WriteAllBytes((Join-Path $script:Cfg.MusicDir 'favorite.mp3'), [byte[]](1,2,3))
+        [IO.File]::WriteAllBytes((Join-Path $script:Cfg.MusicDir 'unrelated.mp3'), [byte[]](1,2,3))
+        [void](Save-RecommendationFileDb -FileName 'favorite.mp3' -TrackId $tid -SeedSource 'wanted_worker')
+        $api = Start-MusicApi -Root $script:T.Root
+        [void](Invoke-Http -BaseUrl $api.BaseUrl -Method 'POST' -Path "/api/tracks/$tid/like")
+        $library = Invoke-Http -BaseUrl $api.BaseUrl -Method 'GET' -Path '/api/library'
+        $favorite = @($library.Json.items | Where-Object title -eq 'favorite')[0]
+        $favorite.canonical_track_id | Should Be $tid
+        $favorite.liked | Should Be $true
+        $unrelated = @($library.Json.items | Where-Object title -eq 'unrelated')[0]
+        $unrelated.canonical_track_id | Should Be ''
+        ($null -eq $unrelated.liked) | Should Be $true
+        [void](Invoke-Http -BaseUrl $api.BaseUrl -Method 'DELETE' -Path "/api/tracks/$tid/like")
+        $library = Invoke-Http -BaseUrl $api.BaseUrl -Method 'GET' -Path '/api/library'
+        [bool](@($library.Json.items | Where-Object title -eq 'favorite')[0].liked) | Should Be $false
+        Test-Path -LiteralPath (Join-Path $script:Cfg.MusicDir 'favorite.mp3') | Should Be $true
+    }
+
     It 'R0: live server baseline - health 200, POST like 200 QUEUED, DELETE unlike 200 IDLE_REMOVED, GET wanted' {
         $tid = New-SeedTrack
         $oldScope = $env:MUSICSERVER_RUNTIME_SCOPE

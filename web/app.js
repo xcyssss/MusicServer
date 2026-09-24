@@ -1428,7 +1428,7 @@ $('#recommendation-list').addEventListener('click', (event) => {
 });
 
 function syncTrackCopies(item) {
-  for (const copy of [...state.items, ...state.online.items, ...state.onlinePlaybackItems, state.currentItem]) {
+  for (const copy of [...state.items, ...state.library, ...state.librarySequence, ...state.online.items, ...state.onlinePlaybackItems, state.currentItem]) {
     if (copy && copy.track_id === item.track_id && copy !== item) {
       copy.liked = item.liked; copy.disliked = item.disliked; copy.wanted = item.wanted;
     }
@@ -1949,7 +1949,7 @@ globalThis.MusicServerDesktop?.connect({
     return { key: state.currentKey || '', title: display.title.slice(0, 240), artist: display.artist.slice(0, 160),
       lyric: item ? globalThis.MusicServerDesktop.lyricLine(state.playbackLyrics, audio.currentTime || 0).slice(0, 500) : '让音乐，从一片叶子开始',
       playing: !!item && !audio.paused, can_play: !!item && !$('#play-toggle').disabled,
-      can_like: !!item?.track_id, liked: !!item?.liked };
+      can_like: !!(item?.canonical_track_id ?? item?.track_id), liked: !!item?.liked };
   },
   action: (action) => {
     if (action === 'like') { if (state.currentItem?.track_id) void toggleLike(state.currentItem); return; }

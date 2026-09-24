@@ -13,9 +13,10 @@
     $('toggle').setAttribute('aria-label', state.playing ? '暂停' : '播放');
     for (const action of ['previous', 'toggle', 'next']) $(action).disabled = !state.can_play;
     $('like').disabled = !state.can_like;
+    $('like').hidden = !state.can_like;
     $('like').setAttribute('aria-pressed', String(state.liked));
     $('like').setAttribute('aria-label', state.liked ? '取消喜欢当前歌曲' : '喜欢当前歌曲并下载');
-    $('like').title = state.can_like ? '喜欢后自动下载' : '当前本地歌曲没有可收藏的推荐记录';
+    $('like').title = state.liked ? '已收藏 · 点击取消收藏（保留本地文件）' : '收藏这首歌';
   }
   async function action(name) {
     $('dock-status').textContent = '';

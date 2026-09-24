@@ -118,6 +118,16 @@ test('online playback owns its queue, hydrates local copies, and likes use the s
   assert.equal(a.run('playbackCollection()[0].track_id'),'network-song');
 });
 
+test('favorite changes stay synchronized across local library and the playing downloaded copy', async () => {
+  const a = await app();
+  a.run("state.items=[{track_id:'saved',liked:true}];state.library=[{id:'local',track_id:'saved',canonical_track_id:'saved',liked:true}];state.librarySequence=state.library.slice();state.currentItem={...state.library[0]}");
+  a.context.fetchHandler = async()=>json({liked:false});
+  await a.run('toggleLike(state.items[0])');
+  assert.equal(a.run('state.library[0].liked'),false);
+  assert.equal(a.run('state.currentItem.liked'),false);
+  assert.equal(a.requests.filter(r=>r.url==='/api/tracks/saved/like' && r.options.method==='DELETE').length,1);
+});
+
 test('network failure and closing a pending search do not erase library or steal player focus', async () => {
   const a=await app();a.context.tracks=library;a.run('syncLibrary(tracks)');
   a.context.fetchHandler=async url=>url==='/api/search'?json({id:'job'}):json({state:'ERROR',error:'PROVIDER_UNAVAILABLE'});
