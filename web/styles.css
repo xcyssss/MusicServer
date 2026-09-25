@@ -74,3 +74,80 @@ kbd { color:var(--muted); font-size:10px; white-space:nowrap; border:1px solid v
 @media (max-width:760px) { :root { --player-height:126px; } .topbar { min-height:74px; gap:6px; } .brand h1 { font-size:16px; } .brand-mark,.eyebrow { display:none; } .topbar-actions { gap:5px; } .topbar-actions button { padding:7px; font-size:11px; } .workspace-grid { grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:10px; } .main-content { padding-inline:10px; } .library-panel { padding:12px 8px 5px; } .hero-card { padding:14px; min-height:160px; } .record-art { display:none; } .hero-copy h2 { font-size:24px; } .hero-copy h2 br { display:block; } .hero-copy p { max-width:220px; line-height:1.6; } .section-kicker,.search-box kbd { display:none; } .library-options { flex-wrap:wrap; } .search-box { padding:7px; } .search-box input { font-size:11px; } .library-row { grid-template-columns:26px minmax(0,1fr) 25px 25px; gap:3px; } .library-mark,.track-duration { display:none; } .recommendation-section .track-row { grid-template-columns:26px minmax(0,1fr) 27px 27px; gap:4px; } .recommendation-section .status-badge { grid-column:2; grid-row:2; justify-self:start; } .recommendation-section .dislike-button { grid-column:3; grid-row:1; } .recommendation-section .heart-button { grid-column:4; grid-row:1; } .track-reason,.provider-summary { display:none; } .track-title { font-size:12px; } .play-button { width:26px; height:26px; } .stats-row { flex-wrap:wrap; gap:7px 10px; } .stat-card { gap:4px; } .player-bar { grid-template-columns:minmax(0,1fr) auto; grid-template-rows:auto auto; gap:6px 10px; padding:9px 14px; } .player-center { grid-row:2; grid-column:1/-1; flex-direction:row; gap:14px; } .player-controls { gap:10px; } .player-progress { flex:1; } .player-art { width:34px; height:34px; } .now-label,.volume-control { display:none; } .lyrics-toggle { padding:6px 10px; } .listening-sidebar { left:10px; top:65px; } .lyrics-panel { right:10px; top:65px; } }
 @media (max-height:500px) { :root { --player-height:78px; } .topbar { min-height:50px; } .hero-card { display:none; } .stats-row { margin:5px 0 9px; } .library-panel .section-heading { margin-bottom:8px; } .library-options { margin:5px 0; } .library-panel { padding-top:8px; } .list-caption { padding-bottom:5px; } .wanted-callout { margin-top:3px; padding-top:3px; } .player-bar { padding-block:6px; } .player-center { gap:3px; } .play-toggle { height:30px; width:30px; } }
 @media (prefers-reduced-motion:reduce) { *,*::before,*::after { animation:none!important; transition:none!important; scroll-behavior:auto!important; } }
+
+.download-explanation { display:block; font-size:11px; opacity:.8; margin-top:4px; line-height:1.5; overflow-wrap:anywhere; }
+
+/* A small companion over the library leaves discovery and playback reachable. */
+.onboarding-guide { position:fixed; z-index:35; left:32px; top:120px; width:min(420px,calc(100vw - 48px)); max-height:calc(100dvh - 240px); overflow:auto; padding:26px; color:#e5eddf; background:rgba(24,42,33,.94); border:1px solid #b7c9a477; border-radius:26px; box-shadow:0 18px 65px #0f251c26,inset 0 1px 1px #ffffff90; backdrop-filter:blur(22px); }
+.onboarding-guide[hidden] { display:none; }
+.guide-top { display:flex; align-items:center; justify-content:space-between; color:inherit; font-size:10px; letter-spacing:2px; opacity:.85; }
+.guide-close { width:28px; height:28px; border:1px solid #859e8466; border-radius:50%; background:transparent; color:inherit; font-size:21px; line-height:1; }
+.guide-steps { display:flex; gap:20px; padding:0; margin:22px 0; list-style:none; font-size:11px; color:inherit; }
+.guide-steps li { opacity:.5; border-bottom:2px solid transparent; padding-bottom:7px; }
+.guide-steps [aria-current] { opacity:1; border-color:#acb368; }
+.onboarding-guide h2 { font-size:23px; letter-spacing:-.7px; line-height:1.4; margin:0 0 14px; color:inherit; }
+.onboarding-guide p { font-size:12px; line-height:1.9; margin:12px 0; }
+.guide-options { display:grid; gap:16px; margin:24px 0; }
+.guide-options label { display:flex; align-items:flex-start; gap:10px; font-size:12px; cursor:pointer; }
+.guide-options input { accent-color:#527853; margin-top:3px; width:15px; height:15px; flex-shrink:0; }
+.guide-options small { display:block; font-size:10px; line-height:1.8; opacity:.72; margin-top:5px; }
+.guide-actions { display:flex; flex-wrap:wrap; gap:8px; margin:20px 0 10px; }
+.guide-primary,.guide-secondary { border-radius:30px; padding:11px 16px; font-size:12px; line-height:1.3; cursor:pointer; }
+.guide-primary { color:#163b2b; background:linear-gradient(135deg,#f4f7d8,#c0d7a5); border:1px solid #eff5d0; box-shadow:0 3px 10px #1f472b16,inset 0 1px #fff; }
+.guide-secondary { color:inherit; background:transparent; border:1px solid #91a28370; }
+.onboarding-guide button:disabled { opacity:.48; cursor:wait; }
+.onboarding-guide button:focus-visible,.onboarding-guide input:focus-visible { outline:2px solid #bdab4f; outline-offset:3px; }
+.guide-song { padding:16px; border:1px solid #81987a55; border-radius:16px; background:#9fad8720; display:grid; gap:7px; }
+.guide-song span { font-size:10px; opacity:.7; }
+.guide-song strong { font-size:14px; overflow-wrap:anywhere; }
+.guide-song small { font-size:11px; line-height:1.6; opacity:.8; }
+.guide-readiness { border-left:2px solid #b5a363; padding:7px 12px; margin-top:18px; font-size:11px; line-height:1.8; background:#b6ac5620; }
+.guide-readiness strong,.guide-readiness span { display:block; }
+.guide-readiness span { opacity:.8; }
+.onboarding-guide .guide-error { color:#efbea0; margin:6px 0; font-size:11px; }
+.onboarding-guide .guide-error:empty { display:none; }
+.onboarding-guide footer,.onboarding-guide .guide-footnote { font-size:10px; opacity:.7; line-height:1.8; }
+.onboarding-guide footer { margin-top:18px; }
+.tree-page .onboarding-guide { color:#244335; background:linear-gradient(135deg,#fffff2ee,#edf3e0df); border-color:#fffff2; }
+.tree-page .guide-error { color:#8a3b28; }
+.search-online-button { border:1px solid #a6b99780; border-radius:20px; padding:5px 10px; background:#c9debb20; color:inherit; white-space:nowrap; font-size:11px; }
+.search-online-button:hover,.search-online-button[aria-expanded="true"] { background:#c9debb40; }
+.online-search-panel { position:fixed; z-index:65; left:32px; top:92px; bottom:124px; width:min(710px,calc(100vw - 64px)); padding:24px; border:1px solid var(--line); border-radius:24px; background:var(--panel); box-shadow:0 15px 55px #10241c30; display:flex; flex-direction:column; }
+.online-search-panel[hidden] { display:none; }
+.online-search-heading { display:flex; align-items:center; justify-content:space-between; flex:none; }
+.online-search-heading h2 { font-size:24px; margin:0; }
+.online-search-tools { display:flex; align-items:center; gap:8px; margin-top:18px; }
+.online-search-tools .text-button { margin-left:auto; }
+.online-search-tools { flex-wrap:wrap; }
+.online-video-preview { flex:none; padding-top:12px; }
+.online-video-preview[hidden] { display:none; }
+.online-video-preview>div { display:flex; align-items:center; gap:12px; font-size:12px; }
+.online-video-preview>div span { flex:1; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+.online-video-preview iframe { width:100%; height:210px; border:1px solid var(--line); border-radius:14px; margin:8px 0; background:#244b41; }
+.online-video-preview small { color:var(--muted); font-size:10px; }
+.search-source { padding:7px 13px; border:1px solid var(--line); border-radius:22px; color:inherit; background:transparent; font:inherit; font-size:11px; }
+.search-source.selected { background:#a6c4a430; border-color:#9cb99380; }
+.online-search-status { font-size:12px; padding:15px 0; color:var(--muted); line-height:1.6; flex:none; }
+.online-search-results { overflow:auto; min-height:0; flex:1; scrollbar-width:thin; scrollbar-color:#9ebaa277 transparent; padding-right:6px; }
+.online-song { display:grid; grid-template-columns:20px 34px minmax(0,1fr) 38px 100px; gap:10px; align-items:center; padding:12px 5px; border-bottom:1px solid #8da58b30; border-radius:10px; }
+.online-song.playing { background:#a6c4a421; }
+.online-song-number { font-size:10px; opacity:.55; font-variant-numeric:tabular-nums; }
+.online-song-play { width:32px; height:32px; border:1px solid #abc49e88; border-radius:50%; background:#ffffef40; color:inherit; font-size:20px; }
+.online-song-meta { display:grid; gap:5px; min-width:0; }
+.online-song-meta strong { font-size:13px; overflow-wrap:anywhere; }
+.online-song-meta small { font-size:11px; color:var(--muted); overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+.online-song-state { font-size:10px; color:var(--muted); }
+.online-song-duration { font-size:10px; opacity:.6; }
+.online-song-like { display:flex; gap:5px; align-items:center; justify-content:center; border:1px solid #a4b89480; border-radius:20px; padding:7px 8px; background:transparent; color:inherit; white-space:nowrap; font-size:11px; }
+.online-song-like span:first-child { font-size:17px; }
+.online-song-like.liked { color:#847c3e; background:#e4d6a333; }
+.online-search-note { flex:none; margin-top:15px; color:var(--muted); font-size:10px; line-height:1.7; }
+@media(max-width:700px) { .online-search-panel { padding:18px; } .online-song { grid-template-columns:30px minmax(0,1fr) 32px; gap:8px; } .online-song-number,.online-song-duration,.online-song-like span:last-child { display:none; } .online-song-like { padding:3px; } }
+@media(max-height:760px) { .onboarding-guide { top:92px; max-height:calc(100dvh - 216px); padding:20px; } .guide-options { margin:15px 0; gap:12px; } .guide-steps { margin:14px 0; } }
+/* Maintenance stays inside the existing settings drawer. */
+.app-care h3 { margin: 0 0 10px; font-size: 17px; }
+.care-component { display: inline-block; padding: 5px 9px; margin: 3px; border: 1px solid #91a88d66; border-radius: 16px; font-size: 12px; }
+.app-care progress { width: 100%; height: 7px; accent-color: #688d58; }
+.app-care select { max-width: 100%; width: 100%; padding: 9px; background: #f5f8eac9; border: 1px solid #91a88d80; border-radius: 10px; color: #203d2a; }
+.app-care [data-care-status] { font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.app-care [data-care-confirm] { padding: 12px; background: #eff4ddc9; border: 1px solid #91a88d80; border-radius: 12px; }

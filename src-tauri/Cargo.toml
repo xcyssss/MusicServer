@@ -1,6 +1,6 @@
 [package]
 name = "musicserver-desktop"
-version = "0.2.7"
+version = "1.1.1"
 description = "MusicServer 桌面端 - Tauri v2 壳，加载本地 MusicServer Web UI"
 authors = ["MusicServer"]
 edition = "2021"
@@ -26,6 +26,7 @@ sha2 = "0.10.9"
 # default home on the first launch after an install or an update.
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_HiDpi", "Win32_Graphics_Gdi"] }
 
 [features]
 # This feature is used for production builds or when a dev server is not specified, DO NOT REMOVE!!

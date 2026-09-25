@@ -24,9 +24,9 @@ $ErrorActionPreference = 'Continue'
 $Root = $PSScriptRoot
 
 . (Join-Path $Root 'lib_playlist.ps1')
-Import-Module (Join-Path $Root 'MusicServer.Core.psm1') -Force
-Import-Module (Join-Path $Root 'MusicServer.Database.psm1') -Force
-Import-Module (Join-Path $Root 'MusicServer.State.psm1') -Force
+Import-Module (Join-Path $Root 'MusicServer.Core.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $Root 'MusicServer.Database.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $Root 'MusicServer.State.psm1') -DisableNameChecking -Force
 $Config = New-MusicServerConfig -Root $Root
 Initialize-MusicServerState -Config $Config -SkipLibrary
 Initialize-MusicServerDatabase -DbPath (Join-Path $Config.StateDir 'musicserver.db') -SqliteExe $Config.Sqlite

@@ -54,6 +54,123 @@ async function app() {
 const json = payload => ({ ok: true, json: async () => payload });
 const library = [{ id: 'library-a', title: '春天', artist: '测试歌手', album: '专辑', duration: 120, stream_url: '/api/library/library-a/stream', local_status: 'LOCAL' }];
 
+test('source switching isolates requests and explains a blocked provider', async () => {
+  const a=await app(); a.get('library-search').value='song';
+  a.context.fetchHandler=async(url,options)=>url==='/api/search'?json({id:JSON.parse(options.body).source}):json({state:'ERROR',error:'PROVIDER_RATE_LIMITED'});
+  await a.get('search-bilibili').emit('click');await settle();
+  assert.equal(JSON.parse(a.requests.find(r=>r.url==='/api/search').options.body).source,'bilibili');
+  assert.match(a.get('online-search-status').textContent,/B站返回了限流.*切换网易云/);
+  assert.equal(a.get('search-bilibili').getAttribute('aria-pressed'),'true');
+  a.context.fetchHandler=async(url,options)=>url==='/api/search'?json({id:'busy'}):json({state:'ERROR',error:'PROVIDER_BUSY'});
+  await a.get('search-bilibili').emit('click'); await settle();
+  assert.match(a.get('online-search-status').textContent,/正在检查来源/);
+  assert.doesNotMatch(a.get('online-search-status').textContent,/限流/);
+});
+
+test('Bilibili preview is attributed to the UP, stops on close, and downloaded copies use audio', async () => {
+  const a=await app();
+  a.run("state.online.items=[{track_id:'bili',title:'Video',artist:'',preview_source:{provider:'bilibili',bvid:'BV1xx411c7mD',uploader:'Creator'}}];state.online.phase='done';setOnlineSearchOpen(true);renderOnlineSearch()");
+  assert.match(a.get('online-search-results').innerHTML,/UP主 · Creator/);
+  assert.match(a.get('online-search-results').innerHTML,/预览视频/);
+  a.context.fetchHandler=async()=>json({});
+  await a.run("playItem(state.online.items[0],'online')");
+  assert.match(a.get('online-video-frame').src,/player.bilibili.com/);
+  assert.equal(a.get('online-video-preview').hidden,false);
+  await a.get('audio-player').emit('pause');
+  assert.match(a.get('playback-status').textContent,/B站视频预览/, 'the delayed audio pause event must not overwrite video status');
+  await a.get('online-video-close').emit('click');
+  assert.equal(a.get('online-video-preview').hidden,true);
+  await a.run("playItem(state.online.items[0],'online')");
+  assert.equal(a.get('online-video-preview').hidden,false);
+  await a.get('audio-player').play();
+  assert.equal(a.get('online-video-preview').hidden,true, 'resuming the main player stops the embedded video');
+  a.context.fetchHandler=async()=>json({local_status:'LOCAL',playback_source:{type:'local',url:'/api/library/na-bili/stream'}});
+  await a.run("playItem(state.online.items[0],'online')");
+  assert.match(a.get('audio-player').src,/\/api\/library\/na-bili\/stream/);
+  assert.equal(a.get('online-video-preview').hidden,true);
+});
+
+test('online search keeps daily picks and ignores a slower obsolete response', async () => {
+  const a=await app(), old=deferred();
+  a.run("state.items=[{track_id:'daily',title:'Daily'}]");
+  a.context.fetchHandler=async (url,options)=>{
+    if(url==='/api/search') return json({id:JSON.parse(options.body).query});
+    if(url==='/api/search/old') return old.promise;
+    return json({state:'DONE',items:[{track_id:'new-song',title:'New',artist:'Artist'}]});
+  };
+  a.get('library-search').value='old';const first=a.run('searchOnline()');await settle();
+  a.get('library-search').value='new';await a.run('searchOnline()');
+  old.resolve(json({state:'DONE',items:[{track_id:'old-song',title:'Old'}]}));await first;
+  assert.equal(a.run('state.online.items[0].track_id'),'new-song');
+  assert.equal(a.run('state.items[0].track_id'),'daily');
+  assert.match(a.get('online-search-results').innerHTML,/喜欢并下载/);
+});
+
+test('online playback owns its queue, hydrates local copies, and likes use the same atomic endpoint', async () => {
+  const a=await app();
+  a.run("state.online.items=[{track_id:'network-song',title:'Found',preview_source:{media_url:'https://music.163.com/test.mp3'}}];state.onlinePlaybackItems=state.online.items.slice()");
+  a.context.fetchHandler=async(url)=>url.endsWith('/like') ? json({liked:true,wanted:{state:'WANTED'}}) : json({local_status:'LOCAL',playback_source:{type:'local',provider:'navidrome',id:'library-a',url:'/api/library/library-a/stream'}});
+  await a.run("playItem(state.online.items[0],'online')");
+  assert.match(a.get('audio-player').src,/\/api\/library\/library-a\/stream/);
+  await a.run('toggleLike(state.online.items[0])');
+  assert.equal(a.requests.filter(r=>r.url==='/api/tracks/network-song/like').length,1);
+  a.run('state.online.items=[]');
+  assert.equal(a.run('playbackCollection()[0].track_id'),'network-song');
+});
+
+test('favorite changes stay synchronized across local library and the playing downloaded copy', async () => {
+  const a = await app();
+  a.run("state.items=[{track_id:'saved',liked:true}];state.library=[{id:'local',track_id:'saved',canonical_track_id:'saved',liked:true}];state.librarySequence=state.library.slice();state.currentItem={...state.library[0]}");
+  a.context.fetchHandler = async()=>json({liked:false});
+  await a.run('toggleLike(state.items[0])');
+  assert.equal(a.run('state.library[0].liked'),false);
+  assert.equal(a.run('state.currentItem.liked'),false);
+  assert.equal(a.requests.filter(r=>r.url==='/api/tracks/saved/like' && r.options.method==='DELETE').length,1);
+});
+
+test('network failure and closing a pending search do not erase library or steal player focus', async () => {
+  const a=await app();a.context.tracks=library;a.run('syncLibrary(tracks)');
+  a.context.fetchHandler=async url=>url==='/api/search'?json({id:'job'}):json({state:'ERROR',error:'PROVIDER_UNAVAILABLE'});
+  a.get('library-search').value='song';await a.run('searchOnline()');
+  assert.match(a.get('online-search-status').textContent,/稍后重试/);
+  assert.equal(a.run('state.library.length'),1);
+  const pending=deferred();a.context.fetchHandler=async()=>pending.promise;
+  const work=a.run('searchOnline()');await settle();a.run('setOnlineSearchOpen(false)');
+  pending.resolve(json({id:'job'}));await work;
+  assert.equal(a.get('online-search-panel').hidden,true);
+  assert.equal(a.run('state.online.items.length'),0);
+});
+
+test('IME composition never submits online queries', async () => {
+  const a=await app();a.get('library-search').value='湖面';
+  await a.get('library-search').emit('keydown',{key:'Enter',isComposing:true,preventDefault(){}});
+  assert.equal(a.requests.filter(r=>r.url==='/api/search').length,0);
+});
+
+test('a failed decoded source exposes retry and next without losing the selected song', async () => {
+  const a = await app(); a.context.tracks = library;
+  a.get('audio-player').play = async () => { throw new Error('unsupported audio'); };
+  await a.run('syncLibrary(tracks); playItem(tracks[0])');
+  assert.equal(a.run('state.currentKey'), 'library-a');
+  assert.equal(a.get('playback-recovery').hidden, false);
+  assert.match(a.get('playback-status').textContent, /重试或换一首/);
+});
+
+test('a stalled old source has a deadline and cannot pause the next selected song', async () => {
+  const a = await app(); a.context.tracks = [...library, { ...library[0], id: 'library-b', stream_url: '/api/library/library-b/stream' }];
+  a.run('syncLibrary(tracks)');
+  const audio = a.get('audio-player');
+  audio.play = () => new Promise(() => {});
+  const old = a.run('playItem(tracks[0])');
+  const timeout = [...a.timers.values()].find((timer) => timer.delay === 15000);
+  assert.ok(timeout);
+  audio.play = async () => { audio.paused = false; };
+  await a.run('playItem(tracks[1])');
+  timeout.fn(); await old;
+  assert.equal(a.run('state.currentKey'), 'library-b');
+  assert.equal(audio.paused, false);
+});
+
 test('explicit library refresh bypasses the derived cache while background polling reuses it', async () => {
   const a = await app();
   await a.run('loadLibrary()');
@@ -209,6 +326,22 @@ test('obsolete lyrics requests are aborted and cannot replace newer lyrics', asy
   assert.equal(a.requests[0].options.signal.aborted, true);
   older.resolve(json({ available: true, text: 'Old lyrics' })); await old;
   assert.match(a.get('lyrics-content').innerHTML, /New lyrics/); assert.doesNotMatch(a.get('lyrics-content').innerHTML, /Old lyrics/);
+});
+
+test('browsing another song lyrics cannot replace or cancel the taskbar playback lyrics', async () => {
+  const a = await app(), playing = deferred();
+  a.run("state.currentKey = 'playing'");
+  a.context.fetchHandler = url => url === '/playing' ? playing.promise : Promise.resolve(json({ available: true, text: '[00:01.00]Other song', format: 'lrc' }));
+  const pending = a.run("loadLyrics('/playing', false)");
+  await a.run("loadLyrics('/other', true)");
+  assert.equal(a.requests[0].options.signal.aborted, false);
+  playing.resolve(json({ available: true, text: '[00:01.00]Playing song', format: 'lrc' }));
+  await pending;
+  assert.equal(a.run('state.playbackLyrics.entries[0].text'), 'Playing song');
+  assert.match(a.get('lyrics-content').innerHTML, /Other song/);
+  a.run("state.currentKey = 'next'");
+  await a.run("loadLyrics('', false)");
+  assert.equal(a.run('state.playbackLyrics.available'), false);
 });
 
 test('hidden windows skip data polling and resume without polling listening statistics', async () => {
@@ -413,3 +546,25 @@ test('an unreadable display-mode setting keeps the traditional names', async () 
   assert.equal(a.run('state.displayMode'), 'raw');
 });
 
+
+
+test('download diagnostics explain exhausted retries without promising another automatic attempt', async () => {
+  const a = await app();
+  const text = a.run("downloadExplanation({state:'UNAVAILABLE',last_error:'WRONG_DURATION',attempt_count:5,max_attempts:5})");
+  assert.match(text, /时长不符/);
+  assert.match(text, /5\/5/);
+  assert.match(text, /停止自动重试/);
+});
+
+test('random playback keeps a stable reversible queue and sequence restores source order',async()=>{
+  const a=await app();
+  a.run("state.currentCollection='recommendations';state.items=['a','b','c','d'].map(track_id=>({track_id,title:track_id}));reshuffleLibrary()");
+  const order=a.run('playbackCollection().map(keyOf).join()');
+  assert.equal(a.run('playbackCollection().map(keyOf).join()'),order);
+  assert.equal(a.run('new Set(playbackCollection().map(keyOf)).size'),4);
+  a.run('state.currentKey=keyOf(playbackCollection()[1])');
+  assert.equal(a.run('keyOf(adjacentItem(1))'),a.run('keyOf(playbackCollection()[2])'));
+  assert.equal(a.run('keyOf(adjacentItem(-1))'),a.run('keyOf(playbackCollection()[0])'));
+  a.run("setPlaybackMode('sequence')");
+  assert.equal(a.run('playbackCollection().map(x=>x.track_id).join()'),'a,b,c,d');
+});

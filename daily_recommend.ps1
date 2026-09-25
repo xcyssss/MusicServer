@@ -40,11 +40,12 @@ $ErrorActionPreference = 'Continue'
 $ProgressPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.Core.psm1') -Force
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.Database.psm1') -Force
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.State.psm1') -Force
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.Providers.psm1') -Force
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.Migration.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Core.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Database.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.State.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Providers.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Migration.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Onboarding.psm1') -DisableNameChecking -Force
 
 $Config = New-MusicServerConfig -Root $Root -AppHome $AppHome
 $dbPath = Join-Path $Config.StateDir 'musicserver.db'
@@ -244,6 +245,14 @@ if ($picked.Count -eq 0) {
     }
 }
 Write-Host "  本次选用种子：$($picked.Count)" -ForegroundColor Yellow
+if ($picked.Count -eq 0) {
+    if (-not $DryRun) {
+        Initialize-StarterRecommendationsDb -Count $Count | Out-Null
+        Write-MusicServerLog -Path (Join-Path $Config.LogDir 'musicserver-recommendation.log') -Message '[selection] source=onboarding_starter reason=no_preference_seeds download_calls=0'
+    }
+    Write-Host '尚未形成偏好，使用初遇歌单。试听和收藏后会逐步转为个性化推荐。'
+    return
+}
 foreach ($seed in $picked) { Write-Host "    - $($seed.Title) - $($seed.Artist) [$($seed.Source), weight=$($seed.Weight)]" -ForegroundColor DarkGray }
 
 Write-Step '建立 SQLite 排除集与近期推荐冷却'
@@ -500,14 +509,8 @@ if ($bucketsTotal -gt 0) {
 }
 
 $ranked = @($candidateMap.Values | Sort-Object @{Expression = {$_.Score}; Descending = $true}, @{Expression = { Get-Random }})
-$recos = @(); $artists = @{}
-foreach ($candidate in $ranked) {
-    $artistKey = Normalize-MusicText (($candidate.Artist -split '[,，、]')[0])
-    if ($artistKey -and $artists.ContainsKey($artistKey) -and $artists[$artistKey] -ge 5) { continue }
-    $recos += $candidate
-    if ($artistKey) { if ($artists.ContainsKey($artistKey)) { $artists[$artistKey]++ } else { $artists[$artistKey] = 1 } }
-    if ($recos.Count -ge ($Count - @($localPicks).Count)) { break }
-}
+$recos = @(Select-DiverseRemoteRecommendations -Candidates $ranked -Count ([Math]::Max(0, $Count - @($localPicks).Count)))
+Write-MusicServerLog -Path (Join-Path $Config.LogDir 'musicserver-recommendation.log') -Message "[selection] candidates=$($ranked.Count) selected=$($recos.Count) local=$(@($localPicks).Count) target=$Count diversity=credited_artist dislike_penalized=$songsPenalized"
 
 $recommendations = @(); $tracks = @(); $rank = 0
 foreach ($candidate in $recos) {
@@ -575,6 +578,11 @@ foreach ($r in $recommendations) {
 }
 
 if (-not $DryRun) {
+    if ($recommendations.Count -eq 0) {
+        Initialize-StarterRecommendationsDb -Count $Count | Out-Null
+        Write-MusicServerLog -Path (Join-Path $Config.LogDir 'musicserver-recommendation.log') -Message '[selection] empty_result preserved_existing_day=true starter_fallback=true'
+        return
+    }
     $saveResult = Save-DailyRecommendationsDb -Recommendations $recommendations -Tracks $tracks -Date $today
     Write-MusicServerEventDb -EventType 'RECOMMENDATIONS_GENERATED' -Result 'SUCCESS' -Message "count=$($recommendations.Count); download_calls=0; feedback=explicit_only; cooldown_days=$RecommendationCooldownDays"
     Write-Host "`n已原子保存 SQLite CanonicalTrack、DailyRecommendation 和 DISPLAY。" -ForegroundColor Green

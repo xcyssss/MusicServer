@@ -129,7 +129,8 @@ function Invoke-Http {
     param(
         [Parameter(Mandatory)][string]$BaseUrl,
         [Parameter(Mandatory)][string]$Method,
-        [Parameter(Mandatory)][string]$Path
+        [Parameter(Mandatory)][string]$Path,
+        [string]$Body = ''
     )
     $url = $BaseUrl + $Path
     $text = ''
@@ -144,6 +145,12 @@ function Invoke-Http {
         # Content-Length or the HttpListener answers 411 Length Required.
         # PS 5.1 (.NET 4.x) HttpWebRequest has no ContentLength64; .NET Core has both.
         if ($request.GetType().GetProperty('ContentLength64')) { $request.ContentLength64 = 0 } else { $request.ContentLength = 0 }
+        if ($Body) {
+            $bytes = [Text.Encoding]::UTF8.GetBytes($Body)
+            $request.ContentLength = $bytes.Length
+            $stream = $request.GetRequestStream()
+            try { $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }
+        }
         $response = $request.GetResponse()
         $stream = $response.GetResponseStream()
         $ms = [System.IO.MemoryStream]::new()
@@ -196,15 +203,41 @@ Describe 'R: runtime hardening of the real HTTP API (concurrent processes, real 
         Remove-AllState
     }
 
+    It 'restores a downloaded local file to its canonical favorite and honors unlike' {
+        $tid = New-SeedTrack
+        [void][IO.Directory]::CreateDirectory($script:Cfg.MusicDir)
+        [IO.File]::WriteAllBytes((Join-Path $script:Cfg.MusicDir 'favorite.mp3'), [byte[]](1,2,3))
+        [IO.File]::WriteAllBytes((Join-Path $script:Cfg.MusicDir 'unrelated.mp3'), [byte[]](1,2,3))
+        [void](Save-RecommendationFileDb -FileName 'favorite.mp3' -TrackId $tid -SeedSource 'wanted_worker')
+        $api = Start-MusicApi -Root $script:T.Root
+        [void](Invoke-Http -BaseUrl $api.BaseUrl -Method 'POST' -Path "/api/tracks/$tid/like")
+        $library = Invoke-Http -BaseUrl $api.BaseUrl -Method 'GET' -Path '/api/library'
+        $favorite = @($library.Json.items | Where-Object title -eq 'favorite')[0]
+        $favorite.canonical_track_id | Should Be $tid
+        $favorite.liked | Should Be $true
+        $unrelated = @($library.Json.items | Where-Object title -eq 'unrelated')[0]
+        $unrelated.canonical_track_id | Should Be ''
+        ($null -eq $unrelated.liked) | Should Be $true
+        [void](Invoke-Http -BaseUrl $api.BaseUrl -Method 'DELETE' -Path "/api/tracks/$tid/like")
+        $library = Invoke-Http -BaseUrl $api.BaseUrl -Method 'GET' -Path '/api/library'
+        [bool](@($library.Json.items | Where-Object title -eq 'favorite')[0].liked) | Should Be $false
+        Test-Path -LiteralPath (Join-Path $script:Cfg.MusicDir 'favorite.mp3') | Should Be $true
+    }
+
     It 'R0: live server baseline - health 200, POST like 200 QUEUED, DELETE unlike 200 IDLE_REMOVED, GET wanted' {
         $tid = New-SeedTrack
-        $api = Start-MusicApi -Root $script:T.Root
+        $oldScope = $env:MUSICSERVER_RUNTIME_SCOPE
+        try {
+            $env:MUSICSERVER_RUNTIME_SCOPE = 'isolated-runtime-scope'
+            $api = Start-MusicApi -Root $script:T.Root
+        } finally { $env:MUSICSERVER_RUNTIME_SCOPE = $oldScope }
         $base = $api.BaseUrl
 
         $health = Invoke-Http -BaseUrl $base -Method 'GET' -Path '/health'
         $health.Status | Should Be 200
         $health.Json.status | Should Be 'ok'
         $health.Json.db | Should Be $true
+        $health.Json.runtime_scope | Should Be 'isolated-runtime-scope'
 
         $like = Invoke-Http -BaseUrl $base -Method 'POST' -Path "/api/tracks/$tid/like"
         $like.Status | Should Be 200
@@ -436,6 +469,27 @@ Describe 'R: runtime hardening of the real HTTP API (concurrent processes, real 
         $get.Json.playback_source.type | Should Be 'preview'
         (($get.Json.playback_source.url) -like '*music.163.com*') | Should Be $true
 
+        Stop-AllApiServers
+    }
+
+    It 'desktop preferences reject wrong types and survive a service restart' {
+        $api = Start-MusicApi -Root $script:T.Root
+        $initial = Invoke-Http -BaseUrl $api.BaseUrl -Method 'GET' -Path '/api/settings/desktop'
+        $initial.Status | Should Be 200
+        $initial.Json.tray_only | Should Be $false
+        $initial.Json.taskbar_lyrics | Should Be $false
+        $initial.Json.taskbar_width | Should Be 420
+        $saved = Invoke-Http -BaseUrl $api.BaseUrl -Method 'PUT' -Path '/api/settings/desktop' -Body '{"tray_only":true,"taskbar_lyrics":true,"taskbar_width":560}'
+        $saved.Status | Should Be 200
+        foreach ($body in @('{"tray_only":false,"taskbar_lyrics":false,"taskbar_width":359}', '{"tray_only":false,"taskbar_lyrics":false,"taskbar_width":801}', '{"tray_only":false,"taskbar_lyrics":false,"taskbar_width":"560"}', '{"tray_only":"false","taskbar_lyrics":false}', '{"tray_only":false}', 'null')) {
+            (Invoke-Http -BaseUrl $api.BaseUrl -Method 'PUT' -Path '/api/settings/desktop' -Body $body).Status | Should Be 400
+        }
+        Stop-AllApiServers
+        $restarted = Start-MusicApi -Root $script:T.Root
+        $restored = Invoke-Http -BaseUrl $restarted.BaseUrl -Method 'GET' -Path '/api/settings/desktop'
+        $restored.Json.tray_only | Should Be $true
+        $restored.Json.taskbar_lyrics | Should Be $true
+        $restored.Json.taskbar_width | Should Be 560
         Stop-AllApiServers
     }
 

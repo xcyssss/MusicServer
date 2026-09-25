@@ -107,7 +107,7 @@ Describe 'MusicServer live UI API proxy' {
 
         # Run the gateway from the same isolated home as the API. Launching the
         # checkout gateway would read the user's library and start its worker.
-        foreach ($file in @('start_musicserver_ui.ps1','watchdog_ui.ps1','music_api.ps1','MusicServer.Core.psm1','MusicServer.Database.psm1','MusicServer.State.psm1','MusicServer.Providers.psm1','MusicServer.Http.psm1','MusicServer.Identity.psm1')) {
+        foreach ($file in @('start_musicserver_ui.ps1','watchdog_ui.ps1','music_api.ps1','MusicServer.Core.psm1','MusicServer.Database.psm1','MusicServer.State.psm1','MusicServer.Providers.psm1','MusicServer.Onboarding.psm1','MusicServer.Management.psm1','MusicServer.Search.psm1','manage_musicserver.ps1','MusicServer.Http.psm1','MusicServer.Identity.psm1')) {
             Copy-Item -LiteralPath (Join-Path $ProjectRoot $file) -Destination (Join-Path $root $file)
         }
         Copy-Item -LiteralPath (Join-Path $ProjectRoot 'web') -Destination (Join-Path $root 'web') -Recurse
@@ -128,6 +128,46 @@ Describe 'MusicServer live UI API proxy' {
         }
         $script:ProxyTest.Root = $null
         $script:ProxyTest.OldAppHome = $null
+    }
+
+    It 'uses the external music directory on first startup before a database exists and refreshes new files' {
+        $oldMusicDir = [Environment]::GetEnvironmentVariable('MUSICSERVER_MUSIC_DIR')
+        $oldTasks = [Environment]::GetEnvironmentVariable('MUSICSERVER_DISABLE_SCHEDULED_TASKS')
+        try {
+            $root = $script:ProxyTest.Root
+            $db = Join-Path $root 'DailyMix_data\state\musicserver.db'
+            foreach ($file in @($db, ($db + '-wal'), ($db + '-shm'))) {
+                Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+            }
+            (Test-Path -LiteralPath $db) | Should Be $false
+            $external = Join-Path $root 'external-music'
+            New-Item -ItemType Directory -Path $external -Force | Out-Null
+            $song = Join-Path $external 'first-start.wav'
+            [IO.File]::WriteAllBytes($song, (New-Object byte[] 4096))
+            [Environment]::SetEnvironmentVariable('MUSICSERVER_MUSIC_DIR', $external)
+            [Environment]::SetEnvironmentVariable('MUSICSERVER_DISABLE_SCHEDULED_TASKS', '1')
+
+            $apiPort = Get-TestFreePort
+            do { $uiPort = Get-TestFreePort } while ($apiPort -eq $uiPort)
+            $apiPrefix = "http://127.0.0.1:$apiPort/"
+            $uiPrefix = "http://127.0.0.1:$uiPort/"
+            $args = @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $root 'start_musicserver_ui.ps1'),'-ApiPrefix',$apiPrefix,'-UiPrefix',$uiPrefix,'-NoBrowser')
+            $ui = Start-Process -FilePath (Get-TestTermExe) -ArgumentList $args -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $root 'ui.out.log') -RedirectStandardError (Join-Path $root 'ui.err.log')
+            $script:ProxyTest.Processes += $ui
+            Wait-TestHealth -BaseUrl $uiPrefix
+            $settings = Invoke-RestMethod -Uri ($uiPrefix + 'api/settings/music-library') -TimeoutSec 10
+            $settings.path | Should Be $external
+            $library = Invoke-RestMethod -Uri ($uiPrefix + 'api/library?refresh=1') -TimeoutSec 10
+            @($library.items).Count | Should Be 1
+            $library.items[0].file | Should Be $song
+
+            [IO.File]::WriteAllBytes((Join-Path $external 'added-later.wav'), (New-Object byte[] 4096))
+            $refreshed = Invoke-RestMethod -Uri ($uiPrefix + 'api/library?refresh=1') -TimeoutSec 10
+            @($refreshed.items).Count | Should Be 2
+        } finally {
+            [Environment]::SetEnvironmentVariable('MUSICSERVER_MUSIC_DIR', $oldMusicDir)
+            [Environment]::SetEnvironmentVariable('MUSICSERVER_DISABLE_SCHEDULED_TASKS', $oldTasks)
+        }
     }
 
     It 'forwards browser-style JSON-body POST like requests through the UI gateway' {
@@ -160,6 +200,18 @@ Describe 'MusicServer live UI API proxy' {
         $ui = Start-Process -FilePath $term -ArgumentList $uiArgs -WindowStyle Hidden -PassThru -RedirectStandardOutput $uiOut -RedirectStandardError $uiErr
         $script:ProxyTest.Processes += $ui
         Wait-TestHealth -BaseUrl $uiPrefix
+
+        # The alternative page must retain the same launcher heartbeat and load
+        # every asset through the installed app's explicit static routes.
+        $preview = Invoke-WebRequest -UseBasicParsing -Uri ($uiPrefix + 'music-tree.html') -TimeoutSec 5
+        $preview.StatusCode | Should Be 200
+        $preview.Content | Should Match '/ui/heartbeat'
+        $preview.Content | Should Match 'id="tree-viewport"'
+        foreach ($asset in @('music-tree-ui.js', 'music-tree.css', 'assets/muelsyse-water.png')) {
+            $response = Invoke-WebRequest -UseBasicParsing -Uri ($uiPrefix + $asset) -TimeoutSec 5
+            $response.StatusCode | Should Be 200
+            [int]$response.RawContentLength | Should BeGreaterThan 100
+        }
 
         $like = Invoke-TestJsonHttp -Method 'POST' -Url ($uiPrefix.TrimEnd('/') + "/api/tracks/$trackId/like")
         $like.Status | Should Be 200 -Because "the UI proxy must forward the browser-style JSON body; response was [$($like.Text)]"

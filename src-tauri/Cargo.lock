@@ -1878,7 +1878,7 @@ dependencies = [
 
 [[package]]
 name = "musicserver-desktop"
-version = "0.2.7"
+version = "1.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1887,6 +1887,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-shell",
+ "windows-sys 0.61.2",
  "winreg",
 ]
 

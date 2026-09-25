@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-restart-desktop"
+description = "Restarts the desktop after a local service startup failure."
+commands.allow = ["restart_desktop"]

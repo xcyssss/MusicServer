@@ -1,6 +1,6 @@
-﻿Import-Module (Join-Path $PSScriptRoot 'MusicServer.Core.psm1') -Force
+﻿Import-Module (Join-Path $PSScriptRoot 'MusicServer.Core.psm1') -DisableNameChecking -Force
 Set-StrictMode -Version 3.0
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.State.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.State.psm1') -DisableNameChecking -Force
 
 function New-DownloadCandidate {
     param(
@@ -80,12 +80,17 @@ function Claim-ProviderRequest {
         $blocked = $null
         if ($health.blocked_until) { $blocked = Convert-ToUtcDateTime $health.blocked_until }
         if ($blocked -and $blocked -gt $now) { return $false }
-        if (-not (Claim-HalfOpenProbeDb -Provider $Provider)) { return $false }
+        if (-not (Claim-HalfOpenProbeDb -Provider $Provider -LeaseMinutes $ProbeCooldownMinutes)) { return $false }
         Write-MusicServerEventDb -Provider $Provider -EventType 'CIRCUIT_HALF_OPEN' -Message 'cooldown elapsed; one real request probe permitted'
         return $true
     }
     if ([string]$health.state -eq 'HALF_OPEN') {
-        return [bool](Claim-HalfOpenProbeDb -Provider $Provider)
+        $claimed = [bool](Claim-HalfOpenProbeDb -Provider $Provider -LeaseMinutes $ProbeCooldownMinutes)
+        if ($claimed -and $health.probe_pending) {
+            Write-MusicServerEventDb -Provider $Provider -EventType 'CIRCUIT_PROBE_RECOVERED' -Message 'expired probe reclaimed; one bounded request permitted'
+            Write-MusicServerLog -Path (Join-Path $Config.LogDir 'musicserver-provider.log') -Message "[circuit] provider=$Provider expired_probe_reclaimed=true"
+        }
+        return $claimed
     }
     return $true
 }
@@ -105,6 +110,7 @@ function Record-ProviderSuccess {
     $health.state = 'CLOSED'
     $health.blocked_until = $null
     $health.probe_pending = $false
+    $health.last_error = ''
     if ($LatencyMs -gt 0) {
         if ([double]$health.average_latency_ms -le 0) { $health.average_latency_ms = $LatencyMs }
         else { $health.average_latency_ms = (([double]$health.average_latency_ms * $oldCount) + $LatencyMs) / ($oldCount + 1) }
@@ -126,7 +132,9 @@ function Record-ProviderFailure {
     $health.failure_count = [int]$health.failure_count + 1
     $health.consecutive_failures = [int]$health.consecutive_failures + 1
     $health.last_failure = Get-NowIso
-    if ($HttpStatus -eq 412) {
+    $health.last_error = $ErrorType
+    if ($HttpStatus -eq 412 -or $HttpStatus -eq 429) {
+        $health.last_error = "HTTP_$HttpStatus"
         $health.consecutive_412 = [int]$health.consecutive_412 + 1
         $health.last_412_at = Get-NowIso
         $minutes = [Math]::Min($MaxCooldownMinutes, $BaseCooldownMinutes * [Math]::Pow(2, [int]$health.consecutive_412 - 1))
@@ -134,8 +142,16 @@ function Record-ProviderFailure {
         $health.state = 'OPEN'
         $health.probe_pending = $false
         Save-ProviderHealth -Config $Config -Health $health | Out-Null
-        Write-MusicServerEventDb -Provider $Provider -EventType 'CIRCUIT_OPEN' -ErrorType 'HTTP_412' -HttpStatus 412 -Message "blocked_until=$($health.blocked_until); cooldown_minutes=$minutes"
+        Write-MusicServerEventDb -Provider $Provider -EventType 'CIRCUIT_OPEN' -ErrorType "HTTP_$HttpStatus" -HttpStatus $HttpStatus -Message "blocked_until=$($health.blocked_until); cooldown_minutes=$minutes"
     } else {
+        # Every completed probe releases its claim, including transport/parser
+        # errors. Otherwise HALF_OPEN would remain latched across APP upgrades.
+        if ([string]$health.state -eq 'HALF_OPEN') {
+            $health.state = 'OPEN'
+            $health.probe_pending = $false
+            $health.blocked_until = [DateTime]::UtcNow.AddMinutes($BaseCooldownMinutes).ToString('o')
+            Write-MusicServerEventDb -Provider $Provider -EventType 'CIRCUIT_PROBE_FAILED' -ErrorType $ErrorType -Message "blocked_until=$($health.blocked_until)"
+        }
         Save-ProviderHealth -Config $Config -Health $health | Out-Null
     }
     return $health
@@ -212,7 +228,7 @@ function Test-DownloadCandidateIdentity {
     $titleEvidence = ($candidateTitle -eq $titleKey) -or $candidateTitle.Contains($titleKey) -or $titleKey.Contains($candidateTitle)
     if (-not $titleEvidence) { return $false }
 
-    $artistKeys = @([string]$Track.artist -split '[,，、/&]' | ForEach-Object { Normalize-MusicText $_ } | Where-Object { $_ })
+    $artistKeys = @([string]$Track.artist -split '[,，、/＆&×;；]|\s+feat\.?\s+|\s+ft\.?\s+' | ForEach-Object { Normalize-MusicText $_ } | Where-Object { $_ })
     if ($artistKeys.Count -eq 0) { return $true }
     $candidateArtist = Normalize-MusicText ([string]$Candidate.artist)
     $artistEvidence = $false
@@ -224,11 +240,7 @@ function Test-DownloadCandidateIdentity {
     }
     if ($artistEvidence) { return $true }
 
-    # Some clean music uploads use an exact song title but the uploader is not the artist.
-    # Only accept that fallback when duration is also extremely close.
-    if ($candidateTitle -eq $titleKey -and $expectedDuration -gt 0 -and $candidateDuration -gt 0) {
-        return ([Math]::Abs($expectedDuration - $candidateDuration) -le 5)
-    }
+
     return $false
 }
 
@@ -240,43 +252,44 @@ function Get-SafeDownloadName {
 }
 
 function Search-BilibiliCandidates {
-    param([Parameter(Mandatory)][psobject]$Config, [Parameter(Mandatory)][psobject]$Track)
+    param([Parameter(Mandatory)][psobject]$Config, [Parameter(Mandatory)][psobject]$Track,
+        [string]$Query = '', [ValidateRange(1,20)][int]$Limit = 10,
+        [ValidateRange(5,40)][int]$TimeoutSeconds = 40)
     if (-not (Claim-ProviderRequest -Config $Config -Provider 'bilibili_search')) {
-        return [pscustomobject]@{ Candidates = @(); Blocked = $true; Error = 'CIRCUIT_OPEN'; HttpStatus = 0 }
+        $health = Get-ProviderHealth -Config $Config -Provider 'bilibili_search'
+        $reason = if ($health.state -eq 'HALF_OPEN') { 'PROVIDER_BUSY' } elseif ($health.last_error -match '^HTTP_(412|429)$' -or (-not $health.last_error -and $health.consecutive_412 -gt 0)) { 'PROVIDER_RATE_LIMITED' } else { 'PROVIDER_COOLDOWN' }
+        return [pscustomobject]@{Candidates=@();Blocked=$true;Error=$reason;HttpStatus=0}
     }
-    $keyword = "$($Track.title) $(($Track.artist -split '[,，、]')[0])".Trim()
-    $args = @(
-        "bilisearch10:$keyword", '--flat-playlist', '--dump-single-json', '--playlist-end', '10',
-        '--no-warnings', '--skip-download', '--socket-timeout', '20'
-    )
-    if (Test-Path -LiteralPath $Config.CookieFile) { $args += @('--cookies', $Config.CookieFile) }
-    $started = [Diagnostics.Stopwatch]::StartNew()
-    $output = @(& $Config.YtDlp @args 2>&1)
-    $started.Stop()
-    $joined = ($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
-    if ($joined -match '412|Precondition Failed') {
-        Record-ProviderFailure -Config $Config -Provider 'bilibili_search' -HttpStatus 412 -ErrorType 'HTTP_412' -Message 'search metadata request blocked' | Out-Null
-        return [pscustomobject]@{ Candidates = @(); Blocked = $true; Error = 'HTTP_412'; HttpStatus = 412 }
-    }
-    if ($LASTEXITCODE -ne 0) {
-        Record-ProviderFailure -Config $Config -Provider 'bilibili_search' -ErrorType 'SEARCH_FAILED' -Message ($joined | Select-Object -Last 1) | Out-Null
-        return [pscustomobject]@{ Candidates = @(); Blocked = $false; Error = 'SEARCH_FAILED'; HttpStatus = 0 }
-    }
+    $keyword=if ($Query) { $Query } else { [string](@(Get-SongSearchQueries -Title $Track.title -Artist $Track.artist -Max 1) | Select-Object -First 1) }
+    $clock=[Diagnostics.Stopwatch]::StartNew()
     try {
-        $json = $joined | ConvertFrom-Json
-        $entries = if ($json.entries) { @($json.entries) } else { @($json) }
-        $results = foreach ($entry in $entries) {
-            if (-not $entry.id) { continue }
-            $url = if ($entry.webpage_url) { [string]$entry.webpage_url } else { "https://www.bilibili.com/video/$($entry.id)" }
-            # uploader is an UP account, not reliable song-artist metadata. Keep it in metadata only.
-            New-DownloadCandidate -Provider 'bilibili_search' -Url $url -Bvid ([string]$entry.id) `
-                -Title ([string]$entry.title) -Artist '' -Duration ([int]$entry.duration) -Priority 10 -Metadata $entry
-        }
-        Record-ProviderSuccess -Config $Config -Provider 'bilibili_search' -LatencyMs $started.Elapsed.TotalMilliseconds
-        return [pscustomobject]@{ Candidates = @($results); Blocked = $false; Error = ''; HttpStatus = 0 }
+        # The same anonymous session cookie used by yt-dlp's BiliBiliSearchIE.
+        # A single metadata request; a 412 opens the existing circuit, no retry.
+        $session=New-Object Microsoft.PowerShell.Commands.WebRequestSession
+        $session.Cookies.Add((New-Object Net.Cookie('buvid3',([guid]::NewGuid().ToString()+'infoc'),'/','.bilibili.com')))
+        $response=Invoke-RestMethod -Uri "https://api.bilibili.com/x/web-interface/search/type?search_type=video&keyword=$([uri]::EscapeDataString($keyword))&page=1" -WebSession $session -Headers @{'Referer'='https://www.bilibili.com/';'User-Agent'='Mozilla/5.0'} -TimeoutSec ([math]::Min(7,$TimeoutSeconds))
+        if ([int](Get-OptionalProperty $response 'code' -1) -ne 0 -or -not (Get-OptionalProperty $response 'data')) { throw 'INVALID_SEARCH_RESPONSE' }
+        $results=@(foreach ($entry in @(Get-OptionalProperty $response.data 'result' @()) | Select-Object -First $Limit) {
+            $bvid=[string](Get-OptionalProperty $entry 'bvid')
+            $title=[Net.WebUtility]::HtmlDecode(([string](Get-OptionalProperty $entry 'title') -replace '<[^>]+>',''))
+            $durationText=[string](Get-OptionalProperty $entry 'duration')
+            if ($bvid -cnotmatch '^BV[0-9A-Za-z]{10}$' -or -not $title -or $durationText -notmatch '^\d{1,3}:[0-5]?\d(:[0-5]?\d)?$') { continue }
+            $seconds=0; foreach ($part in ($durationText -split ':')) { $seconds=$seconds*60+[int]$part }
+            if ($seconds -lt 1 -or $seconds -gt 86400) { continue }
+            $metadata=[pscustomobject]@{uploader=[string](Get-OptionalProperty $entry 'author')}
+            New-DownloadCandidate -Provider bilibili_search -Url "https://www.bilibili.com/video/$bvid" -Bvid $bvid -Title $title -Artist '' -Duration $seconds -Priority 10 -Metadata $metadata
+        })
+        Record-ProviderSuccess -Config $Config -Provider bilibili_search -LatencyMs $clock.Elapsed.TotalMilliseconds | Out-Null
+        return [pscustomobject]@{Candidates=$results;Blocked=$false;Error='';HttpStatus=0}
     } catch {
-        Record-ProviderFailure -Config $Config -Provider 'bilibili_search' -ErrorType 'INVALID_SEARCH_RESPONSE' -Message $_.Exception.Message | Out-Null
-        return [pscustomobject]@{ Candidates = @(); Blocked = $false; Error = 'INVALID_SEARCH_RESPONSE'; HttpStatus = 0 }
+        $status=0
+        if ($_.Exception.PSObject.Properties['Response'] -and $_.Exception.Response) {
+            try { $status=[int]$_.Exception.Response.StatusCode } catch {}
+        }
+        $limited = $status -eq 412 -or $status -eq 429
+        $code=if ($limited) { 'PROVIDER_RATE_LIMITED' } else { 'SEARCH_FAILED' }
+        Record-ProviderFailure -Config $Config -Provider bilibili_search -HttpStatus $status -ErrorType $code -Message 'Bilibili metadata search failed' | Out-Null
+        return [pscustomobject]@{Candidates=@();Blocked=$limited;Error=$code;HttpStatus=$status}
     }
 }
 
@@ -299,7 +312,7 @@ function Get-DirectCandidates {
 }
 
 function Resolve-DownloadCandidates {
-    param([Parameter(Mandatory)][psobject]$Config, [Parameter(Mandatory)][psobject]$Track)
+    param([Parameter(Mandatory)][psobject]$Config, [Parameter(Mandatory)][psobject]$Track, [switch]$SearchFallbackOnly)
     $candidates = @()
     $local = Find-LocalTrack -Config $Config -Title $Track.title -Artist $Track.artist
     if ($local) {
@@ -309,29 +322,27 @@ function Resolve-DownloadCandidates {
 
     # NetEase direct download first when the track has a NetEase id: free songs
     # are served as full 320kbps audio without Bilibili's 412 risk control.
-    $neteaseCandidate = Get-NeteaseCandidate -Config $Config -Track $Track
+    $neteaseCandidate = if (-not $SearchFallbackOnly) { Get-NeteaseCandidate -Config $Config -Track $Track } else { $null }
     if ($neteaseCandidate) { $candidates += $neteaseCandidate }
 
     # Direct candidates are known resources. Resolving them must stay metadata-only:
     # do not consume a search request, require yt-dlp, or claim a download probe yet.
-    $direct = @(Get-DirectCandidates -Track $Track)
+    $direct = @(); if (-not $SearchFallbackOnly) { $direct = @(Get-DirectCandidates -Track $Track) }
     $hasDirectCandidates = ($direct.Count -gt 0)
     if ($hasDirectCandidates) {
-        if (-not (Test-ProviderRequestAvailable -Config $Config -Provider 'bilibili_download')) { return @() }
-        $candidates += $direct
+        if (Test-ProviderRequestAvailable -Config $Config -Provider 'bilibili_download') { $candidates += $direct }
     }
 
-    # Search is a fallback only when no known direct Bilibili candidate exists.
-    # A NetEase candidate is still only a try (VIP/paid tracks can have no URL),
-    # so pair it with search when the search circuit is available.
-    if (-not $hasDirectCandidates) {
-        if (Test-ProviderRequestAvailable -Config $Config -Provider 'bilibili_search') {
+    # Known NetEase and Bilibili identities are attempted before any search.
+    # The worker asks explicitly for one search fallback after those attempts fail.
+    if (-not $hasDirectCandidates -and -not $neteaseCandidate) {
+        if ((Test-ProviderRequestAvailable -Config $Config -Provider 'bilibili_download') -and (Test-ProviderRequestAvailable -Config $Config -Provider 'bilibili_search')) {
             $search = Search-BilibiliCandidates -Config $Config -Track $Track
             if (-not $search.Blocked) { $candidates += $search.Candidates }
         }
         # Only reach for NetEase discovery when the healthy path has nothing to
         # offer yet; a track that already carries a NetEase id never searches.
-        if ($candidates.Count -eq 0) {
+        if ($candidates.Count -eq 0 -and -not $SearchFallbackOnly) {
             $discovered = Search-NeteaseCandidate -Config $Config -Track $Track
             if ($discovered) { $candidates += $discovered; $neteaseCandidate = $discovered }
         }
@@ -347,30 +358,40 @@ function Resolve-DownloadCandidates {
     return @($ranked | Sort-Object @{Expression={$_.Score.score};Descending=$true})
 }
 
+function New-DownloadStagingPath {
+    param($Config, $Track)
+    # Keep incomplete audio outside the recursively scanned music library.
+    $directory=Join-Path $Config.AppHome ('download-staging\'+[Guid]::NewGuid().ToString('N'))
+    [IO.Directory]::CreateDirectory($directory) | Out-Null
+    return Join-Path $directory "$(Get-SafeDownloadName -Track $Track).mp3"
+}
+
 function Validate-DownloadedCandidate {
     param([Parameter(Mandatory)][psobject]$Config, [Parameter(Mandatory)][psobject]$Track, [Parameter(Mandatory)][string]$Path, [int]$ToleranceSeconds = 0)
-    $duration = 0
-    if (Test-Path -LiteralPath $Config.FFprobe) {
-        try {
-            $raw = & $Config.FFprobe -v error -show_entries format=duration -of csv=p=0 $Path 2>$null
-            if ($raw) { $duration = [int][double]$raw }
-        } catch {}
+    try {
+        $probe=Invoke-MusicServerBoundedProcess -FilePath $Config.FFprobe -Arguments @('-v','error','-show_entries','format=duration','-of','csv=p=0',$Path) -TimeoutSeconds 20
+        $duration=0.0
+        if ($probe.ExitCode -ne 0 -or -not [double]::TryParse($probe.Output.Trim(),[Globalization.NumberStyles]::Float,[Globalization.CultureInfo]::InvariantCulture,[ref]$duration) -or $duration -le 0) { throw 'FFPROBE_FAILED' }
+        $diff=if ([int]$Track.duration -gt 0) { [Math]::Abs($duration-[int]$Track.duration) } else { 0 }
+        $allowed=if ($ToleranceSeconds -gt 0) { $ToleranceSeconds } else { Get-AllowedDurationDrift -ExpectedDuration ([int]$Track.duration) }
+        if ($diff -gt $allowed) { return [pscustomobject]@{Valid=$false;Duration=[int]$duration;DurationDiff=$diff;AllowedDiff=$allowed;Reason='WRONG_DURATION'} }
+        # Probe metadata alone accepts some truncated files. Decode the complete audio before publication.
+        $decode=Invoke-MusicServerBoundedProcess -FilePath $Config.FFmpeg -Arguments @('-v','error','-xerror','-nostdin','-i',$Path,'-map','0:a:0','-f','null','-') -TimeoutSeconds 90
+        if ($decode.ExitCode -ne 0) { throw 'AUDIO_DECODE_FAILED' }
+        return [pscustomobject]@{Valid=$true;Duration=[int]$duration;DurationDiff=$diff;AllowedDiff=$allowed;Reason='PASS'}
+    } catch {
+        $reason=if ($_.Exception.Message -match '^(FFPROBE_FAILED|AUDIO_DECODE_FAILED|PROCESS_TIMEOUT)$') { $_.Exception.Message } else { 'AUDIO_VALIDATION_FAILED' }
+        return [pscustomobject]@{Valid=$false;Duration=0;DurationDiff=0;AllowedDiff=0;Reason=$reason}
     }
-    if ($duration -le 0) { return [pscustomobject]@{ Valid = $false; Duration = 0; DurationDiff = 0; AllowedDiff = 0; Reason = 'FFPROBE_FAILED' } }
-    $diff = if ([int]$Track.duration -gt 0) { [Math]::Abs($duration - [int]$Track.duration) } else { 0 }
-    $allowed = if ($ToleranceSeconds -gt 0) { $ToleranceSeconds } else { Get-AllowedDurationDrift -ExpectedDuration ([int]$Track.duration) }
-    return [pscustomobject]@{ Valid = ($diff -le $allowed); Duration = $duration; DurationDiff = $diff; AllowedDiff = $allowed; Reason = if ($diff -le $allowed) { 'PASS' } else { 'WRONG_DURATION' } }
 }
 
 function Invoke-BilibiliDownload {
     param([Parameter(Mandatory)][psobject]$Config, [Parameter(Mandatory)][psobject]$Track, [Parameter(Mandatory)][psobject]$Candidate)
     if (-not (Claim-ProviderRequest -Config $Config -Provider 'bilibili_download')) { return [pscustomobject]@{ Success = $false; Blocked = $true; Error = 'CIRCUIT_OPEN'; Path = '' } }
     Initialize-MusicServerState -Config $Config
-    $target = Join-Path $Config.DailyDir "$(Get-SafeDownloadName -Track $Track).mp3"
-    # DailyDir is a staging area. Never let a stale partial file masquerade as a successful new download.
-    if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue }
+    $target = New-DownloadStagingPath -Config $Config -Track $Track
     $args = @(
-        '--extract-audio', '--audio-format', 'mp3', '--audio-quality', '0', '-o', $target,
+        '--ffmpeg-location', (Split-Path $Config.FFmpeg -Parent), '--extract-audio', '--audio-format', 'mp3', '--audio-quality', '0', '-o', $target,
         '--embed-thumbnail', '--embed-metadata', '--no-overwrites', '--no-playlist',
         '-f', 'bestaudio/best', '--no-progress', '--no-warnings',
         '--retries', '1', '--fragment-retries', '1', '--extractor-retries', '1', '--socket-timeout', '30',
@@ -378,14 +399,15 @@ function Invoke-BilibiliDownload {
     )
     if (Test-Path -LiteralPath $Config.CookieFile) { $args += @('--cookies', $Config.CookieFile) }
     $started = [Diagnostics.Stopwatch]::StartNew()
-    $output = @(& $Config.YtDlp @args 2>&1)
+    try { $run=Invoke-MusicServerBoundedProcess -FilePath $Config.YtDlp -Arguments $args -TimeoutSeconds 180 }
+    catch { return [pscustomobject]@{Success=$false;Blocked=$false;Error='DOWNLOAD_TIMEOUT';Path='';Output=''} }
     $started.Stop()
-    $joined = ($output | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
-    if ($joined -match '412|Precondition Failed') {
+    $joined=$run.Output+[Environment]::NewLine+$run.Error
+    if ($joined -match '(?i)HTTP(?: Error| status)?[: ]+412\b|Precondition Failed') {
         Record-ProviderFailure -Config $Config -Provider 'bilibili_download' -HttpStatus 412 -ErrorType 'HTTP_412' -Message 'download request blocked' | Out-Null
         return [pscustomobject]@{ Success = $false; Blocked = $true; Error = 'HTTP_412'; Path = ''; Output = $joined }
     }
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $target)) {
+    if ($run.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $target)) {
         Record-ProviderFailure -Config $Config -Provider 'bilibili_download' -ErrorType 'DOWNLOAD_FAILED' -Message ($joined | Select-Object -Last 1) | Out-Null
         return [pscustomobject]@{ Success = $false; Blocked = $false; Error = 'DOWNLOAD_FAILED'; Path = ''; Output = $joined }
     }
@@ -463,7 +485,7 @@ function Search-NeteaseCandidate {
 
     if ($env:MUSICSERVER_DISABLE_NETEASE_SEARCH -eq '1') { return $null }
     if (Get-NeteaseIdFromTrack -Track $Track) { return $null }
-    $keyword = "$($Track.title) $(($Track.artist -split '[,，、/&]')[0])".Trim()
+    $keyword = [string](@(Get-SongSearchQueries -Title $Track.title -Artist $Track.artist -Max 1) | Select-Object -First 1)
     if (-not $keyword) { return $null }
     if (-not (Test-ProviderRequestAvailable -Config $Config -Provider 'netease')) { return $null }
     if (-not (Claim-ProviderRequest -Config $Config -Provider 'netease')) { return $null }
@@ -778,7 +800,7 @@ function Get-SongSearchQueries {
     # makes the query too specific to match.
     $leadArtist = ''
     if (-not [string]::IsNullOrWhiteSpace($Artist)) {
-        $leadArtist = ([string](@($Artist -split '[,，、/&;；]|\s+feat\.?\s+|\s+ft\.?\s+' | Where-Object { $_.Trim() })[0])).Trim()
+        $leadArtist = ([string](@($Artist -split '[,，、/＆&×;；]|\s+feat\.?\s+|\s+ft\.?\s+' | Where-Object { $_.Trim() })[0])).Trim()
     }
     $keywords = @(Get-TitleSearchKeywords -Title $Title)
     $artistKey = ConvertTo-MusicServerKey -Value $leadArtist
@@ -813,7 +835,7 @@ function Test-FileVouchesForArtist {
 
     if ([string]::IsNullOrWhiteSpace($Artist)) { return $false }
     $fileKey = ConvertTo-MusicServerKey -Value $Title
-    $names = @($Artist -split '[,，、/&;；]|\s+feat\.?\s+|\s+ft\.?\s+' | ForEach-Object { $_.Trim() } | Where-Object { $_.Length -ge 2 })
+    $names = @($Artist -split '[,，、/＆&×;；]|\s+feat\.?\s+|\s+ft\.?\s+' | ForEach-Object { $_.Trim() } | Where-Object { $_.Length -ge 2 })
     if ($names.Count -eq 0) { return $false }
     foreach ($name in $names) {
         if (-not $fileKey.Contains((ConvertTo-MusicServerKey -Value $name))) { return $false }
@@ -891,6 +913,51 @@ function Select-NeteaseArtistForTitle {
         }
     }
     return $best
+}
+
+function Resolve-MusicServerLocalLyrics {
+    param([Parameter(Mandatory)][psobject]$Config, [Parameter(Mandatory)][string]$File)
+    $missing = [pscustomobject]@{ available=$false; text=''; quality='MISSING'; source='none'; message='尚未找到可靠歌词。' }
+    if (-not [IO.File]::Exists($File)) { return $missing }
+    $info = Get-Item -LiteralPath $File
+    $key = Get-MusicServerPathKey -Path $File
+    $fingerprint = "$($info.Length):$($info.LastWriteTimeUtc.Ticks)"
+    $cached = Get-LocalLyricCacheDb -PathKey $key -Fingerprint $fingerprint
+    if ($cached -and $cached.status -eq 'READY') { return [pscustomobject]@{available=$true;text=[string]$cached.text;quality='EXACT';source='netease';message=''} }
+    if ([string](Get-AppSettingDb -Key 'auto_lyrics') -eq 'false') { $missing.message='自动查找歌词已关闭，可在新手引导中开启。'; return $missing }
+    if ($cached -and [string]$cached.retry_at -gt (Get-NowIso)) { $missing.message=if($cached.message){[string]$cached.message}else{'正在查找歌词，稍后重新打开即可。'}; return $missing }
+    $owner = [guid]::NewGuid().ToString('N')
+    if (-not (Claim-LocalLyricLookupDb -PathKey $key -Fingerprint $fingerprint -Owner $owner)) { $missing.message='正在查找歌词，稍后重新打开即可。'; return $missing }
+    $status='MISSING'; $text=''; $songId=''; $phase='identity'; $failure=''; $timer=[Diagnostics.Stopwatch]::StartNew()
+    try {
+        $resolved = Get-LocalTrackArtistDb -PathKey $key
+        $artist = if ($resolved -and $resolved.status -eq 'RESOLVED' -and $resolved.source -eq 'netease') { [string]$resolved.artist } else { Get-TitleDeclaredArtist -Title $info.BaseName }
+        if (-not $artist) { $missing.message='未能确认这首歌的歌手，暂不自动匹配。也可把同名 .lrc 放在歌曲旁。'; return $missing }
+        $title = [string](@(Get-TitleSearchKeywords -Title $info.BaseName) | Select-Object -First 1)
+        $track = New-CanonicalTrack -Title $title -Artist $artist
+        if ($env:MUSICSERVER_DISABLE_NETEASE_SEARCH -eq '1' -or -not (Test-ProviderRequestAvailable -Config $Config -Provider 'netease')) { $status='ERROR'; $missing.message='歌词来源暂不可用，稍后会再试。'; return $missing }
+        $phase='search'; $candidate = Search-NeteaseCandidate -Config $Config -Track $track
+        if (-not $candidate) { $status='ERROR'; $missing.message='暂未找到歌名与歌手都匹配的歌词，稍后会再试。'; return $missing }
+        $songId = [string]$candidate.metadata.netease_id
+        if (-not (Test-ProviderRequestAvailable -Config $Config -Provider 'netease') -or -not (Claim-ProviderRequest -Config $Config -Provider 'netease')) { $status='ERROR'; $missing.message='歌词来源暂时繁忙，稍后会再试。'; return $missing }
+        $phase='lyrics'; $response=Invoke-RestMethod -Uri "https://music.163.com/api/song/lyric?id=$([uri]::EscapeDataString($songId))&lv=1&kv=1&tv=-1" -Headers @{'Referer'='https://music.163.com/';'User-Agent'='Mozilla/5.0'} -TimeoutSec 8
+        Record-ProviderSuccess -Config $Config -Provider 'netease' -LatencyMs $timer.Elapsed.TotalMilliseconds
+        $text = [string](Get-OptionalProperty (Get-OptionalProperty $response 'lrc' $null) 'lyric' '')
+        if ($text -and $text.Length -le 200000 -and $text -notmatch '(?i)<html|<!doctype') {
+            $status='READY'
+            return [pscustomobject]@{available=$true;text=$text;quality='EXACT';source='netease';message=''}
+        }
+        $text=''; $missing.message='歌词来源暂未提供这首歌的歌词，可能是纯音乐。'
+        return $missing
+    } catch {
+        $failure=$_.Exception.GetType().Name
+        $status='ERROR'; $text=''; $missing.message='暂时无法联网查找歌词，稍后会再试。'
+        Record-ProviderFailure -Config $Config -Provider 'netease' -ErrorType 'LYRICS_FAILED' -Message 'Automatic lyric lookup failed.' | Out-Null
+        return $missing
+    } finally {
+        Save-LocalLyricCacheDb -PathKey $key -Owner $owner -Status $status -Text $text -SongId $songId -Message $missing.message
+        Write-MusicServerLog -Path (Join-Path $Config.LogDir 'musicserver-lyrics.log') -Message "[lookup] result=$status source=netease phase=$phase error=$failure elapsed_ms=$($timer.ElapsedMilliseconds)"
+    }
 }
 
 function Resolve-NeteaseTrackArtist {
@@ -1001,7 +1068,7 @@ function Invoke-NeteaseDownload {
         'Referer' = 'https://music.163.com/'
         'Accept' = 'application/json,text/plain,*/*'
     }
-    $target = Join-Path $Config.DailyDir "$(Get-SafeDownloadName -Track $Track).mp3"
+    $target = New-DownloadStagingPath -Config $Config -Track $Track
     if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue }
     $started = [Diagnostics.Stopwatch]::StartNew()
     try {
@@ -1014,7 +1081,12 @@ function Invoke-NeteaseDownload {
             # VIP/paid or region-locked: report NOT_AVAILABLE, caller falls back to Bilibili.
             return [pscustomobject]@{ Success = $false; Blocked = $false; Error = 'NETEASE_NOT_AVAILABLE'; Path = ''; Output = '' }
         }
-        Invoke-WebRequest -Uri $audioUrl -Headers @{ 'User-Agent' = $headers['User-Agent']; 'Referer' = 'https://music.163.com/' } -OutFile $target -TimeoutSec 120
+        $downloadResponse=Invoke-WebRequest -UseBasicParsing -PassThru -Uri $audioUrl -Headers @{ 'User-Agent' = $headers['User-Agent']; 'Referer' = 'https://music.163.com/' } -OutFile $target -TimeoutSec 120
+        $contentType=[string]$downloadResponse.Headers['Content-Type']
+        if ($contentType -notmatch '^(audio/|application/octet-stream)') {
+            [IO.File]::Delete($target)
+            return [pscustomobject]@{Success=$false;Blocked=$false;Error='NOT_AUDIO_RESPONSE';Path='';Output=''}
+        }
         if (-not (Test-Path -LiteralPath $target) -or (Get-Item -LiteralPath $target).Length -lt 10000) {
             Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
             return [pscustomobject]@{ Success = $false; Blocked = $false; Error = 'NETEASE_DOWNLOAD_EMPTY'; Path = ''; Output = '' }

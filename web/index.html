@@ -43,6 +43,7 @@
             <button id="listening-toggle" class="secondary-button" aria-controls="listening-sidebar" aria-expanded="false">我的常听</button>
             <button id="queue-toggle" class="secondary-button" aria-controls="wanted" aria-expanded="false">下载动态 <b id="queue-count">0</b></button>
             <button id="refresh-button" class="icon-button" aria-label="刷新音乐库与推荐" title="刷新音乐库与推荐">↻</button>
+            <a class="secondary-button" href="/music-tree.html" title="体验七首叶片与波纹推荐">音乐树预览</a>
             <button id="settings-toggle" class="secondary-button" aria-controls="settings-panel" aria-expanded="false">设置</button>
           </div>
         </header>
@@ -50,7 +51,7 @@
           <section id="library" class="library-panel" aria-label="本地音乐库">
             <div class="section-heading"><div><span class="section-kicker">YOUR COLLECTION</span><h2>音乐库 <span id="library-nav-count" class="count-badge">0</span></h2></div><span class="panel-hint">随时播放，留在本地</span></div>
             <div class="library-tools">
-              <label class="search-box"><span aria-hidden="true">⌕</span><input id="library-search" type="search" aria-label="搜索音乐库" placeholder="搜索歌名、艺术家、专辑" autocomplete="off" /><kbd>Ctrl K</kbd></label>
+              <label class="search-box"><span aria-hidden="true">⌕</span><input id="library-search" type="search" aria-label="搜索音乐" placeholder="搜曲库 · 回车找网络歌曲" autocomplete="off" /><button id="online-search-button" class="search-online-button" type="button" aria-controls="online-search-panel" aria-expanded="false">搜网络</button><kbd>Ctrl K</kbd></label>
               <div class="library-options"><div class="play-mode" aria-label="播放顺序"><button class="mode-button active" data-mode="sequence" aria-pressed="true">顺序播放</button><button id="shuffle-button" class="shuffle-button" type="button" aria-pressed="false" aria-label="重新随机播放顺序">随机排列</button></div><label class="sort-select"><span class="sr-only">音乐库排序</span><select id="library-sort" aria-label="音乐库排序"><option value="default">默认排序</option><option value="added">最近入库</option></select></label></div>
             </div>
             <div class="list-caption"><span>歌曲 / 艺术家</span><span id="library-count" role="status">同步中…</span></div>
@@ -76,7 +77,7 @@
       <div class="now-playing">
         <div id="player-art" class="player-art"><span>♪</span></div>
         <div class="now-playing-meta">
-          <span id="playback-status" class="now-label" role="status">准备就绪</span>
+          <span id="playback-status" class="now-label" role="status">准备就绪</span><span id="playback-recovery" hidden><button id="playback-retry" class="text-button" type="button">重试</button><button id="playback-next" class="text-button" type="button">换一首</button></span>
           <strong id="player-title">选择一首歌开始试听</strong>
           <small id="player-artist">MusicServer</small>
         </div>
@@ -104,13 +105,19 @@
 
       <audio id="audio-player" preload="metadata"></audio>
     </footer>
-    <aside id="lyrics-panel" class="lyrics-panel" hidden aria-label="歌词">
+    <aside id="online-search-panel" class="online-search-panel" aria-label="网络歌曲搜索" hidden>
+    <div class="online-search-heading"><div><span class="section-kicker">FIND YOUR SOUND</span><h2>搜索音乐</h2></div><button id="online-search-close" class="icon-button" aria-label="关闭网络搜索">×</button></div>
+    <div class="online-search-tools"><button id="search-local" class="search-source" type="button">本地曲库</button><button id="search-netease" class="search-source selected" type="button" aria-pressed="true">网易云</button><button id="search-bilibili" class="search-source" type="button" aria-pressed="false">B站</button><button id="online-search-retry" class="text-button" type="button">重新搜索</button></div>
+    <section id="online-video-preview" class="online-video-preview" hidden aria-label="B站视频预览"><div><span id="online-video-title"></span><button id="online-video-close" class="text-button" type="button">收起视频</button></div><iframe id="online-video-frame" title="B站视频预览" sandbox="allow-scripts allow-same-origin allow-presentation" allow="autoplay; fullscreen" referrerpolicy="no-referrer-when-downgrade" allowfullscreen></iframe><small>下载后可用底部播放器听歌；预览由 B 站提供。</small></section><p id="online-search-status" class="online-search-status" role="status"></p><div id="online-search-results" class="online-search-results" aria-label="网络搜索结果"></div>
+    <p class="online-search-note">先试听，再留下喜欢的。点喜欢后自动下载，进度在「下载动态」。</p>
+  </aside>
+  <aside id="lyrics-panel" class="lyrics-panel" hidden aria-label="歌词">
       <div class="lyrics-heading"><div><span class="section-kicker">NOW PLAYING</span><h2>歌词</h2></div><button id="lyrics-close" class="icon-button" aria-label="关闭歌词">×</button></div>
       <div id="lyrics-content" class="lyrics-content"><span class="muted">播放歌曲后加载歌词</span></div>
     </aside>
     <aside id="settings-panel" class="settings-panel" hidden aria-label="设置">
       <div class="settings-heading"><div><span class="section-kicker">CONFIGURATION</span><h2>设置</h2></div><button id="settings-close" class="icon-button" aria-label="关闭设置">×</button></div>
-      <div class="settings-content">
+      <div class="settings-content"><div class="settings-group"><button id="onboarding-open" class="secondary-button" type="button">新手引导</button><p class="settings-hint">从试听到喜欢、下载，也可以重新选择自动整理和歌词偏好。</p></div>
         <div class="settings-group">
           <label>音乐库位置</label>
           <div id="music-library-status" class="settings-status"></div>
@@ -149,6 +156,9 @@
       </div>
     </aside>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
-    <script src="/app.js" defer></script>
+    <script src="/onboarding.js" defer></script>
+  <script src="/management.js" defer></script>
+  <script src="/desktop-bridge.js" defer></script>
+  <script src="/app.js" defer></script>
   </body>
 </html>

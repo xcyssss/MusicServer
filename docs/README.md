@@ -1,5 +1,7 @@
 # Documentation
 
+- [`1.0-readiness.zh-CN.md`](1.0-readiness.zh-CN.md) — 首次使用体验、1.0 缺口与验收标准。
+
 - [`../tests/README.md`](../tests/README.md) — PS5.1/Pester 3.4 测试入口、退出码和套件索引。
 
 - [`USER_GUIDE.zh-CN.md`](USER_GUIDE.zh-CN.md) — 中文使用说明与日常操作。

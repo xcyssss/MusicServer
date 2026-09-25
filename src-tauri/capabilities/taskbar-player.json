@@ -1,0 +1,6 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "taskbar-player",
+  "windows": ["taskbar-player"],
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten", "allow-desktop-player"]
+}

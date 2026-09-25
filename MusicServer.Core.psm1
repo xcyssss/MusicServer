@@ -4,13 +4,19 @@ function Resolve-MusicServerExecutable {
     param(
         [Parameter(Mandatory)][string]$EnvironmentVariable,
         [Parameter(Mandatory)][string[]]$Commands,
-        [string[]]$FallbackPaths = @()
+        [string[]]$FallbackPaths = @(),
+        [switch]$PreferFallback
     )
     $configured = [Environment]::GetEnvironmentVariable($EnvironmentVariable)
     if (-not [string]::IsNullOrWhiteSpace($configured)) {
         if (Test-Path -LiteralPath $configured -PathType Leaf) { return [IO.Path]::GetFullPath($configured) }
         $resolvedConfigured = Get-Command $configured -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($resolvedConfigured) { return [string]$resolvedConfigured.Source }
+    }
+    if ($PreferFallback) {
+        foreach ($fallback in $FallbackPaths) {
+            if ($fallback -and [IO.File]::Exists($fallback)) { return [IO.Path]::GetFullPath($fallback) }
+        }
     }
     foreach ($command in $Commands) {
         $resolved = Get-Command $command -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -153,12 +159,37 @@ function New-MusicServerConfig {
         NdDb                = Join-Path $navidromeDataDir 'navidrome.db'
         NdExe               = Resolve-MusicServerExecutable -EnvironmentVariable 'MUSICSERVER_NAVIDROME' -Commands @('navidrome.exe','navidrome') -FallbackPaths @(Join-Path $rootPath 'Navidrome\bin\navidrome.exe')
         NdConfig            = Join-Path $navidromeDir 'navidrome.toml'
-        YtDlp               = Resolve-MusicServerExecutable -EnvironmentVariable 'MUSICSERVER_YTDLP' -Commands @('yt-dlp.exe','yt-dlp')
-        FFprobe             = Resolve-MusicServerExecutable -EnvironmentVariable 'MUSICSERVER_FFPROBE' -Commands @('ffprobe.exe','ffprobe')
-        FFmpeg              = Resolve-MusicServerExecutable -EnvironmentVariable 'MUSICSERVER_FFMPEG' -Commands @('ffmpeg.exe','ffmpeg')
+        YtDlp               = Resolve-MusicServerExecutable -EnvironmentVariable 'MUSICSERVER_YTDLP' -Commands @('yt-dlp.exe','yt-dlp') -PreferFallback -FallbackPaths @(Join-Path $appHomePath 'components\yt20260819-ffmpeg901\bin\yt-dlp.exe')
+        FFprobe             = Resolve-MusicServerExecutable -EnvironmentVariable 'MUSICSERVER_FFPROBE' -Commands @('ffprobe.exe','ffprobe') -PreferFallback -FallbackPaths @(Join-Path $appHomePath 'components\yt20260819-ffmpeg901\bin\ffprobe.exe')
+        FFmpeg              = Resolve-MusicServerExecutable -EnvironmentVariable 'MUSICSERVER_FFMPEG' -Commands @('ffmpeg.exe','ffmpeg') -PreferFallback -FallbackPaths @(Join-Path $appHomePath 'components\yt20260819-ffmpeg901\bin\ffmpeg.exe')
         CookieFile          = Join-Path $appHomePath 'secrets\cookies.txt'
         Sqlite              = Resolve-MusicServerExecutable -EnvironmentVariable 'MUSICSERVER_SQLITE' -Commands @('sqlite3.exe','sqlite3')
     }
+}
+
+function Invoke-MusicServerBoundedProcess {
+    param([Parameter(Mandatory)][string]$FilePath, [string[]]$Arguments=@(), [ValidateRange(1,600)][int]$TimeoutSeconds=30)
+    # Windows CommandLineToArgvW quoting, including embedded quotes and trailing backslashes.
+    $quoted = foreach ($argument in $Arguments) {
+        '"' + [regex]::Replace([regex]::Replace([string]$argument, '(\\*)"', '$1$1\"'), '(\\+)$', '$1$1') + '"'
+    }
+    $info=New-Object Diagnostics.ProcessStartInfo
+    $info.FileName=$FilePath; $info.Arguments=$quoted -join ' '; $info.UseShellExecute=$false; $info.CreateNoWindow=$true
+    $info.RedirectStandardOutput=$true; $info.RedirectStandardError=$true
+    $info.StandardOutputEncoding=[Text.UTF8Encoding]::new($false); $info.StandardErrorEncoding=[Text.UTF8Encoding]::new($false)
+    $process=New-Object Diagnostics.Process; $process.StartInfo=$info
+    try {
+        [void]$process.Start()
+        $stdout=$process.StandardOutput.ReadToEndAsync(); $stderr=$process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit($TimeoutSeconds*1000)) {
+            & taskkill.exe /PID $process.Id /T /F 2>$null | Out-Null
+            throw 'PROCESS_TIMEOUT'
+        }
+        $output=$stdout.GetAwaiter().GetResult(); $errorText=$stderr.GetAwaiter().GetResult()
+        if ($output.Length -gt 65536) { $output=$output.Substring($output.Length-65536) }
+        if ($errorText.Length -gt 65536) { $errorText=$errorText.Substring($errorText.Length-65536) }
+        [pscustomobject]@{ExitCode=$process.ExitCode;Output=$output;Error=$errorText}
+    } finally { $process.Dispose() }
 }
 
 function Write-MusicServerLog {
@@ -634,6 +665,19 @@ function Get-NavidromeSongIdForPath {
         $fallbackId = & $Config.Sqlite $tmp $fallbackQuery 2>$null | Select-Object -First 1; return [string]$fallbackId
     } catch { return '' }
     finally { Remove-Item -LiteralPath "$tmp*" -Force -ErrorAction SilentlyContinue }
+}
+
+function Find-MusicServerLyricFile {
+    param([string]$File)
+    if (-not $File) { return '' }
+    $adjacent = [IO.Path]::ChangeExtension($File, '.lrc')
+    if ([IO.File]::Exists($adjacent)) { return $adjacent }
+    $parent = [IO.Path]::GetDirectoryName($File)
+    foreach ($folder in @('Lyrics','歌词')) {
+        $candidate = Join-Path (Join-Path $parent $folder) ([IO.Path]::GetFileName($adjacent))
+        if ([IO.File]::Exists($candidate)) { return $candidate }
+    }
+    return ''
 }
 
 function Get-DefaultMusicDir {

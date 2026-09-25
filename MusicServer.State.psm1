@@ -4,8 +4,8 @@
 # Provides: schema, migration, CAS, worker claim/lease, crash recovery,
 #           transactional like/unlike/download-completion, provider health.
 
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.Database.psm1') -Force
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.Core.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Database.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Core.psm1') -DisableNameChecking -Force
 
 $script:SchemaVersion = 6
 
@@ -236,6 +236,17 @@ BEGIN
            updated_at = NEW.played_at
      WHERE identity = NEW.identity;
 END;
+CREATE TABLE IF NOT EXISTS local_lyric_cache (
+    path_key TEXT PRIMARY KEY,
+    fingerprint TEXT NOT NULL,
+    status TEXT NOT NULL,
+    text TEXT NOT NULL DEFAULT '',
+    song_id TEXT NOT NULL DEFAULT '',
+    message TEXT NOT NULL DEFAULT '',
+    retry_at TEXT NOT NULL,
+    owner TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS app_settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL DEFAULT '',
@@ -843,6 +854,34 @@ function Split-LocalArtistNames {
         Where-Object { $_.Length -ge 2 })
 }
 
+function Select-DiverseRemoteRecommendations {
+    # Input is already taste-ranked. Avoid adjacent shared singers without losing
+    # the ranking or manufacturing candidates when the pool is small.
+    param([AllowEmptyCollection()][object[]]$Candidates = @(), [int]$Count = 20, [int]$MaxPerArtist = 5)
+    if ($Count -le 0 -or $MaxPerArtist -le 0) { return @() }
+    $remaining = New-Object System.Collections.ArrayList
+    $seen = @{}
+    foreach ($candidate in $Candidates) {
+        $key = Get-CanonicalTrackId -Title ([string]$candidate.Title) -Artist ([string]$candidate.Artist)
+        if ($seen.ContainsKey($key)) { continue }
+        $seen[$key] = $true
+        $credits = @([string]$candidate.Artist -split '[,，、/＆&×;；]' | ForEach-Object { Normalize-MusicText $_ } | Where-Object { $_ } | Select-Object -Unique)
+        [void]$remaining.Add([pscustomobject]@{ Item=$candidate; Credits=$credits })
+    }
+    $counts = @{}; $previous = @(); $selected = @()
+    while ($remaining.Count -gt 0 -and $selected.Count -lt $Count) {
+        $eligible = @($remaining | Where-Object { $row=$_; @($row.Credits | Where-Object { $counts.ContainsKey($_) -and $counts[$_] -ge $MaxPerArtist }).Count -eq 0 })
+        if ($eligible.Count -eq 0) { break }
+        $choice = @($eligible | Where-Object { @($_.Credits | Where-Object { $previous -contains $_ }).Count -eq 0 } | Select-Object -First 1)
+        $row = if ($choice.Count) { $choice[0] } else { $eligible[0] }
+        $selected += $row.Item
+        foreach ($credit in $row.Credits) { if (-not $counts.ContainsKey($credit)) { $counts[$credit]=0 }; $counts[$credit]++ }
+        $previous = $row.Credits
+        [void]$remaining.Remove($row)
+    }
+    return @($selected)
+}
+
 function Select-LocalRecommendationTracks {
     <#
     .SYNOPSIS
@@ -1432,6 +1471,7 @@ function Save-DailyRecommendationsDb {
         [AllowEmptyCollection()][object[]]$Tracks = @(),
         [string]$Date = (Get-TodayDate),
         [switch]$DryRun,
+        [switch]$OnlyIfEmpty,
         [int]$FailAfterStep = 0
     )
     if ($DryRun) { return [pscustomobject]@{ Date = $Date; Count = @($Recommendations).Count; DryRun = $true } }
@@ -1462,6 +1502,12 @@ function Save-DailyRecommendationsDb {
 
     $now = Get-NowIso
     $statements = New-Object System.Collections.Generic.List[string]
+    if ($OnlyIfEmpty) {
+        # This guard runs under the same IMMEDIATE transaction as the writes.
+        # A concurrently completed personal day must never be replaced by starters.
+        [void]$statements.Add('CREATE TEMP TABLE recommendation_empty_guard (n INTEGER CONSTRAINT musicserver_day_not_empty CHECK (n = 0))')
+        [void]$statements.Add('INSERT INTO recommendation_empty_guard SELECT COUNT(*) FROM daily_recommendations WHERE date = ' + (ConvertTo-MusicServerSqlLiteral $Date))
+    }
     [void]$statements.Add(("DELETE FROM daily_recommendations WHERE date = " + (ConvertTo-MusicServerSqlLiteral $Date)))
     [void]$statements.Add(("DELETE FROM recommendation_feedback WHERE feedback_type = 'DISPLAY' AND source = 'daily_recommendation' AND value LIKE " + (ConvertTo-MusicServerSqlLiteral "display:${Date}:%")))
     [void]$statements.Add(("DELETE FROM events WHERE event_type = 'RECOMMENDATION_DISPLAY' AND message LIKE " + (ConvertTo-MusicServerSqlLiteral "date=${Date};rank=%")))
@@ -1495,8 +1541,14 @@ function Save-DailyRecommendationsDb {
         $displayMessage = "date=${Date};rank=$([int](Get-OptionalProperty $rec 'rank'));rec_id=$([string](Get-OptionalProperty $rec 'id'))"
         [void]$statements.Add("INSERT INTO events (event_type,track_id,result,message,created_at) VALUES ('RECOMMENDATION_DISPLAY',$($lit.tid),'SUCCESS',$(ConvertTo-MusicServerSqlLiteral $displayMessage),$($lit.now))")
     }
-    $steps = Invoke-StateAtomicSql -Statements $statements.ToArray() -FailAfterStep $FailAfterStep
-    return [pscustomobject]@{ Date = $Date; Count = $recs.Count; Steps = $steps; DryRun = $false }
+    try { $steps = Invoke-StateAtomicSql -Statements $statements.ToArray() -FailAfterStep $FailAfterStep }
+    catch {
+        if ($OnlyIfEmpty -and $_.Exception.Message -match 'musicserver_day_not_empty') {
+            return [pscustomobject]@{ Date = $Date; Count = 0; Skipped = $true; DryRun = $false }
+        }
+        throw
+    }
+    return [pscustomobject]@{ Date = $Date; Count = $recs.Count; Steps = $steps; Skipped = $false; DryRun = $false }
 }
 
 function Get-TodayRecommendationsDb {
@@ -1994,19 +2046,20 @@ VALUES (@p, @state, @sc, @fc, @cf, @c412, @ls, @lf, @l412, @bu, @alm, @hpp, @err
 }
 
 function Claim-HalfOpenProbeDb {
-    param([Parameter(Mandatory)][string]$Provider)
+    param([Parameter(Mandatory)][string]$Provider, [ValidateRange(1,60)][int]$LeaseMinutes = 15)
     $now = Get-NowIso
     $affected = Invoke-MusicServerParamNonQuery -Template @"
 UPDATE provider_health
 SET state = 'HALF_OPEN', half_open_probe_claimed = 1,
     revision = revision + 1, updated_at = @now
 WHERE provider = @p
-  AND half_open_probe_claimed = 0
+  AND (half_open_probe_claimed = 0 OR (state = 'HALF_OPEN'
+      AND (julianday(updated_at) IS NULL OR julianday(updated_at) <= julianday(@cutoff))))
   AND (
       state = 'HALF_OPEN'
       OR (state = 'OPEN' AND (blocked_until IS NULL OR blocked_until = '' OR blocked_until <= @now))
   );
-"@ -Params @{ p = $Provider; now = $now } -ReturnChanges
+"@ -Params @{ p = $Provider; now = $now; cutoff = [DateTime]::UtcNow.AddMinutes(-$LeaseMinutes).ToString('o') } -ReturnChanges
     return ($affected -eq 1)
 }
 
@@ -2616,6 +2669,34 @@ function Test-MusicLibraryPath {
         return @{ Valid = $false; Reason = 'IS_FILE' }
     }
     return @{ Valid = $true; Reason = 'OK'; FullPath = $fullPath }
+}
+
+function Get-LocalLyricCacheDb {
+    param([string]$PathKey, [string]$Fingerprint)
+    $rows = @(Invoke-MusicServerParamSql -Template 'SELECT * FROM local_lyric_cache WHERE path_key = @p AND fingerprint = @f;' -Params @{p=$PathKey;f=$Fingerprint})
+    if ($rows.Count) { return $rows[0] }
+    return $null
+}
+
+function Claim-LocalLyricLookupDb {
+    param([string]$PathKey, [string]$Fingerprint, [string]$Owner)
+    $now = Get-NowIso
+    $changed = Invoke-MusicServerParamNonQuery -Template @"
+INSERT INTO local_lyric_cache (path_key,fingerprint,status,retry_at,owner,updated_at)
+VALUES (@p,@f,'FETCHING',@lease,@owner,@now)
+ON CONFLICT(path_key) DO UPDATE SET fingerprint=@f,status='FETCHING',text='',song_id='',message='',retry_at=@lease,owner=@owner,updated_at=@now
+WHERE local_lyric_cache.fingerprint <> @f OR (local_lyric_cache.status <> 'READY' AND local_lyric_cache.retry_at <= @now);
+"@ -Params @{p=$PathKey;f=$Fingerprint;owner=$Owner;now=$now;lease=[DateTime]::UtcNow.AddSeconds(60).ToString('o')} -ReturnChanges
+    return $changed -eq 1
+}
+
+function Save-LocalLyricCacheDb {
+    param([string]$PathKey,[string]$Owner,[ValidateSet('READY','MISSING','ERROR')][string]$Status,[string]$Text='',[string]$SongId='',[string]$Message='')
+    $minutes = if ($Status -eq 'ERROR') { 30 } else { 10080 }
+    Invoke-MusicServerParamNonQuery -Template @"
+UPDATE local_lyric_cache SET status=@status,text=@text,song_id=@sid,message=@message,retry_at=@retry,owner='',updated_at=@now
+WHERE path_key=@p AND owner=@owner;
+"@ -Params @{p=$PathKey;owner=$Owner;status=$Status;text=$Text;sid=$SongId;message=$Message;retry=[DateTime]::UtcNow.AddMinutes($minutes).ToString('o');now=(Get-NowIso)} | Out-Null
 }
 
 function Get-AppSettingDb {

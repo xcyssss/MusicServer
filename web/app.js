@@ -35,6 +35,8 @@ const state = {
   recommendationRevision: 0,
   libraryLimit: 200,
   searchQuery: '',
+  online: { items: [], query: '', source: 'netease', phase: 'idle', message: '', request: 0 },
+  onlinePlaybackItems: [],
 };
 
 const labels = { REMOTE: '在线', WANTED: '待下载', RESOLVING: '正在解析', DOWNLOADING: '下载中', VALIDATING: '校验中', CANCEL_REQUESTED: '正在取消', LOCAL: '已本地化', RETRY_WAIT: '等待重试', UNAVAILABLE: '暂不可用' };
@@ -562,7 +564,7 @@ async function fetchJson(url, options = {}) {
   const cancel = () => controller.abort();
   if (options.signal?.aborted) cancel();
   options.signal?.addEventListener('abort', cancel, { once: true });
-  const timer = setTimeout(cancel, 12000);
+  const timer = setTimeout(cancel, options.timeoutMs || 12000);
   try {
     const response = await fetch(url, { ...options, cache: 'no-store', signal: controller.signal });
     let payload;
@@ -605,7 +607,12 @@ function setLyricsOpen(open, returnFocus = false) {
   if (returnFocus) $('#lyrics-toggle').focus();
 }
 
-function setPlaybackStatus(message) { $('#playback-status').textContent = message; }
+function setPlaybackStatus(message) {
+  $('#playback-status').textContent = message;
+  const recovery = $('#playback-recovery');
+  if (recovery) recovery.hidden = !/失败|暂不可用|超时/.test(message);
+  globalThis.MusicServerGuide?.update();
+}
 
 function newPlaybackSessionId() {
   if (globalThis.crypto && crypto.randomUUID) return crypto.randomUUID();
@@ -627,8 +634,8 @@ function showToast(message) {
 
 function filteredLibrary() {
   const query = state.searchQuery;
-  if (!query) return state.library;
-  return state.library.filter((item) => item.searchText.includes(query));
+  const items = query ? state.library.filter((item) => item.searchText.includes(query)) : state.library;
+  return globalThis.MusicTreeUI ? globalThis.MusicTreeUI.filterLibrary(items) : items;
 }
 
 // Sort displayed library items. 'added' sorts newest-added first using the
@@ -708,7 +715,7 @@ function setPlaybackMode(mode) {
 
 function reshuffleLibrary() {
   const source = state.librarySequence.length ? state.librarySequence : state.library;
-  if (!source.length) { showToast('音乐库还在同步，请稍后再随机'); return; }
+  randomPlaybackQueues.clear();
   state.mode = 'random';
   state.library = shuffled(source);
   localStorage.setItem('musicserver-play-mode', state.mode);
@@ -726,6 +733,13 @@ function renderLibrary() {
   $('#library-more').textContent = `显示更多（${visible.length} / ${matches.length}）`;
   $('#library-nav-count').textContent = state.library.length;
   $('#local-count').textContent = state.library.length;
+  if (globalThis.MusicTreeUI) {
+    globalThis.MusicTreeUI.renderLibrary({ items: matches, total: state.library.length,
+      searchQuery: state.searchQuery, librarySort: state.librarySort, displayMode: state.displayMode,
+      currentKey: state.currentKey, paused: $('#audio-player').paused, display: formatTrackDisplay, keyOf,
+      refresh: () => { renderLibrary(); updateNavigationButtons(); } });
+    return;
+  }
   if (!state.library.length) { list._sig = null; list.innerHTML = '<div class="empty-state">曲库还是空的。<br />从右侧推荐开始，点红心收藏喜欢的音乐。</div>'; return; }
   if (!visible.length) { list._sig = null; list.innerHTML = '<div class="empty-state">没有找到匹配的歌曲。<br />试试歌手名，或清空搜索。</div>'; return; }
   const signature = JSON.stringify(visible.map((item) => [keyOf(item), state.currentKey === keyOf(item), $('#audio-player').paused, item.starred, item.source, item.title, item.artist, item.raw_artist, item.album, item.duration, state.displayMode]));
@@ -750,6 +764,18 @@ function renderLibrary() {
 // The download panel reflects the whole wanted queue, not just today's
 // recommendations: a failed or waiting download must stay visible even after
 // the daily list is regenerated (the queue entry itself is never dropped).
+function downloadExplanation(entry) {
+  const reasons = { HTTP_412:'来源限流，冷却后重试', CIRCUIT_OPEN:'来源暂时冷却', BILIBILI_CIRCUIT_OPEN:'Bilibili 暂时冷却', NETEASE_NOT_AVAILABLE:'网易云未提供完整音源', NETEASE_REQUEST_FAILED:'网易云请求失败', NO_CANDIDATE:'未找到身份匹配的音源', ALL_CANDIDATES_FAILED:'本轮音源均未通过', WRONG_DURATION:'音源时长不符，已拒绝入库', WORKER_EXCEPTION:'处理异常，详见下载日志', DOWNLOAD_FAILED:'下载失败', NETEASE_DOWNLOAD_EMPTY:'音源为空或不完整' };
+  const reason = reasons[entry.last_error] || entry.last_error || '';
+  const attempts = Number(entry.attempt_count ?? entry.attempts ?? 0);
+  const limit = Number(entry.max_attempts || 5);
+  const parts = [reason, attempts > 0 ? `尝试 ${attempts}/${limit}` : ''];
+  const retry = Date.parse(entry.next_retry_at || '');
+  if (entry.state === 'RETRY_WAIT' && Number.isFinite(retry)) parts.push(`下次 ${new Date(retry).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}`);
+  if (entry.state === 'UNAVAILABLE') parts.push('已停止自动重试，可手动重试');
+  return parts.filter(Boolean).join(' · ');
+}
+
 function wantedQueueEntries() {
   const byId = new Map();
   for (const entry of (Array.isArray(state.wanted) ? state.wanted : [])) {
@@ -782,8 +808,15 @@ function renderRecommendations() {
     const label = escapeHtml([entry.title, entry.artist].filter(Boolean).join(' · ') || entry.track_id || '未知曲目');
     const badge = `<span class="status-badge ${statusClass(entry.state)}">${escapeHtml(labels[entry.state] || entry.state)}</span>`;
     const retry = retryable ? `<button class="text-button wanted-retry" type="button" data-action="wanted-retry" data-track-id="${escapeHtml(entry.track_id || '')}">重试</button>` : '';
-    return `<div class="wanted-row"><span>${label}</span>${badge}${retry}</div>`;
+    return `<div class="wanted-row"><span>${label}<small class="download-explanation">${escapeHtml(downloadExplanation(entry))}</small></span>${badge}${retry}</div>`;
   }).join('') : '当前没有待下载或等待重试的歌曲。';
+  if (globalThis.MusicTreeUI) {
+    globalThis.MusicTreeUI.renderRecommendations({ items: state.items, display: formatTrackDisplay, keyOf,
+      currentKey: state.currentKey, paused: $('#audio-player').paused, pendingLikes, pendingDislikes,
+      currentTrack: state.currentItem?.track_id ? state.currentItem : null,
+      likeCurrent: () => { const item = state.currentItem?.track_id ? state.currentItem : state.items.find((entry) => keyOf(entry) === state.currentKey); if (item) toggleLike(item); } });
+    return;
+  }
   if (!state.items.length) { list._sig = null; list.innerHTML = '<div class="empty-state">今天的推荐还在准备中。<br />先从音乐库选一首，或稍后刷新。</div>'; return; }
   const signature = JSON.stringify(state.items.map((item) => [item.track_id, item.liked, item.disliked, itemStatus(item), state.currentKey === keyOf(item), $('#audio-player').paused, item.title, item.artist, item.reason, item.duration, item.year, state.displayMode, pendingLikes.has(item.track_id), pendingDislikes.has(item.track_id)]));
   if (list._sig === signature && !list._dirty) return;
@@ -843,20 +876,33 @@ function listeningCollection() {
   return [...new Map(items.map((item) => [keyOf(item), item])).values()];
 }
 
+const randomPlaybackQueues = new Map();
 function playbackCollection() {
-  if (state.currentCollection === 'recommendations') return state.items;
-  if (state.currentCollection === 'listening') return listeningCollection();
-  return sortLibraryVisible(filteredLibrary());
+  let items;
+  if (state.currentCollection === 'online') items = state.onlinePlaybackItems;
+  else if (state.currentCollection === 'recommendations') items = state.items;
+  else if (state.currentCollection === 'listening') items = listeningCollection();
+  else return sortLibraryVisible(filteredLibrary());
+  if (state.mode !== 'random') return items;
+  const signature = items.map(keyOf).join('\n');
+  let saved = randomPlaybackQueues.get(state.currentCollection);
+  if (!saved || saved.signature !== signature) {
+    saved = { signature, keys: shuffled(items).map(keyOf) };
+    randomPlaybackQueues.set(state.currentCollection, saved);
+  }
+  const current = new Map(items.map(item => [keyOf(item), item]));
+  return saved.keys.map(key => current.get(key)).filter(Boolean);
 }
 
 function updateNavigationButtons() {
+  globalThis.MusicServerGuide?.update();
   const collection = playbackCollection();
   const disabled = !collection.length || !state.currentKey;
   $('#previous-button').disabled = disabled;
   $('#next-button').disabled = disabled;
 }
 
-function render() { renderLibrary(); renderRecommendations(); renderListening(); renderMode(); updateNavigationButtons(); }
+function render() { renderLibrary(); renderRecommendations(); renderListening(); renderMode(); renderOnlineSearch(); updateNavigationButtons(); globalThis.MusicServerDesktop?.refresh?.(); }
 
 function renderMode() {
   document.querySelectorAll('.mode-button').forEach((button) => button.classList.toggle('active', button.dataset.mode === state.mode));
@@ -897,6 +943,7 @@ function normalizeLyricsPayload(data) {
 }
 
 function renderLyrics(currentTime = 0) {
+  globalThis.MusicServerDesktop?.refresh?.();
   const content = $('#lyrics-content');
   if (!state.lyrics.available) { content.innerHTML = `<div class="lyrics-empty">${escapeHtml(state.lyrics.message || '这首歌暂时没有找到可靠歌词。')}</div>`; return; }
   if (!state.lyrics.entries.length) { content.innerHTML = `<pre class="lyrics-plain">${escapeHtml(state.lyrics.text)}</pre>`; return; }
@@ -936,18 +983,24 @@ function isTextSelecting() {
 
 async function loadLyrics(url, open = true) {
   const requestId = ++state.lyricsRequest;
-  state.lyricsController?.abort();
-  state.lyricsController = new AbortController();
+  const controllerKey = open ? 'lyricsController' : 'playbackLyricsController';
+  state[controllerKey]?.abort();
+  const controller = state[controllerKey] = new AbortController();
+  const playingKey = state.currentKey;
   state.lyrics = { available: false, format: '', text: '', entries: [], quality: '', message: '' };
+  if (!open) { state.playbackLyrics = state.lyrics; globalThis.MusicServerDesktop?.refresh?.(); }
   $('#lyrics-toggle').disabled = false;
   if (open) setLyricsOpen(true);
   $('#lyrics-content').innerHTML = '<div class="lyrics-empty">正在加载歌词…</div>';
   if (!url) { renderLyrics(); return; }
   try {
-    const data = await fetchJson(url, { signal: state.lyricsController.signal });
-    if (requestId !== state.lyricsRequest) return;
+    const data = await fetchJson(url, { signal: controller.signal, timeoutMs: 34000 });
+    if (controller.signal.aborted) return;
     const normalized = normalizeLyricsPayload(data);
-    state.lyrics = { ...normalized, entries: normalized.available ? parseLyrics(normalized.text) : [] };
+    const lyrics = { ...normalized, entries: normalized.available ? parseLyrics(normalized.text) : [] };
+    if (!open && playingKey === state.currentKey) { state.playbackLyrics = lyrics; globalThis.MusicServerDesktop?.refresh?.(); }
+    if (requestId !== state.lyricsRequest) return;
+    state.lyrics = lyrics;
     renderLyrics($('#audio-player').currentTime || 0);
   } catch {
     if (requestId !== state.lyricsRequest) return;
@@ -1062,12 +1115,13 @@ function maybeRecordPlayback() {
 }
 
 async function playItem(item, collection = 'library') {
+  closeVideoPreview();
   const requestId = ++state.playRequest;
   let key = keyOf(item); const audio = $('#audio-player');
   if (!key) return;
   if (state.currentKey === key && !audio.paused) { audio.pause(); return; }
   let source = resolvePlaybackSource(item);
-  if (!source && item.track_id) {
+  if ((!source || collection === 'online') && item.track_id) {
     setPlaybackStatus('正在准备试听…');
     await hydrateRecommendationPlayback(item);
     if (requestId !== state.playRequest) return;
@@ -1075,10 +1129,19 @@ async function playItem(item, collection = 'library') {
     const hydratedKey = keyOf(item);
     if (hydratedKey) key = hydratedKey;
   }
+  const video = bilibiliPreview(item);
+  if (!source && video) {
+    audio.pause(); setOnlineSearchOpen(true);
+    setPlaybackStatus('B站视频预览 · 在搜索面板中播放');
+    $('#online-video-frame').src = `https://player.bilibili.com/player.html?bvid=${video.bvid}&page=1&autoplay=1&high_quality=1`;
+    $('#online-video-title').textContent = item.title;
+    $('#online-video-preview').hidden = false;
+    return;
+  }
   if (!source) { setPlaybackStatus(audio.paused ? '暂不可用 · 请选择其他歌曲' : '正在播放'); showToast('这首歌暂时没有可用试听源'); return; }
   const sourceUrl = new URL(source, window.location.href).href;
   const isNewTrack = state.currentKey !== key || audio.src !== sourceUrl || audio.ended;
-  state.currentKey = key; state.currentCollection = collection; state.currentItem = item; updatePlayer(item); $('#library-list')._dirty = true; $('#recommendation-list')._dirty = true; render();
+  state.currentKey = key; state.currentCollection = collection; state.currentItem = item; state.playbackLyrics = null; updatePlayer(item); $('#library-list')._dirty = true; $('#recommendation-list')._dirty = true; render();
   const pt = $('#play-toggle');
   if (pt) pt.disabled = false;
   renderPlayerArt(item);
@@ -1097,15 +1160,23 @@ async function playItem(item, collection = 'library') {
   setPlaybackStatus('正在加载…');
   // Lyrics must not hold up audio or reopen a panel the listener closed.
   void loadLyrics(lyricsUrl, false);
-  try { await audio.play(); } catch {
+  let loadTimer;
+  try {
+    await Promise.race([
+      audio.play(),
+      new Promise((_, reject) => { loadTimer = setTimeout(() => reject(new Error('PLAYBACK_TIMEOUT')), 15000); }),
+    ]);
+  } catch {
     if (requestId !== state.playRequest) return;
-    setPlaybackStatus('播放失败 · 点击播放重试');
-    showToast('试听源加载失败，点击播放按钮重试');
-  }
+    audio.pause();
+    setPlaybackStatus('播放失败 · 可以重试或换一首');
+    showToast('这次试听没有成功。喜欢仍会保留，可以重试或换一首。');
+  } finally { clearTimeout(loadTimer); }
 }
 
 function renderPlayerArt(item) {
   if (!item) return;
+  if (globalThis.MusicTreeUI) { globalThis.MusicTreeUI.playerArt(item); return; }
   const art = $('#player-art');
   if (!art) return;
   const cover = item.cover_url || item.recommendation?.cover_url || item.track?.cover_url;
@@ -1175,6 +1246,7 @@ async function toggleLike(item) {
   state.recommendationRevision++;
   const next = !item.liked;
   item.liked = next;
+  syncTrackCopies(item);
   render();
   showToast(next ? '已喜欢，加入后台下载队列' : '已取消喜欢');
   try {
@@ -1193,10 +1265,12 @@ async function toggleLike(item) {
     // Like and dislike are one axis, so liking clears a dislike.
     if (item.liked) item.disliked = false;
     item.wanted = result?.wanted || null;
+    syncTrackCopies(item);
     if (!item.wanted) state.wanted = (Array.isArray(state.wanted) ? state.wanted : []).filter((entry) => String(entry?.track_id || entry?.id || '') !== String(item.track_id));
     render();
   } catch (error) {
     item.liked = !next;
+    syncTrackCopies(item);
     render();
     const detail = String(error?.message || '未知错误');
     showToast(`喜欢操作失败：${detail}`);
@@ -1204,6 +1278,7 @@ async function toggleLike(item) {
     pendingLikes.delete(item.track_id);
     state.recommendationRevision++;
     renderRecommendations();
+    renderOnlineSearch();
   }
 }
 
@@ -1245,6 +1320,7 @@ async function loadWanted(silent = false) {
       if (!Array.isArray(payload.items)) throw new Error('Invalid wanted response');
       state.wanted = payload.items;
       renderRecommendations();
+      renderOnlineSearch();
       updateNavigationButtons();
     } catch { if (!silent) showToast('下载动态同步失败，请稍后刷新'); }
   });
@@ -1343,12 +1419,12 @@ async function deleteLibraryItem(item) {
       $('#audio-player').pause();
       $('#audio-player').removeAttribute('src');
       $('#audio-player').load();
-      state.currentKey = null; state.playbackSession = null;
+      state.currentKey = null; state.currentItem = null; state.playbackLyrics = null; state.playbackSession = null;
       $('#play-toggle').disabled = true;
       setPlaybackStatus('歌曲已移除');
     }
     showToast(result.message || '已删除');
-    renderLibrary(); updateNavigationButtons();
+    renderLibrary(); updateNavigationButtons(); globalThis.MusicServerDesktop?.refresh?.();
   } catch (err) {
     showToast(`删除失败：${err.message || '请稍后重试'}`);
   }
@@ -1360,6 +1436,124 @@ $('#recommendation-list').addEventListener('click', (event) => {
   if (event.target.closest('[data-action="like"]')) toggleLike(item);
   else if (event.target.closest('[data-action="dislike"]')) toggleDislike(item);
   else if (event.target.closest('[data-action="play"]')) playItem(item, 'recommendations');
+});
+
+function syncTrackCopies(item) {
+  for (const copy of [...state.items, ...state.library, ...state.librarySequence, ...state.online.items, ...state.onlinePlaybackItems, state.currentItem]) {
+    if (copy && copy.track_id === item.track_id && copy !== item) {
+      copy.liked = item.liked; copy.disliked = item.disliked; copy.wanted = item.wanted;
+    }
+  }
+}
+
+let onlineAbort = null;
+function bilibiliPreview(item) {
+  const preview = item?.preview_source?.provider === 'bilibili' ? item.preview_source : item?.track?.preview_sources?.find(source => source.provider === 'bilibili');
+  return /^BV[0-9A-Za-z]{10}$/.test(preview?.bvid || '') ? preview : null;
+}
+function closeVideoPreview() {
+  if (!$('#online-video-preview').hidden) setPlaybackStatus($('#audio-player').paused ? (state.currentKey ? '已暂停' : '准备就绪') : '正在播放');
+  $('#online-video-preview').hidden = true;
+  $('#online-video-frame').removeAttribute('src');
+}
+function setOnlineSearchOpen(open) {
+  $('#online-search-panel').hidden = !open;
+  $('#online-search-button').setAttribute('aria-expanded', String(open));
+  if (!open) { state.online.request++; onlineAbort?.abort(); closeVideoPreview(); $('#library-search').focus(); }
+}
+
+function renderOnlineSearch() {
+  if (!$('#online-search-panel') || $('#online-search-panel').hidden) return;
+  const { items, query, phase, message } = state.online;
+  for (const source of ['netease','bilibili']) {
+    $(`#search-${source}`).classList.toggle('selected', state.online.source === source);
+    $(`#search-${source}`).setAttribute('aria-pressed', String(state.online.source === source));
+  }
+  const label = phase === 'loading' ? `正在网络中寻找「${query}」…` : phase === 'done' ? `「${query}」 · ${items.length ? `找到 ${items.length} 首` : '没有找到匹配歌曲，试试歌名加歌手。'}` : message || '输入歌名或歌手，按回车开始网络搜索。';
+  $('#online-search-status').textContent = label;
+  $('#online-search-panel').setAttribute('aria-busy', String(phase === 'loading'));
+  const html = items.map((item, index) => {
+    const text = formatTrackDisplay(item);
+    const video = bilibiliPreview(item);
+    if (video) { text.title=item.title; text.artist=video.uploader ? `UP主 · ${video.uploader}` : 'B站视频'; text.album=''; }
+    const wanted = state.wanted.find(entry => entry.track_id === item.track_id) || item.wanted;
+    const status = wanted?.state || item.local_status;
+    const playing = keyOf(item) === state.currentKey && !$('#audio-player').paused;
+    const playLabel = video && status !== 'LOCAL' ? '预览视频' : playing ? '暂停' : '试听';
+    return `<article class="online-song ${playing ? 'playing' : ''}" data-online-id="${escapeHtml(item.track_id)}"><span class="online-song-number">${String(index+1).padStart(2,'0')}</span><button class="online-song-play" type="button" data-online-action="play" aria-label="${playLabel} ${escapeHtml(text.title)}">${playing ? 'Ⅱ' : '▷'}</button><div class="online-song-meta"><strong>${escapeHtml(text.title)}</strong><small>${escapeHtml(text.artist)}${text.album ? ` · ${escapeHtml(text.album)}` : ''}</small><span class="online-song-state">${status && status !== 'REMOTE' ? escapeHtml(labels[status] || status) : '在线歌曲'}</span></div><span class="online-song-duration">${duration(item.duration)}</span><button class="online-song-like ${item.liked ? 'liked' : ''}" data-online-action="like" type="button" aria-label="${item.liked ? '取消喜欢' : '喜欢并下载'} ${escapeHtml(text.title)}" aria-pressed="${!!item.liked}" ${pendingLikes.has(item.track_id) ? 'disabled' : ''}><span aria-hidden="true">${item.liked ? '♥' : '♡'}</span><span>${item.liked ? '已喜欢' : '喜欢并下载'}</span></button></article>`;
+  }).join('');
+  const list = $('#online-search-results');
+  if (list._sig !== html) {
+    const focus = document.activeElement;
+    const rowId = focus?.closest?.('[data-online-id]')?.dataset.onlineId;
+    const action = focus?.dataset.onlineAction;
+    list.innerHTML = html; list._sig = html;
+    if (rowId && action) list.querySelector(`[data-online-id="${CSS.escape(rowId)}"] [data-online-action="${action}"]`)?.focus({preventScroll:true});
+  }
+}
+
+async function searchOnline() {
+  closeVideoPreview();
+  const query = $('#library-search').value.trim();
+  onlineAbort?.abort(); onlineAbort = new AbortController();
+  const signal = onlineAbort.signal, request = ++state.online.request;
+  Object.assign(state.online, {query, items: [], phase: 'loading', message: ''});
+  setOnlineSearchOpen(true);
+  if (!query || query.length > 80) {
+    Object.assign(state.online, {phase:'idle', message:'请输入 1–80 个字符的歌名或歌手。'});
+    renderOnlineSearch(); return;
+  }
+  renderOnlineSearch();
+  const began = Date.now();
+  try {
+    const job = await fetchJson('/api/search', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({query, source:state.online.source}), signal});
+    if (!job.id) throw new Error('搜索暂时无法启动，请重试。');
+    while (request === state.online.request && Date.now() - began < 23000) {
+      const result = await fetchJson(`/api/search/${encodeURIComponent(job.id)}`, {signal});
+      if (request !== state.online.request) return;
+      if (result.state === 'ERROR') {
+        const retry = new Date(result.retry_at);
+        const when = result.retry_at && Number.isFinite(retry.getTime()) && retry > new Date() ? `可在 ${retry.toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit'})} 后重试。` : '请稍后重试。';
+        const reasons = {PROVIDER_BUSY:'正在检查来源是否恢复，请稍后再搜一次。', PROVIDER_RATE_LIMITED:`B站返回了限流响应，${when}也可以切换网易云。`, PROVIDER_COOLDOWN:`上次连接没有完成，来源正在短暂冷却。${when}`, PROVIDER_UNAVAILABLE:`当前来源暂时不可用。${when}可以切换另一个来源。`};
+        throw new Error(reasons[result.error] || '网络搜索暂时没有完成，请稍后重试。');
+      }
+      if (result.state === 'DONE') {
+        if (!Array.isArray(result.items)) throw new Error('搜索结果无法读取，请重试。');
+        state.online.items = result.items;
+        state.online.phase = 'done'; renderOnlineSearch(); return;
+      }
+      await new Promise(resolve => setTimeout(resolve, 650));
+    }
+    if (request === state.online.request) throw new Error('搜索等得有点久，请稍后重试。');
+  } catch (error) {
+    if (request !== state.online.request || signal.aborted) return;
+    Object.assign(state.online, {phase:'error', message:String(error?.message || '搜索失败，请重试。')}); renderOnlineSearch();
+  }
+}
+
+$('#online-search-button').addEventListener('click', searchOnline);
+for (const source of ['netease','bilibili']) {
+  $(`#search-${source}`).addEventListener('click', () => { state.online.source=source; void searchOnline(); });
+}
+$('#online-video-close').addEventListener('click', closeVideoPreview);
+$('#online-search-retry').addEventListener('click', searchOnline);
+$('#online-search-close').addEventListener('click', () => setOnlineSearchOpen(false));
+$('#search-local').addEventListener('click', () => { setOnlineSearchOpen(false); scheduleSearch(); });
+$('#online-search-results').addEventListener('click', event => {
+  const row = event.target.closest('[data-online-id]');
+  const item = state.online.items.find(item => item.track_id === row?.dataset.onlineId);
+  if (!item) return;
+  if (event.target.closest('[data-online-action="like"]')) void toggleLike(item);
+  else if (event.target.closest('[data-online-action="play"]')) {
+    state.onlinePlaybackItems = state.online.items.slice(); void playItem(item, 'online');
+  }
+});
+$('#library-search').addEventListener('keydown', event => {
+  if (event.key === 'Enter' && !event.isComposing && !composingSearch) { event.preventDefault(); void searchOnline(); }
+  if (event.key === 'Escape' && !$('#online-search-panel').hidden) setOnlineSearchOpen(false);
+});
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && !$('#online-search-panel').hidden) setOnlineSearchOpen(false);
 });
 
 let searchTimer;
@@ -1468,6 +1662,7 @@ const playToggle = $('#play-toggle');
 function setPlayIcon(playing) {
   if (!playToggle) return;
   playToggle.textContent = playing ? DEFAULT_PAUSE_ICON : DEFAULT_PLAY_ICON;
+  globalThis.MusicTreeUI?.setPlayIcon(playing);
   playToggle.setAttribute('aria-label', playing ? '暂停' : '播放');
 }
 
@@ -1551,11 +1746,16 @@ $('#audio-player').addEventListener('timeupdate', () => {
   if (!$('#lyrics-panel').hidden) renderLyrics($('#audio-player').currentTime);
 });
 $('#audio-player').addEventListener('loadedmetadata', updateProgressUI);
-$('#audio-player').addEventListener('play', () => { setPlayIcon(true); setPlaybackStatus('正在播放'); render(); });
-$('#audio-player').addEventListener('pause', () => { setPlayIcon(false); setPlaybackStatus('已暂停'); render(); });
+$('#audio-player').addEventListener('play', () => { closeVideoPreview(); setPlayIcon(true); setPlaybackStatus('正在播放'); render(); });
+$('#audio-player').addEventListener('pause', () => { setPlayIcon(false); setPlaybackStatus($('#online-video-preview').hidden ? '已暂停' : 'B站视频预览 · 在搜索面板中播放'); render(); });
 $('#audio-player').addEventListener('waiting', () => setPlaybackStatus('正在缓冲…'));
-$('#audio-player').addEventListener('playing', () => setPlaybackStatus('正在播放'));
-$('#audio-player').addEventListener('error', () => { if (state.currentKey) setPlaybackStatus('播放失败 · 点击播放重试'); });
+$('#audio-player').addEventListener('playing', () => { setPlaybackStatus('正在播放'); globalThis.MusicServerGuide?.update(); });
+$('#audio-player').addEventListener('error', () => { if (state.currentKey) setPlaybackStatus('播放失败 · 可以重试或换一首'); });
+$('#playback-retry')?.addEventListener('click', () => {
+  const item = state.currentItem;
+  if (item) { $('#audio-player').load(); void playItem(item, state.currentCollection); }
+});
+$('#playback-next')?.addEventListener('click', nextItem);
 
 renderMode(); renderDisplayModeChoice(); loadRecommendations(); loadWanted(); loadProviderStatus();
 // The display mode decides how the local names are rendered, so it is resolved
@@ -1577,6 +1777,7 @@ try {
 // section headings scrollable without requiring the user to hover exactly on
 // the thin track-list area.
 function forwardScroll(event) {
+  if (globalThis.MusicTreeUI) return;
   const panel = event.currentTarget;
   const scroller = panel.querySelector('.track-list');
   if (!scroller) return;
@@ -1749,3 +1950,38 @@ $('#settings-toggle').addEventListener('click', () => {
   if (!$('#settings-panel').hidden) $('#settings-close').focus();
 });
 $('#settings-close').addEventListener('click', () => setSettingsOpen(false, true));
+
+globalThis.MusicServerDesktop?.connect({
+  request: fetchJson, toast: showToast,
+  view: () => {
+    const item = state.currentItem;
+    const display = item ? formatTrackDisplay(item) : { title: 'MusicServer', artist: '' };
+    const audio = $('#audio-player');
+    return { key: state.currentKey || '', title: display.title.slice(0, 240), artist: display.artist.slice(0, 160),
+      lyric: item ? globalThis.MusicServerDesktop.lyricLine(state.playbackLyrics, audio.currentTime || 0).slice(0, 500) : '让音乐，从一片叶子开始',
+      playing: !!item && !audio.paused, can_play: !!item && !$('#play-toggle').disabled,
+      random: state.mode === 'random', can_like: !!(item?.canonical_track_id ?? item?.track_id), liked: !!item?.liked };
+  },
+  action: (action) => {
+    if (action === 'mode') { state.mode === 'random' ? setPlaybackMode('sequence') : reshuffleLibrary(); return; }
+    if (action === 'like') { if (state.currentItem?.track_id) void toggleLike(state.currentItem); return; }
+    const buttons = { previous: '#previous-button', toggle: '#play-toggle', next: '#next-button' };
+    const button = buttons[action] && $(buttons[action]);
+    if (button && !button.disabled) button.click();
+  },
+});
+
+globalThis.MusicServerGuide?.connect({
+  request: fetchJson, applyDisplayMode, toast: showToast,
+  play: (item) => playItem(item, 'recommendations'), like: toggleLike,
+  refreshWanted: () => loadWanted(true),
+  refreshRecommendations: async () => { await loadRecommendations(true); if (!state.items.length) await loadRecommendations(true); },
+  settings: () => { setSettingsOpen(true); $('#music-library-browse').focus(); },
+  closeSettings: () => setSettingsOpen(false),
+  downloads: () => { $('#wanted').open = true; $('#queue-toggle').focus(); },
+  explain: (entry) => [labels[entry.state] || entry.state, downloadExplanation(entry)].filter(Boolean).join(' · '),
+  view: () => ({ items: state.items, wanted: state.wanted,
+    current: state.items.find((item) => keyOf(item) === state.currentKey),
+    playing: !$('#audio-player').paused && $('#audio-player').readyState >= 3,
+    playbackStatus: $('#playback-status').textContent }),
+});

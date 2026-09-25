@@ -52,6 +52,30 @@ Describe 'Owned API startup wait' {
     }
 }
 
+Describe 'Normal APP shutdown outcome' {
+    Mock Get-MusicServerSmokeMainWindow { [IntPtr]42 }
+    It 'closes the window without force-killing a healthy APP' {
+        Mock Stop-MusicServerSmokeDesktop { throw 'Must not force a normal close.' }
+        $process = [pscustomobject]@{ Id = 123; HasExited = $false; MainWindowHandle = 1 }
+        $process | Add-Member ScriptMethod Refresh {}
+        Mock Send-MusicServerSmokeClose { return $true }
+        $process | Add-Member ScriptMethod WaitForExit { param($milliseconds) return $true }
+        { Close-MusicServerSmokeDesktop -Process $process } | Should Not Throw
+        Assert-MockCalled Send-MusicServerSmokeClose -Times 1 -Exactly -Scope It -ParameterFilter { $Handle -eq [IntPtr]42 }
+        Assert-MockCalled Stop-MusicServerSmokeDesktop -Times 0 -Exactly -Scope It
+    }
+
+    It 'reports failure after cleanup when normal close is refused' {
+        Mock Stop-MusicServerSmokeDesktop {}
+        $process = [pscustomobject]@{ Id = 123; HasExited = $false; MainWindowHandle = 1 }
+        $process | Add-Member ScriptMethod Refresh {}
+        Mock Send-MusicServerSmokeClose { return $false }
+        { Close-MusicServerSmokeDesktop -Process $process } | Should Throw 'normal window-close'
+        Assert-MockCalled Stop-MusicServerSmokeDesktop -Times 1 -Exactly -Scope It
+    }
+
+}
+
 Describe 'Installed APP shutdown outcome' {
     It 'accepts a taskkill tree error only when the APP has exited' {
         Mock Start-Process { [pscustomobject]@{ ExitCode = 128 } }
@@ -108,19 +132,30 @@ Describe 'MusicServer Tauri desktop shell' {
         $main | Should Match 'app\.dialog\(\)'
         $web | Should Match 'window\.__TAURI__\?\.core'
 
-        # Production navigates the Tauri WebView to the local PowerShell HTTP UI,
-        # which is a remote origin to Tauri's ACL. Keep IPC permission scoped to
-        # only the three owned UI ports instead of granting arbitrary web origins.
+        # The verified runtime origin receives IPC at runtime, including an
+        # OS-selected port when all legacy fixed pairs are occupied.
         $capability = ConvertFrom-Json -InputObject (Get-Content -LiteralPath (Join-Path $ProjectRoot 'src-tauri\capabilities\default.json') -Raw)
-        $remoteUrls = @($capability.remote.urls)
-        $remoteUrls.Count | Should Be 3
-        ($remoteUrls -contains 'http://127.0.0.1:8790') | Should Be $true
-        ($remoteUrls -contains 'http://127.0.0.1:8791') | Should Be $true
-        ($remoteUrls -contains 'http://127.0.0.1:8792') | Should Be $true
+        ($null -eq $capability.PSObject.Properties['remote']) | Should Be $true
+        $main | Should Match 'app.add_capability'
+        $main | Should Match 'verified-runtime-ui'
+        $main | Should Not Match '127\.0\.0\.1:\*'
         (@($capability.permissions) -contains 'dialog:allow-open') | Should Be $true
     }
 
-    It 'minimizes to the tray instead of hiding a window that cannot come back' {
+    It 'keeps unavailable services out of the product UI and supports occupied fixed ports' {
+        $main = Get-Content -LiteralPath (Join-Path $ProjectRoot 'src-tauri\src\main.rs') -Raw
+        $config = ConvertFrom-Json -InputObject (Get-Content -LiteralPath (Join-Path $ProjectRoot 'src-tauri\tauri.conf.json') -Raw)
+        $boot = Get-Content -LiteralPath (Join-Path $ProjectRoot 'web\desktop-start.html') -Raw
+        $config.app.windows[0].url | Should Be 'desktop-start.html'
+        $main | Should Match 'desktop_startup::vacant_pair'
+        $main | Should Match 'MUSICSERVER_RUNTIME_SCOPE'
+        $main | Should Match 'desktop-start.html\?failed'
+        $main | Should Not Match 'document.body.innerHTML'
+        $boot | Should Not Match 'app.js|fetch\('
+        $boot | Should Match 'restart_desktop'
+    }
+
+    It 'keeps the normal taskbar mode and offers tray-only with a recovery entry' {
         $main = Get-Content -LiteralPath (Join-Path $ProjectRoot 'src-tauri\src\main.rs') -Raw
         $cargo = Get-Content -LiteralPath (Join-Path $ProjectRoot 'src-tauri\Cargo.toml') -Raw
 
@@ -129,12 +164,13 @@ Describe 'MusicServer Tauri desktop shell' {
         $main | Should Match 'TrayIconBuilder::with_id\(TRAY_ID\)'
         $main | Should Match 'on_tray_icon_event'
         $main | Should Match 'restore_main_window'
-        # Windows reports a minimize as a Resized event, so the window state has to
-        # be read from the window instead of inferred from the event.
-        $main | Should Match 'tauri::WindowEvent::Resized\(_\)'
-        $main | Should Match 'is_minimized\(\)'
-        # Hiding is allowed only while a tray icon exists to bring the window back.
-        $main | Should Match 'tray_by_id\(TRAY_ID\)'
+        $main | Should Not Match 'window\.hide\(\)'
+        $main | Should Not Match 'should_hide_to_tray'
+        $main | Should Match 'window\.unminimize\(\)'
+        $main | Should Match 'tray_only && window.is_minimized'
+        $controls = Get-Content -LiteralPath (Join-Path $ProjectRoot 'src-tauri\src\desktop_controls.rs') -Raw
+        $controls | Should Match 'tray_by_id\(super::TRAY_ID\).is_none'
+        $controls | Should Match 'window.hide\(\)'
         # Closing the window still exits and stops this APP's owned service tree:
         # minimize-to-tray must not turn the close button into a second hide.
         $main | Should Match 'tauri::WindowEvent::Destroyed'

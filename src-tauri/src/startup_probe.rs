@@ -7,7 +7,11 @@ use std::time::{Duration, Instant};
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 
 pub fn contains(port: u16, path: &str, marker: &str, deadline: Instant) -> bool {
-    probe(port, path, marker, deadline).unwrap_or(false)
+    contains_all(port, path, &[marker], deadline)
+}
+
+pub fn contains_all(port: u16, path: &str, markers: &[&str], deadline: Instant) -> bool {
+    probe(port, path, markers, deadline).unwrap_or(false)
 }
 
 fn remaining(deadline: Instant) -> std::io::Result<Duration> {
@@ -19,7 +23,7 @@ fn remaining(deadline: Instant) -> std::io::Result<Duration> {
     }
 }
 
-fn probe(port: u16, path: &str, marker: &str, deadline: Instant) -> std::io::Result<bool> {
+fn probe(port: u16, path: &str, markers: &[&str], deadline: Instant) -> std::io::Result<bool> {
     let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     let mut stream = TcpStream::connect_timeout(
         &address,
@@ -72,7 +76,11 @@ fn probe(port: u16, path: &str, marker: &str, deadline: Instant) -> std::io::Res
             }
         }
     }
-    Ok(!marker.is_empty() && String::from_utf8_lossy(body).contains(marker))
+    let text = String::from_utf8_lossy(body);
+    Ok(!markers.is_empty()
+        && markers
+            .iter()
+            .all(|marker| !marker.is_empty() && text.contains(marker)))
 }
 
 #[cfg(test)]
@@ -127,6 +135,34 @@ mod tests {
                     port,
                     "/health",
                     "current",
+                    Instant::now() + Duration::from_secs(2)
+                ),
+                expected
+            );
+            handle.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn same_build_from_a_different_app_home_is_not_reused() {
+        for (body, expected) in [
+            ("current scope-a", true),
+            ("current scope-b", false),
+            ("old scope-a", false),
+        ] {
+            let (port, handle) = server(move |mut stream| {
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+            });
+            assert_eq!(
+                contains_all(
+                    port,
+                    "/health",
+                    &["current", "scope-a"],
                     Instant::now() + Duration::from_secs(2)
                 ),
                 expected

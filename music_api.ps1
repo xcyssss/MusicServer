@@ -40,11 +40,14 @@ try { Add-Type -AssemblyName System.Web -ErrorAction SilentlyContinue } catch {}
 # 所有 -Force 导入必须在 Initialize-MusicServerDatabase 之前完成（模块实例重置律）。
 # Legacy migration is an explicit maintenance action owned by daily_recommend.ps1;
 # API startup must never import or rewrite legacy recommendation state.
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.Core.psm1') -Force
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.Providers.psm1') -Force
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.Database.psm1') -Force
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.State.psm1') -Force
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.Http.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Core.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Providers.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Database.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.State.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Http.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Onboarding.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Management.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Search.psm1') -DisableNameChecking -Force
 $startupPhases['module_imports'] = $startupClock.Elapsed.TotalMilliseconds
 
 $Config = New-MusicServerConfig -Root $Root
@@ -73,6 +76,9 @@ $startupPhases['config_state'] = $startupClock.Elapsed.TotalMilliseconds
 Initialize-MusicServerDatabase -DbPath $DbPath -SqliteExe $SqliteExe
 $startupPhases['database_connect'] = $startupClock.Elapsed.TotalMilliseconds
 Initialize-MusicServerSchema
+Initialize-ManagementSchema
+Initialize-OnlineSearchSchema
+Reset-InterruptedManagementJobs -Config $Config
 $startupPhases['schema'] = $startupClock.Elapsed.TotalMilliseconds
 Apply-ConfiguredMusicDir -Config $Config
 Initialize-MusicServerLibrary -Config $Config | Out-Null
@@ -172,6 +178,17 @@ function Get-TrackLocalFile {
                 }
             }
         } catch {}
+    }
+    # Earlier installed builds saved the exact published filename but left the
+    # Navidrome id empty. Resolve that SQLite association, never a title guess.
+    if ($trackId -and [string](Get-OptionalProperty $Track 'status') -eq 'LOCAL') {
+        $files = @(Invoke-MusicServerParamSql -Template 'SELECT file_name FROM recommendation_files WHERE track_id=@id AND seed_source=@source;' -Params @{id=$trackId;source='wanted_worker'})
+        foreach ($row in $files) {
+            $name=[string]$row.file_name
+            if (-not $name -or [IO.Path]::GetFileName($name) -ne $name) { continue }
+            $path=Join-Path $Config.MusicDir $name
+            if ([IO.File]::Exists($path)) { return [IO.Path]::GetFullPath($path) }
+        }
     }
     return $null
 }
@@ -284,7 +301,19 @@ function Get-NavidromeLibraryItem {
 }
 
 function Get-LocalCanonicalTrackMap {
-    try { return Get-CanonicalLocalTrackMapDb } catch { return @{} }
+    $map = Get-CanonicalLocalTrackMapDb
+    # Exact download receipts cover files published before Navidrome indexed them.
+    # Never match by title: different recordings can share a title.
+    $receipts = @(Invoke-MusicServerSqlJson -Query "SELECT f.file_name, c.id FROM recommendation_files f JOIN canonical_tracks c ON c.id=f.track_id WHERE f.seed_source='wanted_worker';")
+    foreach ($receipt in $receipts) {
+        $name = [string]$receipt.file_name
+        if (-not $name -or [IO.Path]::GetFileName($name) -ne $name) { continue }
+        $key = 'file:' + [IO.Path]::GetFullPath((Join-Path $Config.MusicDir $name))
+        if ($map.ContainsKey($key) -and [string]$map[$key].id -ne [string]$receipt.id) {
+            $map[$key] = $null # Ambiguous receipts must not toggle another recording.
+        } else { $map[$key] = $receipt }
+    }
+    return $map
 }
 
 function New-ListeningLibraryItem {
@@ -299,6 +328,11 @@ function New-ListeningLibraryItem {
     $canonical = $null
     $rowId = [string](Get-OptionalProperty $Row 'id')
     if ($rowId -and $CanonicalByLocalId.ContainsKey($rowId)) { $canonical = $CanonicalByLocalId[$rowId] }
+    if (-not $canonical) {
+        foreach ($candidate in @($LocalId, [IO.Path]::GetFullPath($File), ('file:' + [IO.Path]::GetFullPath($File)))) {
+            if ($CanonicalByLocalId.ContainsKey($candidate)) { $canonical = $CanonicalByLocalId[$candidate]; break }
+        }
+    }
     $identity = if ($canonical) { [string]$canonical.id } else { Get-StableLocalIdentity -File $File }
     $title = [string](Get-OptionalProperty $Row 'name' (Get-OptionalProperty $Row 'title'))
     $artist = [string](Get-OptionalProperty $Row 'artist')
@@ -315,7 +349,7 @@ function New-ListeningLibraryItem {
         track_id = $trackId; canonical_track_id = if ($canonical) { [string]$canonical.id } else { '' }
         listening_identity = $identity; local_status = 'LOCAL'
         stream_url = "/api/library/$LocalId/stream"
-        lyrics_url = if ($lrcPath) { "/api/library/$LocalId/lyrics" } else { '' }
+        has_local_lyrics = [bool]$lrcPath; lyrics_url = "/api/library/$LocalId/lyrics"
         cover_url = ''
     }
 }
@@ -409,6 +443,12 @@ function Get-LocalListeningItems {
             [void]$items.Add((New-ListeningLibraryItem -Row $row -File $file -Source 'local' -LocalId $localId -CanonicalByLocalId $canonicalByLocalId))
         }
     }
+    $preferences = Get-TrackPreferenceMapDb
+    foreach ($item in $items) {
+        $id = [string]$item.canonical_track_id
+        $known = $id -and $preferences.ContainsKey($id)
+        $item | Add-Member -NotePropertyName liked -NotePropertyValue $(if ($known) { $preferences[$id] -eq 'LIKE' } else { $null }) -Force
+    }
     return @(Add-ResolvedArtist -Items @($items))
 }
 
@@ -452,13 +492,8 @@ function Read-NeteaseLyrics([string]$Path) {
 function Get-LrcPath {
     param([string]$Path)
     if (-not $Path) { return $null }
-    $candidate = if ([System.IO.Path]::GetExtension($Path) -ieq '.lrc') {
-        $Path
-    } else {
-        [System.IO.Path]::ChangeExtension($Path, '.lrc')
-    }
-    if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
-    return $null
+    if ([IO.Path]::GetExtension($Path) -ieq '.lrc' -and [IO.File]::Exists($Path)) { return $Path }
+    return Find-MusicServerLyricFile -File $Path
 }
 
 function Get-LibraryItemResponse {
@@ -497,7 +532,7 @@ function Get-LibraryItemResponse {
                 name = $name; artist = $artist; album = $artist; duration = 0; track = 0
                 addedto = ''; collectionat = ''; path = $found; file = $found; year = 0
                 stream_url = "/api/library/$LocalId/stream"
-                lyrics_url = if ($lrcPath) { "/api/library/$LocalId/lyrics" } else { '' }
+                has_local_lyrics = [bool]$lrcPath; lyrics_url = "/api/library/$LocalId/lyrics"
             }
             return @(Add-ResolvedArtist -Items @($item))[0]
         }
@@ -516,7 +551,7 @@ function Get-LibraryItemResponse {
                 duration = 0; track = 0; addedto = ''; collectionat = ''
                 path = [string]$playback.file; file = [string]$playback.file
                 stream_url = "/api/library/$LocalId/stream"
-                lyrics_url = if ($lrcPath) { "/api/library/$LocalId/lyrics" } else { '' }
+                has_local_lyrics = [bool]$lrcPath; lyrics_url = "/api/library/$LocalId/lyrics"
             }
         }
     }
@@ -551,7 +586,10 @@ function Remove-LibraryTrack {
     } catch {}
 
     # Delete the audio file and its sidecar .lrc.
-    try { Remove-Item -LiteralPath $fullFile -Force -ErrorAction Stop } catch { }
+    try { Remove-Item -LiteralPath $fullFile -Force -ErrorAction Stop } catch {
+        Write-ApiLog 'Library deletion failed: audio file could not be removed.'
+        return @{ Error = 'DELETE_FAILED'; Message = '文件删除失败，可能正在被使用，请暂停播放后重试。'; File = $fullFile; Deleted = $false; TrackId = '' }
+    }
     $lrcFile = [System.IO.Path]::ChangeExtension($fullFile, '.lrc')
     if (Test-Path -LiteralPath $lrcFile) { Remove-Item -LiteralPath $lrcFile -Force -ErrorAction SilentlyContinue }
 
@@ -711,8 +749,9 @@ function Resolve-RouteLikeTransaction {
 }
 
 $script:requestCount = 0
-Import-Module (Join-Path $PSScriptRoot 'MusicServer.Identity.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Identity.psm1') -DisableNameChecking -Force
 $script:BuildMarker = Get-MusicServerBuildIdentity -Root $PSScriptRoot
+$script:RuntimeScope = [Environment]::GetEnvironmentVariable('MUSICSERVER_RUNTIME_SCOPE', 'Process')
 $startupPhases['build_identity'] = $startupClock.Elapsed.TotalMilliseconds
 
 $listener = [System.Net.HttpListener]::new()
@@ -786,6 +825,17 @@ while ($true) {
             $sessionId = Get-ListeningSessionIdFromBody -Body $bodyText
             $body = Get-ListeningPlayResponse -LocalId $trackId -SessionId $sessionId
             Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 200 })
+        }
+        elseif ($method -eq 'POST' -and $path -eq '/api/search') {
+            $payload = if ($bodyText) { ConvertFrom-Json -InputObject $bodyText } else { @{} }
+            $result = Start-OnlineMusicSearch -Config $Config -Query (Get-OptionalProperty $payload 'query' $null) -Source (Get-OptionalProperty $payload 'source' 'netease')
+            Send-Json -Context ([pscustomobject]@{Response=$Context.Response;Body=$result.Body;StatusCode=$result.Status})
+        }
+        elseif ($method -eq 'GET' -and $path -match '^/api/search/([a-f0-9]{32})$') {
+            $result = Get-OnlineMusicSearch -SearchId $Matches[1]
+            $status = if ($result) { 200 } else { 404 }
+            $body = if ($result) { $result } else { @{error='SEARCH_NOT_FOUND'} }
+            Send-Json -Context ([pscustomobject]@{Response=$Context.Response;Body=$body;StatusCode=$status})
         }
         elseif ($method -eq 'GET' -and $path -eq '/api/library') {
             $allItems = @(Get-LocalListeningItems)
@@ -1086,6 +1136,57 @@ while ($true) {
             }
             Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 200 })
         }
+        elseif ($path -eq '/api/onboarding' -and $method -in @('GET','POST','PUT')) {
+            if ($method -eq 'POST') {
+                if (Initialize-StarterRecommendationsDb) {
+                    $script:TodayCacheItems = $null
+                    Write-ApiLog '[onboarding] starter recommendations prepared; downloads=0'
+                }
+            } elseif ($method -eq 'PUT') {
+                $data = if ($bodyText) { ConvertFrom-Json -InputObject $bodyText } else { [pscustomobject]@{} }
+                $values = ConvertTo-OnboardingUpdate -Data $data
+                Set-OnboardingStateDb @values
+                Write-ApiLog ("[onboarding] preferences updated phase={0}" -f $data.phase)
+            }
+            $freshTools=New-MusicServerConfig -Root $Config.Root -AppHome $Config.AppHome
+            foreach ($tool in @('YtDlp','FFmpeg','FFprobe')) { $Config.$tool=$freshTools.$tool }
+            $body = Get-OnboardingStateDb -Config $Config
+            Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 200 })
+        }
+        elseif ($path -eq '/api/maintenance' -and $method -in @('GET','POST')) {
+            if ($method -eq 'POST') {
+                $data = if ($bodyText) { ConvertFrom-Json -InputObject $bodyText } else { $null }
+                if (-not $data -or $data.operation -notin @('components','diagnostics','backup','health')) {
+                    Send-Json -Context ([pscustomobject]@{Response=$Context.Response;Body=@{error='INVALID_OPERATION'};StatusCode=400})
+                } else {
+                    $jobId=Start-ManagementJob -Config $Config -Operation $data.operation
+                    Send-Json -Context ([pscustomobject]@{Response=$Context.Response;Body=@{id=$jobId};StatusCode=202})
+                }
+            } else {
+                Send-Json -Context ([pscustomobject]@{Response=$Context.Response;Body=(Get-ManagementStatus -Config $Config);StatusCode=200})
+            }
+        }
+        elseif ($method -eq 'GET' -and $path -eq '/api/settings/desktop') {
+            $saved = $null
+            try { $saved = Get-AppSettingDb -Key 'desktop_preferences' | ConvertFrom-Json } catch {}
+            $body = @{ tray_only = ($saved -and $saved.tray_only -is [bool] -and $saved.tray_only); taskbar_lyrics = ($saved -and $saved.taskbar_lyrics -is [bool] -and $saved.taskbar_lyrics) }
+            $width = Get-OptionalProperty $saved 'taskbar_width' 420
+            $body.taskbar_width = if (($width -is [int] -or $width -is [long]) -and $width -ge 360 -and $width -le 800) { $width } else { 420 }
+            Send-Json -Context ([pscustomobject]@{ Response=$Context.Response; Body=$body; StatusCode=200 })
+        }
+        elseif ($method -eq 'PUT' -and $path -eq '/api/settings/desktop') {
+            $preferences = $null
+            try { $preferences = ConvertFrom-Json -InputObject $bodyText } catch {}
+            $width = Get-OptionalProperty $preferences 'taskbar_width' 420
+            if (($width -isnot [int] -and $width -isnot [long]) -or $width -lt 360 -or $width -gt 800 -or -not $preferences -or $preferences.tray_only -isnot [bool] -or $preferences.taskbar_lyrics -isnot [bool]) {
+                Send-Json -Context ([pscustomobject]@{ Response=$Context.Response; Body=@{error='INVALID_DESKTOP_PREFERENCES';message='Expected boolean preferences and an integer taskbar_width between 360 and 800.'}; StatusCode=400 })
+            } else {
+                $body = @{ tray_only=[bool]$preferences.tray_only; taskbar_lyrics=[bool]$preferences.taskbar_lyrics; taskbar_width=$width }
+                Set-AppSettingDb -Key 'desktop_preferences' -Value ($body | ConvertTo-Json -Compress)
+                Write-ApiLog ('Desktop preferences updated: tray_only={0}, taskbar_lyrics={1}' -f $body.tray_only,$body.taskbar_lyrics)
+                Send-Json -Context ([pscustomobject]@{ Response=$Context.Response; Body=$body; StatusCode=200 })
+            }
+        }
         elseif ($method -eq 'GET' -and $path -eq '/api/settings/display-mode') {
             # Traditional ('raw') is the default, so nothing has to be stored for
             # a fresh install. 'canonical' is the Beta mode that shows the
@@ -1120,7 +1221,7 @@ while ($true) {
         elseif ($method -eq 'GET' -and $path -eq '/health') {
             $dbOk = $false
             try { [void](Get-DbStats); $dbOk = $true } catch {}
-            $body = @{ status = if ($dbOk) { 'ok' } else { 'degraded' }; db = $dbOk; build = $script:BuildMarker; uptime_requests = $script:requestCount }
+            $body = @{ status = if ($dbOk) { 'ok' } else { 'degraded' }; db = $dbOk; build = $script:BuildMarker; runtime_scope = $script:RuntimeScope; uptime_requests = $script:requestCount }
             $status = if ($dbOk) { 200 } else { 503 }
             Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = $status })
         }
