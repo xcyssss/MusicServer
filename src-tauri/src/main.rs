@@ -938,7 +938,17 @@ fn main() {
         .on_window_event(|window, event| {
             match event {
                 // 主窗口关闭时，停掉本应用拉起的 launcher（其 finally 会停掉 API）。
-                tauri::WindowEvent::CloseRequested { .. } if window.label() == MAIN_WINDOW => {
+                tauri::WindowEvent::CloseRequested { api, .. } if window.label() == MAIN_WINDOW => {
+                    // Exit through the application lifecycle before tearing down WebView2.
+                    // Default close destroys the window while navigation can still be pending.
+                    api.prevent_close();
+                    desktop_startup::record(
+                        &resolve_app_home(),
+                        "closing",
+                        "Main window requested normal exit",
+                        None,
+                        BUILD_MARKER,
+                    );
                     #[cfg(windows)]
                     taskbar_host::detach();
                     window.app_handle().exit(0);
@@ -984,7 +994,21 @@ fn main() {
             #[cfg(windows)]
             taskbar_host::detach();
             let state: tauri::State<AppState> = app.state();
+            desktop_startup::record(
+                &resolve_app_home(),
+                "stopping",
+                "Stopping owned services on APP exit",
+                None,
+                BUILD_MARKER,
+            );
             shutdown_desktop(&state);
+            desktop_startup::record(
+                &resolve_app_home(),
+                "stopped",
+                "Owned services stopped on APP exit",
+                None,
+                BUILD_MARKER,
+            );
         }
     });
 }

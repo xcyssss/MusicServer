@@ -51,6 +51,10 @@ function Close-MusicServerSmokeDesktop {
     # Force termination is failure cleanup only, so a broken APP exit handler
     # cannot pass this normal window-close regression.
     if ($handle -eq [IntPtr]::Zero -or -not (Send-MusicServerSmokeClose -Handle $handle) -or -not $Process.WaitForExit(40000)) {
+        if ($env:MUSICSERVER_APP_HOME) {
+            $report = Join-Path $env:MUSICSERVER_APP_HOME 'logs\desktop-startup.json'
+            if (Test-Path -LiteralPath $report) { Write-Warning ('Last APP lifecycle report: ' + (Get-Content -LiteralPath $report -Raw)) }
+        }
         Stop-MusicServerSmokeDesktop -Process $Process
         throw 'APP did not exit after a normal window-close request.'
     }
