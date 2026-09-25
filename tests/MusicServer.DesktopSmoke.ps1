@@ -9,6 +9,7 @@ using System.Runtime.InteropServices;
 public static class MusicServerSmokeWindow {
     private delegate bool EnumProc(IntPtr h, IntPtr p);
     [DllImport("user32.dll")] private static extern bool EnumWindows(EnumProc callback, IntPtr p);
+    [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr h);
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetWindowText(IntPtr h, StringBuilder text, int size);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetClassName(IntPtr h, StringBuilder text, int size);
@@ -17,7 +18,7 @@ public static class MusicServerSmokeWindow {
         IntPtr found=IntPtr.Zero;
         EnumWindows((h,p)=>{
             uint owner; GetWindowThreadProcessId(h,out owner);
-            if(owner != pid) return true;
+            if(owner != pid || !IsWindowVisible(h)) return true;
             var title=new StringBuilder(256); var kind=new StringBuilder(256);
             GetWindowText(h,title,256); GetClassName(h,kind,256);
             if(title.ToString()=="MusicServer" && kind.ToString()=="Tauri Window") { found=h; return false; }
@@ -51,6 +52,10 @@ function Close-MusicServerSmokeDesktop {
     # Force termination is failure cleanup only, so a broken APP exit handler
     # cannot pass this normal window-close regression.
     if ($handle -eq [IntPtr]::Zero -or -not (Send-MusicServerSmokeClose -Handle $handle) -or -not $Process.WaitForExit(40000)) {
+        if ($env:MUSICSERVER_APP_HOME) {
+            $report = Join-Path $env:MUSICSERVER_APP_HOME 'logs\desktop-startup.json'
+            if (Test-Path -LiteralPath $report) { Write-Warning ('Last APP lifecycle report: ' + (Get-Content -LiteralPath $report -Raw)) }
+        }
         Stop-MusicServerSmokeDesktop -Process $Process
         throw 'APP did not exit after a normal window-close request.'
     }
