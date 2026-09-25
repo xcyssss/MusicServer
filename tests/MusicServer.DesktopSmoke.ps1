@@ -9,6 +9,7 @@ using System.Runtime.InteropServices;
 public static class MusicServerSmokeWindow {
     private delegate bool EnumProc(IntPtr h, IntPtr p);
     [DllImport("user32.dll")] private static extern bool EnumWindows(EnumProc callback, IntPtr p);
+    [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr h);
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetWindowText(IntPtr h, StringBuilder text, int size);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] private static extern int GetClassName(IntPtr h, StringBuilder text, int size);
@@ -17,7 +18,7 @@ public static class MusicServerSmokeWindow {
         IntPtr found=IntPtr.Zero;
         EnumWindows((h,p)=>{
             uint owner; GetWindowThreadProcessId(h,out owner);
-            if(owner != pid) return true;
+            if(owner != pid || !IsWindowVisible(h)) return true;
             var title=new StringBuilder(256); var kind=new StringBuilder(256);
             GetWindowText(h,title,256); GetClassName(h,kind,256);
             if(title.ToString()=="MusicServer" && kind.ToString()=="Tauri Window") { found=h; return false; }

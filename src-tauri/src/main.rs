@@ -987,6 +987,13 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
     app.run(|app, event| {
+        // Do not expose a close button until the event loop owns window events.
+        // Backend setup still runs independently; users can close during it.
+        if matches!(event, tauri::RunEvent::Ready) {
+            if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+                let _ = window.show();
+            }
+        }
         // A close during setup can precede delivery of the window's Destroyed
         // event. Tauri exits the process without dropping state, so reclaim our
         // service tree at the application exit boundary as well.
