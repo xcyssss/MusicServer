@@ -1878,7 +1878,7 @@ dependencies = [
 
 [[package]]
 name = "musicserver-desktop"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "serde",
  "serde_json",
