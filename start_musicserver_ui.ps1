@@ -954,6 +954,15 @@ function Send-TrackLyrics {
     param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)][string]$TrackId)
 
     $trackUrl = $ApiPrefix.TrimEnd('/') + '/api/tracks/' + [System.Uri]::EscapeDataString($TrackId)
+    # Daily generation already checked this exact provider recording; reuse its
+    # SQLite evidence before making another remote request on every playback.
+    try {
+        $cached = Invoke-RestMethod -Uri ($trackUrl + '/lyrics') -TimeoutSec 3
+        if ($cached.available -and $cached.text) {
+            Send-JsonRaw -Context $Context -Json ($cached | ConvertTo-Json -Depth 8 -Compress)
+            return
+        }
+    } catch {}
     $details = $null
     try {
         $details = Invoke-RestMethod -Uri $trackUrl -TimeoutSec 10

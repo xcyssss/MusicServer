@@ -854,6 +854,31 @@ function Split-LocalArtistNames {
         Where-Object { $_.Length -ge 2 })
 }
 
+function Get-RecommendationQualityTier {
+    param([psobject]$Candidate)
+    $title = [string]$Candidate.Title; $album = [string](Get-OptionalProperty $Candidate 'Album' '')
+    # Match recording annotations, not titles such as Live Forever / 生如夏花.
+    $live = $title -match '(?i)[(（\[]\s*(?:live\b|现场|演唱会)|[-–—]\s*live(?:\s|$)|现场版|现场录音|演唱会版'
+    $live = $live -or $album -match '(?i)^live$|[(（\[]\s*live\b|\blive\s+(?:at|in|from|on)\b|演唱会|现场录音|现场专辑'
+    $lyrics = [string](Get-OptionalProperty $Candidate 'LyricQuality' 'UNKNOWN')
+    $tier = switch ($lyrics) { 'READY' {0} 'PLAIN' {1} 'MISSING' {3} default {2} }
+    return [pscustomobject]@{ Live=[bool]$live; Tier=($tier + $(if ($live) {4} else {0})) }
+}
+
+function Select-QualityRemoteRecommendations {
+    param([AllowEmptyCollection()][object[]]$Candidates=@(), [int]$Count=20)
+    if ($Count -le 0) { return @() }
+    $ordered = @($Candidates | Sort-Object @{Expression={(Get-RecommendationQualityTier $_).Tier}}, @{Expression={$_.Score};Descending=$true})
+    $liveCount=0; $liveLimit=[int][Math]::Floor($Count * 0.1)
+    $pool=@(foreach ($item in $ordered) {
+        if ((Get-RecommendationQualityTier $item).Live) {
+            if ($liveCount -ge $liveLimit) { continue }; $liveCount++
+        }
+        $item
+    })
+    return @(Select-DiverseRemoteRecommendations -Candidates $pool -Count $Count)
+}
+
 function Select-DiverseRemoteRecommendations {
     # Input is already taste-ranked. Avoid adjacent shared singers without losing
     # the ranking or manufacturing candidates when the pool is small.

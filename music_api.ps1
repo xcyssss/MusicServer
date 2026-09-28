@@ -916,7 +916,17 @@ while ($true) {
                 Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 404 })
             } else {
                 $localFile = Get-TrackLocalFile -Track $track -TrackId $trackId
-                if (-not $localFile) {
+                $lyricEvidence=$null
+                foreach ($identifier in @($track.identifiers)) {
+                    if ($identifier.type -eq 'netease') {
+                        $lyricEvidence=Get-RecommendationLyricEvidence -Config $Config -SongId ([string]$identifier.value) -CacheOnly
+                        if ($lyricEvidence.status -in @('READY','PLAIN')) { break }
+                    }
+                }
+                if (-not $localFile -and $lyricEvidence -and $lyricEvidence.status -in @('READY','PLAIN')) {
+                    $body=@{track_id=$trackId;available=$true;format='lrc';text=$lyricEvidence.text;lyrics=$lyricEvidence.text;source='netease-cache'}
+                    Send-Json -Context ([pscustomobject]@{Response=$Context.Response;Body=$body;StatusCode=200})
+                } elseif (-not $localFile) {
                     $body = @{ error = 'LYRICS_NOT_FOUND'; track_id = $trackId; message = 'No local file linked to this track.' }
                     Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 404 })
                 } else {

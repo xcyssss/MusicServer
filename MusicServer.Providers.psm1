@@ -915,6 +915,44 @@ function Select-NeteaseArtistForTitle {
     return $best
 }
 
+function Get-RecommendationLyricEvidence {
+    param([Parameter(Mandatory)][psobject]$Config, [Parameter(Mandatory)][string]$SongId, [switch]$CacheOnly)
+    $unknown=[pscustomobject]@{status='UNKNOWN';text='';expires=''}
+    if ($SongId -notmatch '^\d+$') { return $unknown }
+    $key="recommendation_lyrics:netease:$SongId"
+    try {
+        Connect-MusicServerDatabase -DbPath (Join-Path $Config.StateDir 'musicserver.db') -SqliteExe $Config.Sqlite
+        $cached=Get-AppSettingDb -Key $key | ConvertFrom-Json
+        if ($cached -and ([DateTimeOffset]$cached.expires).UtcDateTime -gt [DateTime]::UtcNow) { return $cached }
+    } catch {}
+    if ($CacheOnly -or -not (Test-ProviderRequestAvailable -Config $Config -Provider 'netease') -or -not (Claim-ProviderRequest -Config $Config -Provider 'netease')) { return $unknown }
+    $status='UNKNOWN'; $text=''; $expiry=[DateTime]::UtcNow.AddMinutes(10)
+    try {
+        $response=Invoke-RestMethod -Uri "https://music.163.com/api/song/lyric?id=$SongId&lv=1&kv=1&tv=-1" -Headers @{'Referer'='https://music.163.com/';'User-Agent'='Mozilla/5.0'} -TimeoutSec 3
+        $code=[int](Get-OptionalProperty $response 'code' 200)
+        if ($code -ne 200) {
+            Record-ProviderFailure -Config $Config -Provider 'netease' -HttpStatus $code -ErrorType 'LYRIC_QUALITY_FAILED' -Message 'Lyric quality provider rejected request.' | Out-Null
+        } else {
+            Record-ProviderSuccess -Config $Config -Provider 'netease'
+            $raw=[string](Get-OptionalProperty (Get-OptionalProperty $response 'lrc' $null) 'lyric' '')
+            $lines=@($raw -split '\r?\n' | Where-Object { $_ -match '[\p{L}]' -and $_ -notmatch '^\s*\[(?:ar|ti|al|by|offset|re|ve):|纯音乐|请欣赏|暂无歌词|歌词暂无|instrumental|作词|作曲|编曲|制作人' })
+            $timed=@($lines | Where-Object { $_ -match '^\s*\[\d{1,3}:\d{2}(?:[.:]\d+)?\].*\p{L}' })
+            $status='MISSING'; $expiry=[DateTime]::UtcNow.AddDays(1)
+            if ($raw.Length -le 150000 -and $raw -notmatch '(?i)<html|<!doctype' -and $lines.Count -ge 2) {
+                $status=if ($timed.Count -ge 2) {'READY'} else {'PLAIN'}
+                $text=$raw; $expiry=[DateTime]::UtcNow.AddDays(7)
+            }
+        }
+    } catch {
+        $http=0; $response=Get-OptionalProperty $_.Exception 'Response' $null
+        if ($response) { $http=[int](Get-OptionalProperty $response 'StatusCode' 0) }
+        Record-ProviderFailure -Config $Config -Provider 'netease' -HttpStatus $http -ErrorType 'LYRIC_QUALITY_FAILED' -Message 'Lyric quality lookup temporarily unavailable.' | Out-Null
+    }
+    $result=[pscustomobject]@{status=$status;text=$text;expires=$expiry.ToString('o')}
+    Set-AppSettingDb -Key $key -Value ($result | ConvertTo-Json -Compress)
+    return $result
+}
+
 function Resolve-MusicServerLocalLyrics {
     param([Parameter(Mandatory)][psobject]$Config, [Parameter(Mandatory)][string]$File)
     $missing = [pscustomobject]@{ available=$false; text=''; quality='MISSING'; source='none'; message='尚未找到可靠歌词。' }

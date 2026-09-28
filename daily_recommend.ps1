@@ -509,7 +509,21 @@ if ($bucketsTotal -gt 0) {
 }
 
 $ranked = @($candidateMap.Values | Sort-Object @{Expression = {$_.Score}; Descending = $true}, @{Expression = { Get-Random }})
-$recos = @(Select-DiverseRemoteRecommendations -Candidates $ranked -Count ([Math]::Max(0, $Count - @($localPicks).Count)))
+# Probe only a diverse shortlist, with both request-count and wall-clock limits.
+# DryRun stays read-only; unavailable requests are UNKNOWN, never "no lyrics".
+$shortlist=@(Select-QualityRemoteRecommendations -Candidates $ranked -Count ([Math]::Min(60, [Math]::Max(20,$Count * 3))))
+foreach ($candidate in $ranked) { $candidate | Add-Member -NotePropertyName LyricQuality -NotePropertyValue 'UNKNOWN' -Force }
+$qualityClock=[Diagnostics.Stopwatch]::StartNew(); $probes=0
+foreach ($candidate in $shortlist) {
+    $cacheOnly=$DryRun -or $probes -ge 40 -or $qualityClock.Elapsed.TotalSeconds -ge 45
+    $evidence=Get-RecommendationLyricEvidence -Config $Config -SongId $candidate.NeteaseId -CacheOnly:$cacheOnly
+    if (-not $cacheOnly) { $probes++ }
+    $candidate | Add-Member -NotePropertyName LyricQuality -NotePropertyValue $evidence.status -Force
+}
+$recos = @(Select-QualityRemoteRecommendations -Candidates $ranked -Count ([Math]::Max(0, $Count - @($localPicks).Count)))
+$qualitySummary=@($recos | Group-Object LyricQuality | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join ' '
+$liveSelected=@($recos | Where-Object { (Get-RecommendationQualityTier $_).Live }).Count
+Write-MusicServerLog -Path (Join-Path $Config.LogDir 'musicserver-recommendation.log') -Message "[quality] live=$liveSelected lyric_checks=$probes elapsed_ms=$($qualityClock.ElapsedMilliseconds) $qualitySummary"
 Write-MusicServerLog -Path (Join-Path $Config.LogDir 'musicserver-recommendation.log') -Message "[selection] candidates=$($ranked.Count) selected=$($recos.Count) local=$(@($localPicks).Count) target=$Count diversity=credited_artist dislike_penalized=$songsPenalized"
 
 $recommendations = @(); $tracks = @(); $rank = 0

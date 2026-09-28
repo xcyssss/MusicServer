@@ -203,6 +203,19 @@ Describe 'R: runtime hardening of the real HTTP API (concurrent processes, real 
         Remove-AllState
     }
 
+    It 'serves checked daily lyrics offline before the song is downloaded' {
+        $track=New-CanonicalTrack -Title 'Cached studio' -Artist 'Singer' -Status 'REMOTE' -Identifiers @([pscustomobject]@{type='netease';value='123456'})
+        [void](Save-CanonicalTrackDb -Track $track)
+        $lyrics="[00:01.00]First line`n[00:03.00]Second line"
+        Set-AppSettingDb -Key 'recommendation_lyrics:netease:123456' -Value (@{status='READY';text=$lyrics;expires=[DateTime]::UtcNow.AddDays(1).ToString('o')} | ConvertTo-Json -Compress)
+        $api=Start-MusicApi -Root $script:T.Root
+        $result=Invoke-Http -BaseUrl $api.BaseUrl -Method 'GET' -Path "/api/tracks/$($track.id)/lyrics"
+        if ($result.Status -ne 200) { throw ("Lyric response: " + $result.Text + " cached: " + (Get-AppSettingDb -Key 'recommendation_lyrics:netease:123456')) }
+        $result.Status | Should Be 200
+        $result.Json.text | Should Be $lyrics
+        $result.Json.source | Should Be 'netease-cache'
+    }
+
     It 'restores a downloaded local file to its canonical favorite and honors unlike' {
         $tid = New-SeedTrack
         [void][IO.Directory]::CreateDirectory($script:Cfg.MusicDir)
