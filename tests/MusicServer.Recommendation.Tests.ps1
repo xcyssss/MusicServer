@@ -1025,3 +1025,69 @@ Describe 'Disliked tracks and release year' {
         $row.NeteaseId | Should Be '4242'
     }
 }
+
+Describe 'Daily recording and lyric quality' {
+    It 'recognizes version annotations without treating Live Forever as a concert' {
+        (Get-RecommendationQualityTier ([pscustomobject]@{Title='Live Forever';Album='Definitely Maybe'})).Live | Should Be $false
+        (Get-RecommendationQualityTier ([pscustomobject]@{Title='Alive';Album='Live Through This'})).Live | Should Be $false
+        (Get-RecommendationQualityTier ([pscustomobject]@{Title='晴天 (Live)';Album=''})).Live | Should Be $true
+        (Get-RecommendationQualityTier ([pscustomobject]@{Title='晴天';Album='Live at Wembley'})).Live | Should Be $true
+    }
+    It 'prioritizes confirmed studio lyrics and caps live recordings even with huge similarity scores' {
+        $pool=@(
+            [pscustomobject]@{Title='Studio';Artist='A';Score=1;LyricQuality='READY'},
+            [pscustomobject]@{Title='Unknown';Artist='B';Score=1;LyricQuality='UNKNOWN'},
+            [pscustomobject]@{Title='Missing';Artist='C';Score=20;LyricQuality='MISSING'}
+        )
+        foreach($i in 1..20){$pool += [pscustomobject]@{Title="Song $i (Live)";Artist="Artist $i";Score=100;LyricQuality='READY'}}
+        $result=@(Select-QualityRemoteRecommendations -Candidates $pool -Count 20)
+        $result[0].Title | Should Be 'Studio'
+        $result[1].Title | Should Be 'Unknown'
+        @($result | Where-Object { (Get-RecommendationQualityTier $_).Live }).Count | Should Be 2
+        $result.Count | Should Be 5
+    }
+}
+
+Import-Module (Join-Path $ProjectRoot 'MusicServer.Providers.psm1') -Force -DisableNameChecking
+Describe 'Bounded daily lyric evidence' {
+    BeforeEach {
+        Mock Connect-MusicServerDatabase {} -ModuleName MusicServer.Providers
+        Mock Get-AppSettingDb { return '' } -ModuleName MusicServer.Providers
+        Mock Set-AppSettingDb {} -ModuleName MusicServer.Providers
+        Mock Test-ProviderRequestAvailable { return $true } -ModuleName MusicServer.Providers
+        Mock Claim-ProviderRequest { return $true } -ModuleName MusicServer.Providers
+        Mock Record-ProviderSuccess {} -ModuleName MusicServer.Providers
+        Mock Record-ProviderFailure {} -ModuleName MusicServer.Providers
+    }
+    It 'requires real lyric lines and recognizes instrumental placeholders' {
+        Mock Invoke-RestMethod { [pscustomobject]@{code=200;lrc=[pscustomobject]@{lyric="[00:01.00]第一句`n[00:05.00]第二句"}} } -ModuleName MusicServer.Providers
+        (Get-RecommendationLyricEvidence -Config ([pscustomobject]@{StateDir='fixture';Sqlite='sqlite3'}) -SongId '123').status | Should Be 'READY'
+        Mock Invoke-RestMethod { [pscustomobject]@{code=200;lrc=[pscustomobject]@{lyric='[00:00.00]纯音乐，请欣赏'}} } -ModuleName MusicServer.Providers
+        (Get-RecommendationLyricEvidence -Config ([pscustomobject]@{StateDir='fixture';Sqlite='sqlite3'}) -SongId '124').status | Should Be 'MISSING'
+    }
+    It 'keeps network failures unknown and stops probing on an open circuit' {
+        Mock Invoke-RestMethod { throw 'fixture network timeout' } -ModuleName MusicServer.Providers
+        (Get-RecommendationLyricEvidence -Config ([pscustomobject]@{StateDir='fixture';Sqlite='sqlite3'}) -SongId '123').status | Should Be 'UNKNOWN'
+        Assert-MockCalled Record-ProviderFailure -ModuleName MusicServer.Providers -Times 1 -Exactly -Scope It
+        Mock Test-ProviderRequestAvailable { return $false } -ModuleName MusicServer.Providers
+        (Get-RecommendationLyricEvidence -Config ([pscustomobject]@{StateDir='fixture';Sqlite='sqlite3'}) -SongId '124').status | Should Be 'UNKNOWN'
+        Assert-MockCalled Invoke-RestMethod -ModuleName MusicServer.Providers -Times 1 -Exactly -Scope It
+    }
+    It 'reuses fresh exact-recording evidence without a provider request' {
+        Mock Get-AppSettingDb { @{status='READY';text="[00:01]one`n[00:02]two";expires=[DateTime]::UtcNow.AddDays(1).ToString('o')} | ConvertTo-Json -Compress } -ModuleName MusicServer.Providers
+        Mock Invoke-RestMethod { throw 'Unexpected network' } -ModuleName MusicServer.Providers
+        (Get-RecommendationLyricEvidence -Config ([pscustomobject]@{StateDir='fixture';Sqlite='sqlite3'}) -SongId '123').status | Should Be 'READY'
+        Assert-MockCalled Invoke-RestMethod -ModuleName MusicServer.Providers -Times 0 -Exactly -Scope It
+    }
+    It 'charges real rate limits to the shared circuit without calling them missing lyrics' {
+        Mock Invoke-RestMethod { [pscustomobject]@{code=429} } -ModuleName MusicServer.Providers
+        (Get-RecommendationLyricEvidence -Config ([pscustomobject]@{StateDir='fixture';Sqlite='sqlite3'}) -SongId '123').status | Should Be 'UNKNOWN'
+        Assert-MockCalled Record-ProviderFailure -ModuleName MusicServer.Providers -Times 1 -Exactly -Scope It -ParameterFilter { $HttpStatus -eq 429 }
+    }
+    It 'cache-only reads never contact the provider or write state' {
+        Mock Invoke-RestMethod { throw 'Unexpected network' } -ModuleName MusicServer.Providers
+        (Get-RecommendationLyricEvidence -Config ([pscustomobject]@{StateDir='fixture';Sqlite='sqlite3'}) -SongId '123' -CacheOnly).status | Should Be 'UNKNOWN'
+        Assert-MockCalled Invoke-RestMethod -ModuleName MusicServer.Providers -Times 0 -Exactly -Scope It
+        Assert-MockCalled Set-AppSettingDb -ModuleName MusicServer.Providers -Times 0 -Exactly -Scope It
+    }
+}
