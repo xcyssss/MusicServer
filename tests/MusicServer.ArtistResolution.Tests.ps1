@@ -59,6 +59,16 @@ Describe 'MusicServer artist resolution' {
 
     Context 'singer declared in the file name' {
 
+        It 'reads an explicit performer label before a quoted song, ignoring unknown placeholders' {
+            Get-TitleDeclaredArtist -Title '【SNH48】《春夏秋冬》舞台（跨年特别公演2023_12_31） - Unknown Artist' | Should Be 'SNH48'
+            Get-TitleDeclaredArtist -Title '【周杰伦】《晴天》' | Should Be '周杰伦'
+            Get-TitleDeclaredArtist -Title '塞壬唱片-MSR《酸橙色信笺》' | Should Be '塞壬唱片-MSR'
+            Get-TitleDeclaredArtist -Title '【4K】【SNH48】《春夏秋冬》舞台' | Should Be 'SNH48'
+            Get-TitleDeclaredArtist -Title '【Hi-Res无损音质】《晴天》' | Should Be ''
+            Get-TitleDeclaredArtist -Title '【附歌词中字】【FULL】《晴天》 - Unknown Artist' | Should Be ''
+            Get-TitleDeclaredArtist -Title 'Song - [Unknown Artist]' | Should Be ''
+        }
+
         It 'reads the artist an uploader wrote in front of the song name' {
             Get-TitleDeclaredArtist -Title 'BEYOND《冷雨夜》百万豪装录音棚大声听' | Should Be 'BEYOND'
             Get-TitleDeclaredArtist -Title 'EXO-K《mama》百万豪装录音棚大声听' | Should Be 'EXO-K'
@@ -171,6 +181,8 @@ Describe 'MusicServer artist resolution' {
             $prefixes = @(Get-SharedTitlePrefixes -Titles $titles)
             ($prefixes -contains '许嵩') | Should Be $false
             Get-TitleDeclaredArtist -Title '许嵩《洛阳纸》' -KnownPrefixes $prefixes | Should Be '许嵩'
+            $labels = @(Get-SharedTitlePrefixes -Titles @('【SNH48】《春夏秋冬》', '【SNH48】《夜蝶》', '【SNH48】《逐梦》', '【SNH48】《梦想岛》'))
+            Get-TitleDeclaredArtist -Title '【SNH48】《春夏秋冬》' -KnownPrefixes $labels | Should Be 'SNH48'
         }
 
         It 'strips the branding and then reads the artist that follows it' {
@@ -193,6 +205,12 @@ Describe 'MusicServer artist resolution' {
 
     Context 'online match precision' {
 
+        It 'never uses unknown placeholders as recording evidence' {
+            Test-FileVouchesForArtist -Artist 'Unknown Artist' -Title '【SNH48】《春夏秋冬》 - Unknown Artist' | Should Be $false
+            Test-FileVouchesForArtist -Artist '[Unknown Artist]' -Title 'Song - [Unknown Artist]' | Should Be $false
+            Test-FileVouchesForArtist -Artist '未知歌手' -Title 'Song - 未知歌手' | Should Be $false
+        }
+
         It 'accepts a candidate the file name confirms' {
             Test-FileVouchesForArtist -Artist 'Beyond' -Title 'BEYOND《冷雨夜》百万豪装录音棚大声听' | Should Be $true
             Test-FileVouchesForArtist -Artist '许嵩' -Title '“回忆陪我躲在角落没露面”《梧桐灯》许嵩 【4K60fps黑胶】' | Should Be $true
@@ -214,6 +232,15 @@ Describe 'MusicServer artist resolution' {
     }
 
     Context 'display decision' {
+
+        It 'heals cached unknown matches without retaining the wrong album and year' {
+            $row = [pscustomobject]@{ artist='Unknown Artist'; album='CSLMAGE001'; source='netease'; release_year=2015 }
+            $got = Resolve-DisplayArtist -Title '【SNH48】《春夏秋冬》舞台 - Unknown Artist' -CachedRow $row
+            $got.artist | Should Be 'SNH48'
+            $got.album | Should Be ''
+            $got.year | Should Be 0
+            $got.source | Should Be 'title'
+        }
 
         It 'reuses a cached online match together with its album' {
             $row = [pscustomobject]@{ artist = '许嵩'; album = '自定义'; source = 'netease' }

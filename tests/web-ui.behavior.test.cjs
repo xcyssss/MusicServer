@@ -425,6 +425,9 @@ test('artist metadata is passed through unchanged for the track row', async () =
 // carries the name, so the title must not repeat it.
 const displayOfSinger = (a, title, artist) => a.run(`state.displayMode = 'canonical'; formatTrackDisplay(${JSON.stringify({ title, artist, raw_artist: artist, album: '', year: 0 })})`);
 const creditedTitles = [
+  ['酸橙色信笺 - 塞壬唱片-MSR', '塞壬唱片-MSR', '酸橙色信笺'],
+  ['爱的就是你 - Sasablue', 'Sasablue', '爱的就是你'],
+  ['不羡 - Sail', 'Sail', '不羡'],
   ['光年之外-G.E.M.邓紫棋', 'G.E.M.邓紫棋', '光年之外'],
   ['句号-G.E.M.邓紫棋', 'G.E.M.邓紫棋', '句号'],
   ['多远都要在一起-G.E.M.邓紫棋', 'G.E.M.邓紫棋', '多远都要在一起'],
@@ -473,6 +476,22 @@ test('traditional mode still shows the file name when the singer is known', asyn
   const a = await app();
   const raw = a.run(`state.displayMode = 'raw'; formatTrackDisplay(${JSON.stringify({ title: '周杰伦 - 七里香', artist: '周杰伦', raw_artist: '周杰伦' })}).title`);
   assert.equal(raw, '周杰伦 - 七里香');
+});
+
+test('exact download metadata preserves the song and complete credits over filename guesses', async () => {
+  const a = await app();
+  const row = { title: '酸橙色信笺 - 塞壬唱片-MSR', artist: '塞壬唱片-MSR,DAZBEE',
+    raw_artist: '', canonical_title: '酸橙色信笺', canonical_title_source: 'netease', album: '酸橙色信笺' };
+  a.context.row = row;
+  const canonical = a.run("state.displayMode = 'canonical'; formatTrackDisplay(row)");
+  assert.equal(canonical.title, '酸橙色信笺');
+  assert.equal(canonical.artist, '塞壬唱片-MSR,DAZBEE');
+  assert.equal(a.run("state.displayMode = 'raw'; formatTrackDisplay(row).title"), row.title);
+  // Bilibili's provider title is still a video title; it must pass through parsing.
+  const video = { title: '【SNH48】《春夏秋冬》舞台（跨年特别公演2023_12_31） - Unknown Artist',
+    artist: 'SNH48', canonical_title: '【SNH48】《春夏秋冬》舞台（跨年特别公演2023/12/31）', canonical_title_source: 'bilibili' };
+  a.context.row = video;
+  assert.equal(a.run("state.displayMode = 'canonical'; formatTrackDisplay(row).title"), '春夏秋冬');
 });
 
 // The two display modes. Traditional is the default and shows what the folder
