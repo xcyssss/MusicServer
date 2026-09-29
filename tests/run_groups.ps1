@@ -18,7 +18,7 @@
 # file), so a stuck suite is visible instead of being hidden until the pipeline
 # ends.
 param(
-    [string[]]$StateSuites = @('Core', 'Database', 'V2', 'WorkerConcurrency', 'DownloadPipeline', 'Management', 'Search', 'Onboarding', 'Recommendation', 'LegacyRetirement', 'Listening', 'Web', 'Tauri', 'ConfigurableLibrary', 'TestRunner', 'Identity'),
+    [string[]]$StateSuites = @('Core', 'Database', 'V2', 'ArtistResolution', 'WorkerConcurrency', 'DownloadPipeline', 'Management', 'Search', 'Onboarding', 'Recommendation', 'LegacyRetirement', 'Listening', 'Web', 'Tauri', 'ConfigurableLibrary', 'TestRunner', 'Identity'),
     [string[]]$ApiSuites = @('Http', 'UiProxyRuntime', 'MediaRuntime', 'OnboardingRuntime', 'SearchRuntime', 'ApiTransaction', 'ApiRuntime'),
     [int]$SuiteTimeoutSeconds = 300,
     [int]$GroupTimeoutSeconds = 900,

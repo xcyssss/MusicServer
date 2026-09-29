@@ -629,6 +629,8 @@ function Get-UiLibrary {
     # Fail-soft: this also runs inside media runspaces that hold no state DB.
     $resolved = @{}
     try { $resolved = Get-LocalTrackArtistMapDb } catch { $resolved = @{} }
+    $canonicalMap = @{}
+    try { $canonicalMap = Get-CanonicalLocalTrackMapDb -MusicDir $Config.MusicDir } catch { $canonicalMap = @{} }
     $prefixes = @()
     try { $prefixes = @(Get-SharedTitlePrefixes -Titles @($items | ForEach-Object { [string]$_.title })) } catch { $prefixes = @() }
     # The year is a property of the track, not of the artist decision, so every row
@@ -646,7 +648,20 @@ function Get-UiLibrary {
     foreach ($item in $items) {
         $key = Get-MusicServerPathKey -Path ([string]$item.file)
         $row = if ($key -and $resolved.ContainsKey($key)) { $resolved[$key] } else { $null }
-        $decision = Resolve-DisplayArtist -Title ([string]$item.title) -Indexed ([string]$item.artist) -CachedRow $row -KnownPrefixes $prefixes
+        $canonical = $null
+        foreach ($candidate in @(([string]$item.id -replace '^library-', ''), [string]$item.id, [string]$item.file, ('file:' + [string]$item.file))) {
+            if ($canonicalMap.ContainsKey($candidate)) { $canonical = $canonicalMap[$candidate]; break }
+        }
+        $item | Add-Member -NotePropertyName 'canonical_title' -NotePropertyValue '' -Force
+        $item | Add-Member -NotePropertyName 'canonical_title_source' -NotePropertyValue '' -Force
+        if ($canonical) {
+            $ids = @(ConvertFrom-MusicServerJsonArray -Json ([string](Get-OptionalProperty $canonical 'identifiers_json' '[]')))
+            if (@($ids | Where-Object { (Get-OptionalProperty $_ 'type' '') -eq 'netease' -and [string](Get-OptionalProperty $_ 'value' '') -match '^\d+$' }).Count -gt 0) {
+                $item.canonical_title = [string]$canonical.title
+                $item.canonical_title_source = 'netease'
+            }
+        }
+        $decision = Resolve-DisplayArtist -Title ([string]$item.title) -Indexed ([string]$item.artist) -CachedRow $row -KnownPrefixes $prefixes -CanonicalTrack $canonical
         if (-not $decision) { continue }
         if ($decision.artist) { $item.artist = $decision.artist }
         if ($decision.album) { $item.album = $decision.album }
@@ -1322,11 +1337,12 @@ function Start-ArtistBackfill {
                 if (-not $file) { continue }
                 $key = Get-MusicServerPathKey -Path $file
                 if (-not $key) { continue }
+                if ([string](Get-OptionalProperty $item 'artist_source' '') -eq 'canonical') { continue }
                 if ($cached.ContainsKey($key)) {
                     $row = $cached[$key]
                     # A resolved row stays; a miss is retried only after a while,
                     # so new releases get a chance without re-querying every start.
-                    if ([string]$row.status -eq 'RESOLVED' -and [string]$row.artist) {
+                    if ([string]$row.status -eq 'RESOLVED' -and (Test-MusicServerArtistCredit -Artist ([string]$row.artist))) {
                         # Resolved before release_year existed, or the online match
                         # carried no publish date. Re-querying fills the year in;
                         # without this every pre-existing row would show no year
@@ -1334,7 +1350,7 @@ function Start-ArtistBackfill {
                         $needsYear = ([int](Get-OptionalProperty $row 'release_year' 0)) -le 0
                         $wasOnline = [string]$row.source -eq 'netease'
                         if (-not ($needsYear -and $wasOnline)) { continue }
-                    } else {
+                    } elseif ([string]$row.status -ne 'RESOLVED') {
                         $checked = Convert-ToUtcDateTime ([string]$row.updated_at)
                         if ($checked -and $checked -gt $cutoff) { continue }
                     }

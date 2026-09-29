@@ -480,6 +480,15 @@ function stripSingerCredit(rawTitle, singer) {
   if (!title || name.length < 2) return '';
   const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
   const target = normalize(name);
+  // Match the complete credit at a boundary before splitting dash segments:
+  // a credit such as 塞壬唱片-MSR or EXO-K contains its own meaningful dash.
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const creditAtStart = new RegExp(`^${escaped}\\s*[-\\u2013\\u2014\\uFF0D|｜]\\s*`, 'i');
+  const creditAtEnd = new RegExp(`\\s*[-\\u2013\\u2014\\uFF0D|｜]\\s*${escaped}$`, 'i');
+  for (const boundary of [creditAtStart, creditAtEnd]) {
+    const rest = title.replace(boundary, '').trim();
+    if (rest && rest !== title) return rest;
+  }
   const separator = new RegExp(SONG_CREDIT_SEPARATOR.source, 'g');
   const segments = [];
   let cursor = 0;
@@ -526,7 +535,10 @@ function formatTrackDisplay(item) {
   // (`… - for the love of god（上帝的爱）live`) is re-expressed as the `(Live)` /
   // `(Cover)` suffix below instead of staying glued to the song name.
   const cleanedCredit = credited ? credited.replace(TAIL_MARKER_RE, '').trim() : '';
-  const title = cleanSongName(cleanedCredit || credited || rawTitle) || '未命名歌曲';
+  // Exact NetEase download receipts carry a song title already. Bilibili titles
+  // remain video titles and still need parsing; never apply this to an ID guess.
+  const exactTitle = item?.canonical_title_source === 'netease' ? String(item?.canonical_title || '').trim() : '';
+  const title = exactTitle || cleanSongName(cleanedCredit || credited || rawTitle) || '未命名歌曲';
   // Detect Live/Cover tags from the original title, but never from a comment
   // tail (the `pXX` episode number marks the real track inside a compilation).
   const tail = EPISODE_RE.test(rawTitle) ? '' : rawTitle.replace(/^.*\uFF5C/, '');
