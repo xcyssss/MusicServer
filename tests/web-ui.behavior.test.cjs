@@ -11,7 +11,7 @@ const deferred = () => { let resolve; const promise = new Promise(r => { resolve
 // Execute the shipped script, including its event wiring. A small DOM double
 // lets CI exercise timing/state contracts without a browser or live music DB.
 // Real layout and media acceptance are separately performed in the Tauri APP.
-async function app() {
+async function app(fetchHandler) {
   const elements = new Map();
   const events = new Map();
   const intervals = [];
@@ -46,13 +46,36 @@ async function app() {
       return { ok: true, json: async () => ({ items: [], most_played: [], rediscover: [] }) };
     },
   });
+  context.fetchHandler = fetchHandler;
   vm.runInContext(source, context);
   await settle();
+  const initialRequests = [...requests];
   requests.length = 0;
-  return { context, get: id => elements.get('#' + id), run: code => vm.runInContext(code, context), requests, intervals, events, timers };
+  return { context, get: id => elements.get('#' + id), run: code => vm.runInContext(code, context), requests, initialRequests, intervals, events, timers };
 }
 const json = payload => ({ ok: true, json: async () => payload });
 const library = [{ id: 'library-a', title: '春天', artist: '测试歌手', album: '专辑', duration: 120, stream_url: '/api/library/library-a/stream', local_status: 'LOCAL' }];
+
+test('a slow display preference cannot delay the first library or scan the collapsed listening panel', async () => {
+  const preference = deferred();
+  const a = await app(async url => url === '/api/settings/display-mode' ? preference.promise : json({ items: library }));
+  assert.ok(a.initialRequests.some(r => r.url.startsWith('/api/library')));
+  assert.ok(!a.initialRequests.some(r => r.url === '/api/listening/stats'));
+  assert.equal(a.run('state.library.length'), 1);
+  preference.resolve(json({mode:'canonical'}));
+  await settle();
+});
+
+test('portable import order takes precedence over timestamps changed by a transfer', async () => {
+  const a = await app();
+  a.run("state.librarySort = 'added'");
+  const items = [
+    {id:'older', import_order:1, addedto:'2030-01-01'},
+    {id:'newer', import_order:2, addedto:'2020-01-01'},
+  ];
+  a.context.portable = items;
+  assert.equal(a.run('sortLibraryVisible(portable)[0].id'), 'newer');
+});
 
 test('source switching isolates requests and explains a blocked provider', async () => {
   const a=await app(); a.get('library-search').value='song';

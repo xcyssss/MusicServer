@@ -699,8 +699,14 @@ function Get-MusicServerLocalIdentity {
 function Write-MusicServerStartupTrace {
     param(
         [ValidateSet('ui', 'api')][string]$Role,
-        [Parameter(Mandatory)][System.Collections.IDictionary]$Checkpoints
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Checkpoints,
+        [string]$LogDir = ''
     )
+    if ($LogDir) {
+        $fields = @($Checkpoints.Keys | Select-Object -First 32 | ForEach-Object { 'phase_' + $_ + '=' + [int]$Checkpoints[$_] })
+        $elapsed = if ($fields.Count) { [int]@($Checkpoints.Values)[-1] } else { 0 }
+        Write-MusicServerLog -Path (Join-Path $LogDir 'musicserver-startup.log') -Message "[startup] role=$Role elapsed_ms=$elapsed $($fields -join ' ')"
+    }
     if (-not $env:MUSICSERVER_STARTUP_TRACE) { return }
     $stream = $null
     try {

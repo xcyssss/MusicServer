@@ -1511,6 +1511,8 @@ function Save-DailyRecommendationsDb {
         [string]$Date = (Get-TodayDate),
         [switch]$DryRun,
         [switch]$OnlyIfEmpty,
+        [string]$ExpectedLibraryRevision = '',
+        [switch]$EnforceLibraryRevision,
         [int]$FailAfterStep = 0
     )
     if ($DryRun) { return [pscustomobject]@{ Date = $Date; Count = @($Recommendations).Count; DryRun = $true } }
@@ -1541,6 +1543,10 @@ function Save-DailyRecommendationsDb {
 
     $now = Get-NowIso
     $statements = New-Object System.Collections.Generic.List[string]
+    if ($EnforceLibraryRevision) {
+        [void]$statements.Add('CREATE TEMP TABLE recommendation_revision_guard (n INTEGER CONSTRAINT musicserver_library_revision_changed CHECK (n = 1))')
+        [void]$statements.Add("INSERT INTO recommendation_revision_guard SELECT COALESCE((SELECT value FROM app_settings WHERE key='recommendation_library_pending'),'') = " + (ConvertTo-MusicServerSqlLiteral $ExpectedLibraryRevision))
+    }
     if ($OnlyIfEmpty) {
         # This guard runs under the same IMMEDIATE transaction as the writes.
         # A concurrently completed personal day must never be replaced by starters.
@@ -1580,9 +1586,15 @@ function Save-DailyRecommendationsDb {
         $displayMessage = "date=${Date};rank=$([int](Get-OptionalProperty $rec 'rank'));rec_id=$([string](Get-OptionalProperty $rec 'id'))"
         [void]$statements.Add("INSERT INTO events (event_type,track_id,result,message,created_at) VALUES ('RECOMMENDATION_DISPLAY',$($lit.tid),'SUCCESS',$(ConvertTo-MusicServerSqlLiteral $displayMessage),$($lit.now))")
     }
+    if ($EnforceLibraryRevision -and $ExpectedLibraryRevision) {
+        [void]$statements.Add("DELETE FROM app_settings WHERE key='recommendation_library_pending' AND value=" + (ConvertTo-MusicServerSqlLiteral $ExpectedLibraryRevision))
+    }
     try { $steps = Invoke-StateAtomicSql -Statements $statements.ToArray() -FailAfterStep $FailAfterStep }
     catch {
-        if ($OnlyIfEmpty -and $_.Exception.Message -match 'musicserver_day_not_empty') {
+        if ($EnforceLibraryRevision -and $_.Exception.Message -match 'CHECK constraint failed: musicserver_library_revision_changed') {
+            return [pscustomobject]@{ Date = $Date; Count = 0; Skipped = $true; Reason = 'LIBRARY_REVISION_CHANGED'; DryRun = $false }
+        }
+        if ($OnlyIfEmpty -and $_.Exception.Message -match 'CHECK constraint failed: musicserver_day_not_empty') {
             return [pscustomobject]@{ Date = $Date; Count = 0; Skipped = $true; DryRun = $false }
         }
         throw

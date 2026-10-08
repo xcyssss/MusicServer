@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-open-logs"
+description = "Open this app home's diagnostic log folder without needing the local API."
+commands.allow = ["open_logs"]
