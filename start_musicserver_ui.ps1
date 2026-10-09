@@ -186,6 +186,9 @@ function Test-DailyRecommendTaskCurrent {
     $action = @($Task.Actions) | Select-Object -First 1
     if (-not $action) { return $false }
     if (([string]$action.Arguments).IndexOf($Generator, [StringComparison]::OrdinalIgnoreCase) -lt 0) { return $false }
+    # Older interactive actions open a console whenever a missed trigger catches up.
+    if ([string]$action.Arguments -notmatch '(?i)(?:^|\s)-NonInteractive(?=\s|$)') { return $false }
+    if ([string]$action.Arguments -notmatch '(?i)(?:^|\s)-WindowStyle\s+"?Hidden"?(?=\s|$)') { return $false }
     # A task whose generator matches but whose -AppHome points somewhere else
     # writes the day into a database this APP never reads. Repairing only the
     # script path is what let one home generate recommendations the other home
@@ -290,7 +293,7 @@ function Start-MusicServerDailyRecommendBackfill {
         foreach ($dir in @($stateDir, $logDir)) {
             if (-not (Test-Path -LiteralPath $dir -PathType Container)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
         }
-        $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$generator`" -Count $Count -AppHome `"$AppHome`""
+        $arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$generator`" -Count $Count -AppHome `"$AppHome`""
         $process = Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -WorkingDirectory $Root -WindowStyle Hidden `
             -RedirectStandardOutput (Join-Path $logDir 'musicserver-daily.stdout.log') `
             -RedirectStandardError (Join-Path $logDir 'musicserver-daily.stderr.log') -PassThru

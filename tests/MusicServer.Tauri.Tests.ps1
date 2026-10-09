@@ -103,6 +103,44 @@ Describe 'Installed APP shutdown outcome' {
     }
 }
 
+Describe 'Scheduled background task actions' {
+    BeforeEach {
+        # CIM factories only construct definitions; registration is the machine write.
+        Mock Register-ScheduledTask {}
+    }
+
+    It 'registers recommendation generation hidden without changing its scope or schedule' {
+        $fixtureHome = Join-Path $TestDrive 'app home'
+        $generator = Join-Path $ProjectRoot 'daily_recommend.ps1'
+        & (Join-Path $ProjectRoot 'register_daily_recommend.ps1') -Time '09:25' -Count 35 -AppHome $fixtureHome
+
+        Assert-MockCalled Register-ScheduledTask -Times 1 -Exactly -Scope It -ParameterFilter {
+            $TaskName -eq 'MusicServer_DailyRecommend' -and
+            $Action[0].Execute -eq 'powershell.exe' -and $Action[0].WorkingDirectory -eq $ProjectRoot -and
+            $Action[0].Arguments -match '(?:^|\s)-NonInteractive(?:\s|$)' -and
+            $Action[0].Arguments -match '(?:^|\s)-WindowStyle Hidden(?:\s|$)' -and
+            $Action[0].Arguments.Contains('-File "' + $generator + '"') -and
+            $Action[0].Arguments.Contains('-Count 35 -AppHome "' + $fixtureHome + '"') -and
+            ([datetime]$Trigger[0].StartBoundary).ToString('HH:mm') -eq '09:25' -and
+            $Settings.StartWhenAvailable -and -not $Settings.DisallowStartIfOnBatteries
+        }
+    }
+
+    It 'registers a hidden wanted worker with the existing bounded batch and interval' {
+        $worker = Join-Path $ProjectRoot 'wanted_worker.ps1'
+        & (Join-Path $ProjectRoot 'register_wanted_worker.ps1') -IntervalMinutes 3
+
+        Assert-MockCalled Register-ScheduledTask -Times 1 -Exactly -Scope It -ParameterFilter {
+            $TaskName -eq 'MusicServer_WantedWorker' -and
+            $Action[0].Execute -eq 'powershell.exe' -and $Action[0].WorkingDirectory -eq $ProjectRoot -and
+            $Action[0].Arguments -match '(?:^|\s)-NonInteractive(?:\s|$)' -and
+            $Action[0].Arguments -match '(?:^|\s)-WindowStyle Hidden(?:\s|$)' -and
+            $Action[0].Arguments.Contains('-File "' + $worker + '" -Once -MaxItems 5') -and
+            $Trigger[0].Repetition.Interval -eq 'PT3M'
+        }
+    }
+}
+
 Describe 'MusicServer Tauri desktop shell' {
     It 'uses Tauri v2 and the shared web directory' {
         $config = ConvertFrom-Json -InputObject (Get-Content -LiteralPath (Join-Path $ProjectRoot 'src-tauri\tauri.conf.json') -Raw)
@@ -278,7 +316,7 @@ Describe 'MusicServer Tauri desktop shell' {
         @($errors).Count | Should Be 0
     }
 
-    It 'treats a daily recommendation task that cannot run on battery as stale' {
+    It 'repairs daily recommendation actions that show a console or cannot run on battery' {
         $launcherPath = Join-Path $ProjectRoot 'start_musicserver_ui.ps1'
         $text = Get-Content -LiteralPath $launcherPath -Raw -Encoding UTF8
         $source = [regex]::Match($text, '(?s)function Test-DailyRecommendTaskCurrent \{.*?\n\}').Value
@@ -297,19 +335,26 @@ Describe 'MusicServer Tauri desktop shell' {
                 }
             }
         }
-        $healthy = New-ProbeTask -Arguments "-File `"$generator`"" -StartWhenAvailable $true -DisallowBattery $false -StopOnBattery $false
+        $healthy = New-ProbeTask -Arguments "-NoProfile -NonInteractive -WindowStyle Hidden -File `"$generator`"" -StartWhenAvailable $true -DisallowBattery $false -StopOnBattery $false
         (Test-DailyRecommendTaskCurrent -Task $healthy -Generator $generator) | Should Be $true
 
-        $batteryBlocked = New-ProbeTask -Arguments "-File `"$generator`"" -StartWhenAvailable $false -DisallowBattery $true -StopOnBattery $true
+        $visibleLegacy = New-ProbeTask -Arguments "-NoProfile -File `"$generator`"" -StartWhenAvailable $true -DisallowBattery $false -StopOnBattery $false
+        (Test-DailyRecommendTaskCurrent -Task $visibleLegacy -Generator $generator) | Should Be $false
+        $interactiveHidden = New-ProbeTask -Arguments "-WindowStyle Hidden -File `"$generator`"" -StartWhenAvailable $true -DisallowBattery $false -StopOnBattery $false
+        (Test-DailyRecommendTaskCurrent -Task $interactiveHidden -Generator $generator) | Should Be $false
+        $visibleNonInteractive = New-ProbeTask -Arguments "-NonInteractive -WindowStyle Normal -File `"$generator`"" -StartWhenAvailable $true -DisallowBattery $false -StopOnBattery $false
+        (Test-DailyRecommendTaskCurrent -Task $visibleNonInteractive -Generator $generator) | Should Be $false
+
+        $batteryBlocked = New-ProbeTask -Arguments "-NonInteractive -WindowStyle Hidden -File `"$generator`"" -StartWhenAvailable $false -DisallowBattery $true -StopOnBattery $true
         (Test-DailyRecommendTaskCurrent -Task $batteryBlocked -Generator $generator) | Should Be $false
 
-        $wrongScript = New-ProbeTask -Arguments '-File "C:\other\daily_recommend.ps1"' -StartWhenAvailable $true -DisallowBattery $false -StopOnBattery $false
+        $wrongScript = New-ProbeTask -Arguments '-NonInteractive -WindowStyle Hidden -File "C:\other\daily_recommend.ps1"' -StartWhenAvailable $true -DisallowBattery $false -StopOnBattery $false
         (Test-DailyRecommendTaskCurrent -Task $wrongScript -Generator $generator) | Should Be $false
         (Test-DailyRecommendTaskCurrent -Task $null -Generator $generator) | Should Be $false
 
         # A task whose generator matches but whose -AppHome points at another home
         # generates the day into a database this APP never reads.
-        $otherHome = New-ProbeTask -Arguments "-File `"$generator`" -Count 20 -AppHome `"D:\other_home`"" -StartWhenAvailable $true -DisallowBattery $false -StopOnBattery $false
+        $otherHome = New-ProbeTask -Arguments "-NonInteractive -WindowStyle Hidden -File `"$generator`" -Count 20 -AppHome `"D:\other_home`"" -StartWhenAvailable $true -DisallowBattery $false -StopOnBattery $false
         (Test-DailyRecommendTaskCurrent -Task $otherHome -Generator $generator -AppHome 'E:\Project\MusicSever_app') | Should Be $false
         (Test-DailyRecommendTaskCurrent -Task $otherHome -Generator $generator -AppHome 'D:\other_home') | Should Be $true
         # Windows paths compare case-insensitively: a difference in case is not a
@@ -317,7 +362,7 @@ Describe 'MusicServer Tauri desktop shell' {
         (Test-DailyRecommendTaskCurrent -Task $otherHome -Generator $generator -AppHome 'd:\OTHER_HOME') | Should Be $true
         # Without a declared home the binding cannot be verified, so it is stale
         # rather than assumed current.
-        $undeclaredHome = New-ProbeTask -Arguments "-File `"$generator`"" -StartWhenAvailable $true -DisallowBattery $false -StopOnBattery $false
+        $undeclaredHome = New-ProbeTask -Arguments "-NonInteractive -WindowStyle Hidden -File `"$generator`"" -StartWhenAvailable $true -DisallowBattery $false -StopOnBattery $false
         (Test-DailyRecommendTaskCurrent -Task $undeclaredHome -Generator $generator -AppHome 'D:\other_home') | Should Be $false
     }
 

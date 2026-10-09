@@ -19,7 +19,7 @@ if ($Unregister) {
 }
 
 $scriptPath = Join-Path $PSScriptRoot 'wanted_worker.ps1'
-$arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" -Once -MaxItems 5"
+$arguments = "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`" -Once -MaxItems 5"
 $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arguments -WorkingDirectory $PSScriptRoot
 $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
     -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes) `
