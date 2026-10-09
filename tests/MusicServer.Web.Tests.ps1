@@ -256,9 +256,15 @@ Describe 'MusicServer web UI safeguards' {
         # Get-UiLibrary builds each row through Resolve-DisplayArtist, which lives in
         # the providers module; without it the dotted-in function cannot run at all.
         Import-Module (Join-Path $projectRoot 'MusicServer.Providers.psm1') -Force -WarningAction SilentlyContinue
+        Import-Module (Join-Path $projectRoot 'MusicServer.State.psm1') -Force -WarningAction SilentlyContinue
+        Import-Module (Join-Path $projectRoot 'MusicServer.Library.psm1') -Force -WarningAction SilentlyContinue
 
         $appHome = Join-Path ([IO.Path]::GetTempPath()) ('musicserver_web_library_' + [guid]::NewGuid().ToString('N'))
         $config = New-MusicServerConfig -Root $projectRoot -AppHome $appHome
+        Initialize-MusicServerState -Config $config
+        Initialize-MusicServerDatabase -DbPath (Join-Path $config.StateDir 'musicserver.db') -SqliteExe $config.Sqlite
+        Initialize-MusicServerSchema
+        Initialize-MusicServerLibrarySchema
         $null = New-Item -ItemType Directory -Path $config.MusicDir -Force
         $null = New-Item -ItemType Directory -Path (Split-Path -Parent $config.NdDb) -Force
         # Files sitting directly in the library root: the root's own name is not an artist.

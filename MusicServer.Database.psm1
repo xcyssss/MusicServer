@@ -58,7 +58,7 @@ function ConvertTo-MusicServerSqlLiteral {
     # Encode text as UTF-8 bytes instead of embedding a quoted SQL string.
     # This preserves CRLF and every quote/token character through sqlite3 .read.
     $bytes = [Text.Encoding]::UTF8.GetBytes($text)
-    $hex = -join @($bytes | ForEach-Object { $_.ToString('x2', [Globalization.CultureInfo]::InvariantCulture) })
+    $hex = [BitConverter]::ToString($bytes).Replace('-', '').ToLowerInvariant()
     return "CAST(X'$hex' AS TEXT)"
 }
 

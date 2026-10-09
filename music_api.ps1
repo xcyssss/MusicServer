@@ -47,6 +47,7 @@ Import-Module (Join-Path $PSScriptRoot 'MusicServer.State.psm1') -DisableNameChe
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Http.psm1') -DisableNameChecking -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Onboarding.psm1') -DisableNameChecking -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Management.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Library.psm1') -DisableNameChecking -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Search.psm1') -DisableNameChecking -Force
 $startupPhases['module_imports'] = $startupClock.Elapsed.TotalMilliseconds
 
@@ -78,10 +79,12 @@ $startupPhases['database_connect'] = $startupClock.Elapsed.TotalMilliseconds
 Initialize-MusicServerSchema
 Initialize-ManagementSchema
 Initialize-OnlineSearchSchema
+Initialize-MusicServerLibrarySchema
 Reset-InterruptedManagementJobs -Config $Config
 $startupPhases['schema'] = $startupClock.Elapsed.TotalMilliseconds
 Apply-ConfiguredMusicDir -Config $Config
 Initialize-MusicServerLibrary -Config $Config | Out-Null
+try { Start-MusicServerLibraryImportIfNeeded -Config $Config | Out-Null } catch { Write-ApiLog '[library] phase=import result=ERROR code=IMPORT_START_FAILED' }
 $startupPhases['config_library'] = $startupClock.Elapsed.TotalMilliseconds
 Write-Host ("API v2 ready | db={0} | music_dir={1} | migration=NOT_REQUESTED" -f $DbPath, $Config.MusicDir) -ForegroundColor Green
 Write-ApiLog ("API v2 ready | db={0} | music_dir={1}" -f $DbPath, $Config.MusicDir)
@@ -408,6 +411,10 @@ function Add-ResolvedArtist {
 }
 
 function Get-LocalListeningItems {
+    if ($null -ne $script:ListeningLibraryCache -and $script:ListeningLibraryRoot -eq $Config.MusicDir -and ([DateTime]::UtcNow - $script:ListeningLibraryAt).TotalSeconds -lt 30) {
+        return @($script:ListeningLibraryCache)
+    }
+    $scanClock = [Diagnostics.Stopwatch]::StartNew()
     $canonicalByLocalId = Get-LocalCanonicalTrackMap
     $items = New-Object System.Collections.ArrayList
     $seenFiles = @{}
@@ -429,7 +436,7 @@ function Get-LocalListeningItems {
 
     foreach ($dir in @($Config.MusicDir)) {
         if (-not (Test-Path -LiteralPath $dir -PathType Container)) { continue }
-        foreach ($fileInfo in @(Get-ChildItem -LiteralPath $dir -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.mp3','.flac','.wav','.aac','.m4a' })) {
+        foreach ($fileInfo in @(Get-MusicServerLibraryAudioFiles -Config $Config)) {
             $file = [System.IO.Path]::GetFullPath($fileInfo.FullName)
             $fileKey = $file.ToLowerInvariant()
             if ($seenFiles.ContainsKey($fileKey)) { continue }
@@ -437,7 +444,7 @@ function Get-LocalListeningItems {
             $title = [System.IO.Path]::GetFileNameWithoutExtension($file)
             $artist = Get-LibraryFolderArtist -File $file
             $addedAt = ''
-            try { $addedAt = (Get-Item -LiteralPath $file).LastWriteTime.ToString('o') } catch {}
+            try { $addedAt = $fileInfo.LastWriteTimeUtc.ToString('o') } catch {}
             $row = [pscustomobject]@{ id = ''; name = $title; artist = $artist; album = $artist; duration = 0; track = 0; addedto = $addedAt; collectionat = $addedAt }
             $localId = Get-StableLocalIdentity -File $file
             [void]$items.Add((New-ListeningLibraryItem -Row $row -File $file -Source 'local' -LocalId $localId -CanonicalByLocalId $canonicalByLocalId))
@@ -449,7 +456,13 @@ function Get-LocalListeningItems {
         $known = $id -and $preferences.ContainsKey($id)
         $item | Add-Member -NotePropertyName liked -NotePropertyValue $(if ($known) { $preferences[$id] -eq 'LIKE' } else { $null }) -Force
     }
-    return @(Add-ResolvedArtist -Items @($items) -CanonicalByLocalId $canonicalByLocalId)
+    $items = @(Add-ResolvedArtist -Items @($items) -CanonicalByLocalId $canonicalByLocalId)
+    $items = @(Sync-MusicServerLibraryIndex -Config $Config -Items @($items))
+    $script:ListeningLibraryCache = $items
+    $script:ListeningLibraryRoot = $Config.MusicDir
+    $script:ListeningLibraryAt = [DateTime]::UtcNow
+    Write-ApiLog "[library] phase=scan result=READY count=$($items.Count) elapsed_ms=$($scanClock.ElapsedMilliseconds)"
+    return @($items)
 }
 
 function Get-LocalListeningItem {
@@ -570,40 +583,52 @@ function Remove-LibraryTrack {
         return @{ Error = 'FILE_NOT_FOUND'; Message = '找不到要删除的本地文件。'; File = $file; Deleted = $false; TrackId = '' }
     }
     $fullFile = [System.IO.Path]::GetFullPath($file)
+    try { $relative = Get-MusicServerLibraryRelativePath -Config $Config -Path $fullFile } catch {
+        return @{ Error = 'INVALID_LIBRARY_FILE'; Message = '文件不在当前音乐库内，无法删除。'; File = ''; Deleted = $false; TrackId = '' }
+    }
 
-    # Before deleting, find any canonical track that is LOCAL and bound to this
-    # file (via Navidrome media_file path) so its state can be reset.
-    $trackId = ''
+    # Preserve Navidrome ID bindings as well as portable exact file bindings.
+    $songId = ''
     try {
         $escapedPath = ([string]$fullFile).Replace("'", "''")
         $navRows = @(Invoke-SqliteJson -DbPath $Config.NdDb -Sql "SELECT id FROM media_file WHERE path = '$escapedPath' LIMIT 1;")
-        if ($navRows.Count -gt 0) {
-            $songId = [string]$navRows[0].id
-            # Find canonical tracks bound to this Navidrome song id.
-            $candRows = @(Invoke-MusicServerParamSql -Template "SELECT id FROM canonical_tracks WHERE local_song_id = @sid AND status = 'LOCAL' LIMIT 5;" -Params @{ sid = $songId })
-            if ($candRows.Count -gt 0) { $trackId = [string]$candRows[0].id }
-        }
+        if ($navRows.Count -gt 0) { $songId = [string]$navRows[0].id }
     } catch {}
 
-    # Delete the audio file and its sidecar .lrc.
-    try { Remove-Item -LiteralPath $fullFile -Force -ErrorAction Stop } catch {
+    # Rename on the same volume before committing state. If SQLite fails the
+    # original recording is restored, so the operation can be retried safely.
+    $staged = $fullFile + '.musicserver-delete-' + [Guid]::NewGuid().ToString('N') + '.part'
+    try { [IO.File]::Move($fullFile,$staged) } catch {
         Write-ApiLog 'Library deletion failed: audio file could not be removed.'
         return @{ Error = 'DELETE_FAILED'; Message = '文件删除失败，可能正在被使用，请暂停播放后重试。'; File = $fullFile; Deleted = $false; TrackId = '' }
     }
+    $trackId = ''
+    try {
+        $affected = @(Invoke-MusicServerParamSql -Template @'
+BEGIN IMMEDIATE;
+CREATE TEMP TABLE deleted_library_bindings AS
+ SELECT c.id FROM canonical_tracks c
+ WHERE (c.local_song_id=@binding COLLATE NOCASE OR c.local_song_id=@path COLLATE NOCASE OR (@sid<>'' AND c.local_song_id=@sid))
+ AND NOT EXISTS(SELECT 1 FROM wanted_queue q WHERE q.track_id=c.id
+  AND q.state IN ('RESOLVING','DOWNLOADING','VALIDATING')
+  AND COALESCE(q.lease_expires_epoch,CAST(strftime('%s',q.lease_expires_at) AS INTEGER),0)>@epoch);
+DELETE FROM wanted_queue WHERE state='LOCAL' AND track_id IN (SELECT id FROM deleted_library_bindings);
+UPDATE canonical_tracks SET local_song_id='',status=CASE WHEN status='LOCAL' THEN 'REMOTE' ELSE status END,
+ updated_at=@now,revision=revision+1 WHERE id IN (SELECT id FROM deleted_library_bindings);
+DELETE FROM library_tracks WHERE root_key=@root AND relative_path=@relative;
+SELECT id FROM deleted_library_bindings;
+DROP TABLE deleted_library_bindings;
+COMMIT;
+'@ -Params @{binding=('file:'+$fullFile);path=$fullFile;sid=$songId;epoch=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds();now=(Get-NowIso);root=(Get-MusicServerLibraryRootKey -Config $Config);relative=$relative.ToLowerInvariant()})
+        if ($affected.Count) { $trackId = [string]$affected[0].id }
+    } catch {
+        try { if ([IO.File]::Exists($staged) -and -not [IO.File]::Exists($fullFile)) { [IO.File]::Move($staged,$fullFile) } } catch { Write-ApiLog 'Library deletion rollback could not restore the staged recording.' }
+        Write-ApiLog 'Library deletion failed: SQLite state transaction rolled back.'
+        return @{ Error = 'DELETE_STATE_FAILED'; Message = '删除状态保存失败，已尝试恢复文件，请重试。'; File = $fullFile; Deleted = $false; TrackId = '' }
+    }
+    try { [IO.File]::Delete($staged) } catch { Write-ApiLog 'Library deletion completed but its staged recording could not be cleaned.' }
     $lrcFile = [System.IO.Path]::ChangeExtension($fullFile, '.lrc')
     if (Test-Path -LiteralPath $lrcFile) { Remove-Item -LiteralPath $lrcFile -Force -ErrorAction SilentlyContinue }
-
-    # Reset canonical track to REMOTE (and drop the local binding) if one was bound.
-    if ($trackId) {
-        try {
-            $track = Get-CanonicalTrackDb -TrackId $trackId
-            if ($track) {
-                $track.status = 'REMOTE'
-                $track.local_song_id = ''
-                Save-CanonicalTrackDb -Track $track | Out-Null
-            }
-        } catch {}
-    }
 
     # Ask Navidrome to rescan so the deleted file leaves its library.
     try {
@@ -771,8 +796,10 @@ Write-ApiLog ("API listening on {0} | marker={1}" -f $prefix, $script:BuildMarke
 $script:TodayCacheItems = $null
 $script:TodayCacheAt = [DateTime]::MinValue
 $script:TodayCacheSeconds = 60
-Write-MusicServerStartupTrace -Role api -Checkpoints $startupPhases
+Write-MusicServerStartupTrace -Role api -Checkpoints $startupPhases -LogDir $Config.LogDir
 while ($true) {
+    try { Start-MusicServerLibraryImportIfNeeded -Config $Config -RetryPending | Out-Null }
+    catch { Write-ApiLog '[library] phase=import result=ERROR code=IMPORT_START_FAILED' }
     $script:Context = $listener.GetContext()
     $script:RequestNavidromeLibrary = $null
     $script:RequestNavidromeById = $null
@@ -781,6 +808,7 @@ while ($true) {
     $request = $Context.Request
     $path = [System.Web.HttpUtility]::UrlDecode($request.Url.AbsolutePath, [System.Text.Encoding]::UTF8)
     $method = $request.HttpMethod
+    if ($method -in @('POST','PUT','DELETE') -and (($path -match '^/api/(tracks|library)/' -and $path -notmatch '/play$') -or $path -eq '/api/settings/music-library')) { $script:ListeningLibraryCache = $null }
     $script:requestCount++
     $script:RequestSqliteStart = Get-MusicServerSqliteInvocationCount
     Write-Host ("[{0}] {1} {2}  (req #{3})" -f [DateTime]::Now.ToString('HH:mm:ss'), $method, $path, $script:requestCount) -ForegroundColor Gray
@@ -838,6 +866,7 @@ while ($true) {
             Send-Json -Context ([pscustomobject]@{Response=$Context.Response;Body=$body;StatusCode=$status})
         }
         elseif ($method -eq 'GET' -and $path -eq '/api/library') {
+            if ($request.QueryString['refresh'] -eq '1') { $script:ListeningLibraryCache = $null }
             $allItems = @(Get-LocalListeningItems)
             $body = @{ items = $allItems; total = $allItems.Count }
             Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 200 })
@@ -1116,6 +1145,7 @@ while ($true) {
                     $previousPath = $Config.MusicDir
                     Set-AppSettingDb -Key 'music_library_path' -Value $newPath
                     Apply-ConfiguredMusicDir -Config $Config
+                    if ($previousPath -ne $Config.MusicDir) { Set-MusicServerRecommendationLibraryPending -Config $Config | Out-Null }
                     # Sync Navidrome MusicFolder
                     try { Sync-NavidromeMusicFolder -NdConfigPath $Config.NdConfig -NewMusicFolder $Config.MusicDir | Out-Null } catch {}
                     $body = [pscustomobject]@{
@@ -1135,6 +1165,7 @@ while ($true) {
             $defaultPath = Get-DefaultMusicDir -AppHome $Config.AppHome
             Remove-AppSettingDb -Key 'music_library_path'
             Apply-ConfiguredMusicDir -Config $Config
+            if ($previousPath -ne $Config.MusicDir) { Set-MusicServerRecommendationLibraryPending -Config $Config | Out-Null }
             try { Sync-NavidromeMusicFolder -NdConfigPath $Config.NdConfig -NewMusicFolder $Config.MusicDir | Out-Null } catch {}
             $body = [pscustomobject]@{
                 accepted = $true
@@ -1166,7 +1197,7 @@ while ($true) {
         elseif ($path -eq '/api/maintenance' -and $method -in @('GET','POST')) {
             if ($method -eq 'POST') {
                 $data = if ($bodyText) { ConvertFrom-Json -InputObject $bodyText } else { $null }
-                if (-not $data -or $data.operation -notin @('components','diagnostics','backup','health')) {
+                if (-not $data -or $data.operation -notin @('components','diagnostics','backup','health','library-export','library-import')) {
                     Send-Json -Context ([pscustomobject]@{Response=$Context.Response;Body=@{error='INVALID_OPERATION'};StatusCode=400})
                 } else {
                     $jobId=Start-ManagementJob -Config $Config -Operation $data.operation
@@ -1175,6 +1206,19 @@ while ($true) {
             } else {
                 Send-Json -Context ([pscustomobject]@{Response=$Context.Response;Body=(Get-ManagementStatus -Config $Config);StatusCode=200})
             }
+        }
+        elseif ($method -eq 'POST' -and $path -eq '/api/diagnostics/client') {
+            $data = if ($bodyText) { ConvertFrom-Json -InputObject $bodyText } else { $null }
+            $phase = [string](Get-OptionalProperty $data 'phase' '')
+            $code = [string](Get-OptionalProperty $data 'code' '')
+            $elapsed = 0
+            if ($phase -notin @('library','recommendations','wanted','settings','playback','runtime') -or $code -notmatch '^(TIMEOUT|NETWORK|HTTP_[45][0-9]{2}|JS_ERROR|REJECTION)$') { throw 'INVALID_CLIENT_DIAGNOSTIC' }
+            [void][int]::TryParse([string](Get-OptionalProperty $data 'elapsed_ms' 0), [ref]$elapsed)
+            if (-not $script:NextClientDiagnosticAt -or [DateTime]::UtcNow -ge $script:NextClientDiagnosticAt) {
+                Write-ApiLog "[client] phase=$phase code=$code elapsed_ms=$([Math]::Min(120000,[Math]::Max(0,$elapsed)))"
+                $script:NextClientDiagnosticAt = [DateTime]::UtcNow.AddSeconds(2)
+            }
+            Send-Json -Context ([pscustomobject]@{Response=$Context.Response;Body=@{accepted=$true};StatusCode=202})
         }
         elseif ($method -eq 'GET' -and $path -eq '/api/settings/desktop') {
             $saved = $null
@@ -1263,6 +1307,11 @@ while ($true) {
         $elapsed = ([DateTime]::UtcNow - $startTime).TotalMilliseconds
         Write-Host ("  done in {0:N0} ms" -f $elapsed) -ForegroundColor DarkGray
         if ($elapsed -ge 3000) { Write-ApiLog ("SLOW {0} {1} took {2:N0} ms" -f $method, $path, $elapsed) }
+        if ($elapsed -ge 1000) {
+            $route = $path -replace '^/api/(library|tracks|search)/[^/]+', '/api/$1/{id}'
+            $calls = (Get-MusicServerSqliteInvocationCount) - $script:RequestSqliteStart
+            Write-ApiLog "[request] method=$method route=$route status=$($Context.Response.StatusCode) elapsed_ms=$([int]$elapsed) sqlite_calls=$calls"
+        }
     }
     if ($Once) { break }
 }

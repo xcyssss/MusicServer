@@ -529,7 +529,8 @@ Describe 'C: real multi-worker concurrency invariants (separate pwsh child proce
             '-WorkerId', $WorkerId, '-OutFile', $outFile)
         if ($TrackId) { $args += @('-TrackId', $TrackId) }
         if ($NewState) { $args += @('-NewState', $NewState) }
-        if ($ExpectedRevision -ne -1) { $args += @('-ExpectedRevision', [string]$ExpectedRevision) }
+        # Avoid PowerShell's host-level -Ex... ExecutionPolicy abbreviation.
+        if ($ExpectedRevision -ne -1) { $args += @('-Revision', [string]$ExpectedRevision) }
         $args += @('-LeaseMinutes', [string]$LeaseMinutes)
         if ($JitterMs -gt 0) { $args += @('-JitterMs', [string]$JitterMs) }
 

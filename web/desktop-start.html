@@ -54,4 +54,5 @@ const still=()=>document.body.classList.toggle('still',failed||document.hidden);
 still();document.addEventListener('visibilitychange',still);
 if(failed){document.title='MusicServer · 连接需要恢复';document.querySelector('#title').textContent='音乐服务暂时未连接';document.querySelector('#message').textContent='本地服务未能完成启动。请重试；如果仍失败，可在应用数据目录的 logs/desktop-startup.json 查看具体原因。';document.querySelector('#retry').hidden=false;}
 document.querySelector('#retry').addEventListener('click',async()=>{try{await window.__TAURI__.core.invoke('restart_desktop');}catch(e){document.querySelector('#message').textContent='重启未成功，请关闭窗口后重新打开 MusicServer。';}});
+const logs=document.createElement('button');logs.textContent='打开日志文件夹';logs.style.marginTop='12px';logs.addEventListener('click',async()=>{try{await window.__TAURI__.core.invoke('open_logs');}catch{document.querySelector('#hint').textContent='可在应用数据目录的 logs 文件夹找到启动和服务日志。';}});document.querySelector('main').append(logs);
 </script></body></html>
