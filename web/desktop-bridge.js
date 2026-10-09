@@ -1,5 +1,41 @@
 (function (root) {
   'use strict';
+  function watchWindowVisibility(nativeWindow, onChange, clock = root) {
+    let visible = true, closed = false, pending = false, refreshAgain = false, timer = null;
+    const unlisteners = [];
+    async function refresh() {
+      if (closed) return;
+      if (pending) { refreshAgain = true; return; }
+      pending = true;
+      try {
+        const [minimized, shown] = await Promise.all([nativeWindow.isMinimized(), nativeWindow.isVisible()]);
+        if (!closed && visible !== (!minimized && shown)) {
+          visible = !minimized && shown;
+          onChange(visible);
+        }
+      } catch { /* Browsers and unavailable native reads keep their last usable state. */ }
+      finally {
+        pending = false;
+        if (refreshAgain && !closed) { refreshAgain = false; void refresh(); }
+      }
+    }
+    function poll() {
+      timer = clock.setTimeout(() => { timer = null; void refresh(); if (!closed) poll(); }, 2000);
+    }
+    for (const event of ['onResized', 'onFocusChanged']) {
+      if (typeof nativeWindow[event] !== 'function') continue;
+      Promise.resolve(nativeWindow[event](refresh)).then(unlisten => {
+        if (closed) unlisten(); else unlisteners.push(unlisten);
+      }).catch(() => {});
+    }
+    // WebView2 may keep document.visibilityState visible for a minimized window.
+    void refresh(); poll();
+    return { isVisible: () => visible, dispose() {
+      closed = true;
+      if (timer != null) clock.clearTimeout(timer);
+      timer = null; unlisteners.splice(0).forEach(unlisten => unlisten());
+    } };
+  }
   function lyricLine(lyrics, time) {
     const entries = lyrics?.entries || [];
     let active = -1;
@@ -99,7 +135,20 @@
     }, { once: true });
     void load();
   }
-  const api = { connect, lyricLine };
+  let visibility = null;
+  const api = { connect, lyricLine, watchWindowVisibility, isVisible: () => visibility?.isVisible() !== false };
   if (typeof module === 'object' && module.exports) module.exports = api;
-  else root.MusicServerDesktop = api;
+  else {
+    root.MusicServerDesktop = api;
+    const currentWindow = root.__TAURI__?.window?.getCurrentWindow;
+    if (currentWindow) {
+      try {
+        visibility = watchWindowVisibility(currentWindow(), visible => {
+          document.body.classList.toggle('water-paused', document.hidden || !visible);
+          document.dispatchEvent(new CustomEvent('musicserver-desktop-visibility', { detail: { visible } }));
+        });
+        root.addEventListener('pagehide', () => visibility.dispose(), { once: true });
+      } catch { /* The browser UI works without native window APIs. */ }
+    }
+  }
 })(globalThis);

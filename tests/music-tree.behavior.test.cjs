@@ -38,14 +38,15 @@ function pondHarness(width = 960, height = 640, devicePixelRatio = 1) {
     surfaces.push({node,stats}); return node;
   };
   const canvas = surface(); canvas.parentElement = {appendChild(){}};
+  const desktop = {visible:true,isVisible() { return this.visible; }};
   const preference = {matches:false, addEventListener:(type,fn)=>preferenceEvents[type]=fn};
   const doc = {hidden:false, getElementById:()=>canvas, createElement:type=>type === 'canvas' ? surface() : {setAttribute(){}},addEventListener:(type,fn)=>events[type]=fn};
-  const sandbox = {document:doc, matchMedia:()=>preference, Path2D:class {}, innerWidth:width,innerHeight:height,devicePixelRatio,performance:{now:()=>now},
+  const sandbox = {document:doc,MusicServerDesktop:desktop, matchMedia:()=>preference, Path2D:class {}, innerWidth:width,innerHeight:height,devicePixelRatio,performance:{now:()=>now},
     requestAnimationFrame:fn=>{const at=(Math.floor(now/(1000/60))+1)*(1000/60);callbacks.set(++serial,{fn,at});return serial;},
     cancelAnimationFrame:id=>callbacks.delete(id),setTimeout:(fn,delay)=>{timers.set(++serial,{fn,at:now+delay});return serial;},
     clearTimeout:id=>timers.delete(id),addEventListener:(type,fn)=>events[type]=fn};
   vm.runInNewContext(fs.readFileSync(require.resolve('../web/pond-water.js'),'utf8'),sandbox);
-  return {canvas,doc,preference,events,preferenceEvents,surfaces,sandbox,
+  return {canvas,doc,desktop,preference,events,preferenceEvents,surfaces,sandbox,
     get pending() { return callbacks.size+timers.size; }, get animationCalls() { return animationCalls; },
     advance(delta) {
       const end=now+delta;
@@ -88,6 +89,19 @@ test('decorative pond surfaces retain viewport coverage within a fixed pixel bud
     assert.equal(pond.canvas.width,700);assert.equal(pond.canvas.height,500);
     assert.equal(pond.pending,1);
   }
+});
+
+test('native minimize and tray hiding pause the pond while WebView2 still reports a visible document', () => {
+  const pond=pondHarness(), nativeChange=pond.events['musicserver-desktop-visibility'];
+  pond.advance(1000);
+  pond.desktop.visible=false;nativeChange();assert.equal(pond.doc.hidden,false);assert.equal(pond.pending,0);
+  const before=pond.surfaces[0].stats.paints;pond.advance(60000);
+  assert.equal(pond.surfaces[0].stats.paints,before);
+  pond.events.visibilitychange();assert.equal(pond.pending,0, 'document events must not unpause a native-hidden window');
+  pond.events.resize();assert.equal(pond.pending,0, 'resize retains a static image without restarting');
+  pond.desktop.visible=true;nativeChange();nativeChange();assert.equal(pond.pending,1);
+  pond.advance(120);assert.ok(pond.surfaces[0].stats.paints>before+1);
+  pond.desktop.visible=false;nativeChange();assert.equal(pond.pending,0);
 });
 
 test('idle pond frames reuse slow reflections, and pointer motion briefly increases particle cadence', () => {

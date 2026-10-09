@@ -2,7 +2,7 @@ const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const vm=require('node:vm');
-const {lyricLine}=require('../web/desktop-bridge.js');
+const {lyricLine,watchWindowVisibility}=require('../web/desktop-bridge.js');
 test('taskbar lyrics follow seeks, silence before the first line, and missing lyrics without stale text',()=>{
   const lyrics={available:true,entries:[{time:3,text:'新叶'},{time:8,text:'水光'}]};
   assert.equal(lyricLine(lyrics,8),'水光'); assert.equal(lyricLine(lyrics,4),'新叶');
@@ -20,6 +20,34 @@ function fixture({failSave=false}={}) {
   return {root,calls,actions,listeners,audioListeners,element,setView:v=>view=v};
 }
 const settle=()=>new Promise(resolve=>setImmediate(resolve));
+
+test('native visibility combines minimize and tray state, coalesces events and polls missed restores',async()=>{
+  const timers=new Map(),events={},changes=[];
+  let serial=0,minimized=false,visible=true,reads=0,releases=0;
+  const clock={setTimeout:(fn,delay)=>{assert.equal(delay,2000);timers.set(++serial,fn);return serial;},clearTimeout:id=>timers.delete(id)};
+  const native={isMinimized:async()=>{reads++;return minimized;},isVisible:async()=>visible,
+    onResized:async fn=>{events.resize=fn;return()=>releases++;},onFocusChanged:async fn=>{events.focus=fn;return()=>releases++;}};
+  const watcher=watchWindowVisibility(native,value=>changes.push(value),clock);await settle();
+  assert.equal(watcher.isVisible(),true);assert.equal(timers.size,1);
+  minimized=true;events.resize();events.focus();events.focus();await settle();
+  assert.equal(watcher.isVisible(),false);assert.deepEqual(changes,[false]);assert.ok(reads<=3, 'overlapping window events must coalesce native reads');
+  minimized=false;
+  const [id,poll]=timers.entries().next().value;timers.delete(id);poll();await settle();
+  assert.equal(watcher.isVisible(),true);assert.deepEqual(changes,[false,true]);assert.equal(timers.size,1);
+  visible=false;events.focus();await settle();assert.equal(watcher.isVisible(),false);
+  watcher.dispose();assert.equal(timers.size,0);assert.equal(releases,2);
+  const stopped=reads;events.resize();await settle();assert.equal(reads,stopped);
+});
+
+test('unavailable native reads leave browser rendering enabled and late subscriptions are released on exit',async()=>{
+  let releaseSubscription,releases=0;
+  const timers=new Map(),clock={setTimeout:fn=>{timers.set(1,fn);return 1;},clearTimeout:id=>timers.delete(id)};
+  const native={isMinimized:async()=>{throw Error('native unavailable');},isVisible:async()=>true,
+    onResized:()=>new Promise(resolve=>releaseSubscription=resolve)};
+  const watcher=watchWindowVisibility(native,()=>assert.fail('failed native reads must not hide the browser'),clock);
+  await settle();assert.equal(watcher.isVisible(),true);
+  watcher.dispose();releaseSubscription(()=>releases++);await settle();assert.equal(releases,1);assert.equal(timers.size,0);
+});
 test('hidden main player publishes changed lyrics once and rejects actions for an obsolete song',async()=>{
   const f=fixture();await settle();
   f.calls.length=0;

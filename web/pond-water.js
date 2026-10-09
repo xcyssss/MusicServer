@@ -27,6 +27,7 @@
   const ctx = canvas.getContext('2d', {alpha:true});
   if (!ctx) return;
   const motion = root.matchMedia('(prefers-reduced-motion: reduce)');
+  const pageHidden = () => document.hidden || root.MusicServerDesktop?.isVisible?.() === false;
   const sky = document.createElement('canvas'); sky.width=1200; sky.height=850;
   const paint = sky.getContext('2d');
   const reflection = document.createElement('canvas'), reflectionPaint = reflection.getContext('2d');
@@ -149,20 +150,20 @@
   }
   function tick(now) {
     frame=null;
-    if(document.hidden || motion.matches) return;
+    if(pageHidden() || motion.matches) return;
     draw(Math.min(160,now-last)); last=now; schedule();
   }
   function schedule() {
-    if(frame!=null || timer!=null || document.hidden || motion.matches) return;
+    if(frame!=null || timer!=null || pageHidden() || motion.matches) return;
     const now=performance.now(), interval=now<activeUntil ? ACTIVE_INTERVAL : IDLE_INTERVAL;
     const delay=Math.max(0,interval-(now-last));
     timer=setTimeout(()=>{
       timer=null;
-      if(!document.hidden && !motion.matches) frame=requestAnimationFrame(tick);
+      if(!pageHidden() && !motion.matches) frame=requestAnimationFrame(tick);
     },delay);
   }
   function start() {
-    if(frame==null && timer==null && !document.hidden && !motion.matches) { last=performance.now();schedule(); }
+    if(frame==null && timer==null && !pageHidden() && !motion.matches) { last=performance.now();schedule(); }
   }
   function stop() {
     if(frame!=null) cancelAnimationFrame(frame);
@@ -171,7 +172,7 @@
   }
   root.addEventListener('resize',resize);
   document.addEventListener('pointermove',event=>{
-    if(document.hidden || motion.matches || event.pointerType==='touch') return;
+    if(pageHidden() || motion.matches || event.pointerType==='touch') return;
     const x=event.clientX/width,y=event.clientY/height;
     const distance=Math.hypot((x-pointer.x)*width,(y-pointer.y)*height);
     pointer={x,y}; const now=performance.now();
@@ -179,7 +180,8 @@
     if(timer!=null) { clearTimeout(timer);timer=null;schedule(); }
     if(distance>6 && now-lastWake>170) { impact(x,y,1.3);lastWake=now; }
   },{passive:true});
-  document.addEventListener('visibilitychange',()=>document.hidden?stop():start());
+  document.addEventListener('visibilitychange',()=>pageHidden()?stop():start());
+  document.addEventListener('musicserver-desktop-visibility',()=>pageHidden()?stop():start());
   motion.addEventListener('change',()=>{stop();wakes.length=0;if(motion.matches) draw(0);else start();});
   root.addEventListener('pagehide',stop);
   resize();
