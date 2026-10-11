@@ -30,7 +30,7 @@ if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) {
 }
 
 $startAt = [datetime]::ParseExact($Time, 'HH:mm', [Globalization.CultureInfo]::InvariantCulture)
-$arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" -Count $Count -AppHome `"$AppHome`""
+$arguments = "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`" -Count $Count -AppHome `"$AppHome`""
 $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arguments -WorkingDirectory $PSScriptRoot
 $trigger = New-ScheduledTaskTrigger -Daily -At $startAt
 # Register-ScheduledTask's defaults would silently disable this task for many

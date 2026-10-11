@@ -20,28 +20,107 @@ test('pond leaves sink continuously and recycle only while invisible', () => {
   assert.ok(speeds.size > 3, 'leaves should not descend as one sheet');
 });
 
-test('the pond stops its shared animation clock when hidden or reduced and resumes without accumulating callbacks', () => {
+function pondHarness(width = 960, height = 640, devicePixelRatio = 1) {
   const vm = require('node:vm'), fs = require('node:fs');
-  const callbacks = new Map(), events = {}, preferenceEvents = {};
-  let serial = 0, paintCount = 0, now = 0;
+  const callbacks = new Map(), timers = new Map(), events = {}, preferenceEvents = {}, surfaces = [];
+  let serial = 0, now = 0, animationCalls = 0;
   const gradient = {addColorStop(){}};
-  const context = new Proxy({}, {get:(_,name) => name.startsWith('create') ? () => gradient : () => {paintCount++;}, set:()=>true});
-  const canvas = {getContext:()=>context, parentElement:{appendChild(){}}};
+  const surface = () => {
+    const stats = {paints:0, images:0, leaves:0}, node = {width:0,height:0,setAttribute(){}};
+    const context = new Proxy({}, {get:(_,name) => {
+      if (name.startsWith('create')) return () => gradient;
+      if (name === 'clearRect') return () => stats.paints++;
+      if (name === 'drawImage') return () => stats.images++;
+      if (name === 'fill') return path => { if (path) stats.leaves++; };
+      return () => {};
+    }, set:()=>true});
+    node.getContext = () => context;
+    surfaces.push({node,stats}); return node;
+  };
+  const canvas = surface(); canvas.parentElement = {appendChild(){}};
+  const desktop = {visible:true,isVisible() { return this.visible; }};
   const preference = {matches:false, addEventListener:(type,fn)=>preferenceEvents[type]=fn};
-  const doc = {hidden:false, getElementById:()=>canvas, createElement:()=>({getContext:()=>context,setAttribute(){}}),addEventListener:(type,fn)=>events[type]=fn};
-  const sandbox = {document:doc, matchMedia:()=>preference, Path2D:class {}, innerWidth:960,innerHeight:640,performance:{now:()=>now},
-    requestAnimationFrame:fn=>{callbacks.set(++serial,fn);return serial;},cancelAnimationFrame:id=>callbacks.delete(id),addEventListener:(type,fn)=>events[type]=fn};
+  const doc = {hidden:false, getElementById:()=>canvas, createElement:type=>type === 'canvas' ? surface() : {setAttribute(){}},addEventListener:(type,fn)=>events[type]=fn};
+  const sandbox = {document:doc,MusicServerDesktop:desktop, matchMedia:()=>preference, Path2D:class {}, innerWidth:width,innerHeight:height,devicePixelRatio,performance:{now:()=>now},
+    requestAnimationFrame:fn=>{const at=(Math.floor(now/(1000/60))+1)*(1000/60);callbacks.set(++serial,{fn,at});return serial;},
+    cancelAnimationFrame:id=>callbacks.delete(id),setTimeout:(fn,delay)=>{timers.set(++serial,{fn,at:now+delay});return serial;},
+    clearTimeout:id=>timers.delete(id),addEventListener:(type,fn)=>events[type]=fn};
   vm.runInNewContext(fs.readFileSync(require.resolve('../web/pond-water.js'),'utf8'),sandbox);
-  assert.equal(callbacks.size,1);
-  const tick=()=>{now+=50;const [id,fn]=callbacks.entries().next().value;callbacks.delete(id);fn(now);};
-  tick(); assert.equal(callbacks.size,1);
-  doc.hidden=true;events.visibilitychange();assert.equal(callbacks.size,0);
-  const stopped=paintCount;now+=60000;assert.equal(paintCount,stopped);
-  doc.hidden=false;events.visibilitychange();events.visibilitychange();assert.equal(callbacks.size,1);
-  preference.matches=true;preferenceEvents.change();assert.equal(callbacks.size,0);
-  events.resize();assert.equal(callbacks.size,0);
-  preference.matches=false;preferenceEvents.change();assert.equal(callbacks.size,1);
-  events.pagehide();assert.equal(callbacks.size,0);
+  return {canvas,doc,desktop,preference,events,preferenceEvents,surfaces,sandbox,
+    get pending() { return callbacks.size+timers.size; }, get animationCalls() { return animationCalls; },
+    advance(delta) {
+      const end=now+delta;
+      for (;;) {
+        const next=[...Array.from(timers,([id,item])=>({id,...item,queue:timers})),...Array.from(callbacks,([id,item])=>({id,...item,queue:callbacks}))].sort((a,b)=>a.at-b.at)[0];
+        if (!next || next.at>end) break;
+        now=next.at;next.queue.delete(next.id);
+        if (next.queue===callbacks) animationCalls++;
+        next.fn(now);
+      }
+      now=end;
+    }
+  };
+}
+
+test('the pond stops timers and frames when hidden or reduced and resumes without accumulating callbacks', () => {
+  const pond=pondHarness(), {doc,preference,events,preferenceEvents}=pond;
+  assert.equal(pond.pending,1);
+  pond.advance(1000); assert.equal(pond.pending,1);
+  doc.hidden=true;events.visibilitychange();assert.equal(pond.pending,0);
+  const stopped=pond.surfaces[0].stats.paints;pond.advance(60000);assert.equal(pond.surfaces[0].stats.paints,stopped);
+  events.pointermove({clientX:500,clientY:400,pointerType:'mouse'});assert.equal(pond.pending,0);
+  doc.hidden=false;events.visibilitychange();events.visibilitychange();assert.equal(pond.pending,1);
+  pond.advance(120);assert.ok(pond.surfaces[0].stats.paints>stopped);
+  preference.matches=true;preferenceEvents.change();assert.equal(pond.pending,0);
+  events.resize();assert.equal(pond.pending,0);
+  preference.matches=false;preferenceEvents.change();assert.equal(pond.pending,1);
+  events.pagehide();assert.equal(pond.pending,0);
+  const closed=pond.surfaces[0].stats.paints;pond.advance(1000);assert.equal(pond.surfaces[0].stats.paints,closed);
+});
+
+test('decorative pond surfaces retain viewport coverage within a fixed pixel budget at high DPI and 4K', () => {
+  for (const [width,height,ratio] of [[960,640,1],[1920,1080,1.5],[3840,2160,2]]) {
+    const pond=pondHarness(width,height,ratio), reflection=pond.surfaces[2].node;
+    assert.ok(pond.canvas.width*pond.canvas.height<=1024*1024);
+    assert.ok(pond.canvas.width<=width && pond.canvas.height<=height);
+    assert.equal(reflection.width,pond.canvas.width);assert.equal(reflection.height,pond.canvas.height);
+    assert.ok(Math.abs(pond.canvas.width/pond.canvas.height-width/height)<.005);
+    pond.sandbox.innerWidth=700;pond.sandbox.innerHeight=500;pond.events.resize();
+    assert.equal(pond.canvas.width,700);assert.equal(pond.canvas.height,500);
+    assert.equal(pond.pending,1);
+  }
+});
+
+test('native minimize and tray hiding pause the pond while WebView2 still reports a visible document', () => {
+  const pond=pondHarness(), nativeChange=pond.events['musicserver-desktop-visibility'];
+  pond.advance(1000);
+  pond.desktop.visible=false;nativeChange();assert.equal(pond.doc.hidden,false);assert.equal(pond.pending,0);
+  const before=pond.surfaces[0].stats.paints;pond.advance(60000);
+  assert.equal(pond.surfaces[0].stats.paints,before);
+  pond.events.visibilitychange();assert.equal(pond.pending,0, 'document events must not unpause a native-hidden window');
+  pond.events.resize();assert.equal(pond.pending,0, 'resize retains a static image without restarting');
+  pond.desktop.visible=true;nativeChange();nativeChange();assert.equal(pond.pending,1);
+  pond.advance(120);assert.ok(pond.surfaces[0].stats.paints>before+1);
+  pond.desktop.visible=false;nativeChange();assert.equal(pond.pending,0);
+});
+
+test('idle pond frames reuse slow reflections, and pointer motion briefly increases particle cadence', () => {
+  const pond=pondHarness(1920,1080,1.5), main=pond.surfaces[0].stats, reflection=pond.surfaces[2].stats;
+  pond.advance(10000);
+  const idle=main.paints-1;
+  assert.ok(idle>=90 && idle<=120, `idle frames: ${idle}`);
+  assert.equal(pond.animationCalls,idle, 'screen-refresh callbacks must not run between pond frames');
+  assert.ok(reflection.paints<=61 && reflection.paints<main.paints*.7);
+  assert.equal(reflection.images,reflection.paints*80);
+  assert.equal(main.images,main.paints, 'particle frames composite the cached reflection once');
+  assert.equal(main.leaves,main.paints*LEAF_COUNT, 'the existing leaves remain visible at every frame');
+  const before=main.paints;
+  pond.events.pointermove({clientX:800,clientY:600,pointerType:'mouse'});pond.advance(1000);
+  assert.ok(main.paints-before>idle/10*1.5, 'pointer interaction should retain a quicker response');
+  pond.advance(1500);
+  const settled=main.paints;pond.advance(1000);
+  assert.ok(main.paints-settled<=12, 'interaction cadence must return to the idle budget');
+  assert.equal(pond.pending,1);
 });
 
 test('twenty daily songs are browsed once before any song is repeated', () => {

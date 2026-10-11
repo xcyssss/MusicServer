@@ -318,7 +318,7 @@
 .garden-floating { opacity:.67; }
 .floating-leaf { animation:leaf-in-water var(--drift-time) ease-in-out var(--drift-delay) infinite; }
 @keyframes leaf-in-water { 0%,100% { transform:translate(0,0) rotate(-5deg); } 50% { transform:translate(9px,14px) rotate(17deg); } }
-.water-paused .floating-leaf { animation-play-state:paused; }
+.water-paused .floating-leaf,.water-paused .sprig-leaves,.water-paused .ivy-run { animation-play-state:paused; }
 .drop-heading { top:10%; left:12%; right:23%; text-align:left; pointer-events:none; }
 .garden-caption { display:block; font-size:8px; font-weight:600; letter-spacing:2px; color:#758356; margin-bottom:10px; }
 .drop-heading h2 { font-size:clamp(23px,2.2vw,32px); letter-spacing:2px; font-weight:600; }

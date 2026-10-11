@@ -112,6 +112,7 @@
   const viewport = el('tree-viewport');
   const list = el('library-list');
   const reducedMotion = root.matchMedia('(prefers-reduced-motion: reduce)');
+  const pageHidden = () => document.hidden || root.MusicServerDesktop?.isVisible?.() === false;
   let libraryView = null;
   let recommendationView = null;
   let focusId = null;
@@ -417,7 +418,7 @@
         ring.setAttribute('d', points.map((p,index) => `${index ? 'L' : 'M'}${x+p.x} ${y+p.y}`).join(' '));
         ring.setAttribute('opacity', String(Math.sin(Math.PI*t)**.8 * (1-t*.4)));
       });
-      if (elapsed < 2580 && !document.hidden && !reducedMotion.matches) waterFrame = requestAnimationFrame(draw);
+      if (elapsed < 2580 && !pageHidden() && !reducedMotion.matches) waterFrame = requestAnimationFrame(draw);
       else { waterFrame = null; layer.replaceChildren(); }
     }
     waterFrame = requestAnimationFrame(draw);
@@ -432,7 +433,16 @@
     el('water-ripples').replaceChildren();
     el('recommendation-list').classList.remove('water-turning');
   });
-  document.addEventListener('visibilitychange', () => document.body.classList.toggle('water-paused', document.hidden));
+  function updateVisualVisibility() {
+    const hidden = pageHidden();
+    document.body.classList.toggle('water-paused', hidden);
+    if (hidden && waterFrame != null) {
+      cancelAnimationFrame(waterFrame); waterFrame = null;
+      el('water-ripples').replaceChildren();
+    }
+  }
+  document.addEventListener('visibilitychange', updateVisualVisibility);
+  document.addEventListener('musicserver-desktop-visibility', updateVisualVisibility);
   el('tree-player-like').addEventListener('click', () => recommendationView?.likeCurrent());
   const artMarkup = '<svg viewBox="0 0 64 64" aria-hidden="true"><use href="#mark-leaf-plain" /></svg>';
   el('player-art').innerHTML = artMarkup;
@@ -501,7 +511,7 @@
     clearMusicWater();
   }
   function drawSpectrum(now) {
-    if (audio.paused || document.hidden || reducedMotion.matches) { stopSpectrum(); return; }
+    if (audio.paused || pageHidden() || reducedMotion.matches) { stopSpectrum(); return; }
     if (now - spectrumLast > 45) {
       const delta = Math.min(100, now - spectrumLast);
       spectrumLast = now;
@@ -516,7 +526,7 @@
     spectrumFrame = requestAnimationFrame(drawSpectrum);
   }
   async function startSpectrum() {
-    if (audio.paused || document.hidden || reducedMotion.matches) return;
+    if (audio.paused || pageHidden() || reducedMotion.matches) return;
     try {
       const sameOrigin = new URL(audio.currentSrc || audio.src, root.location.href).origin === root.location.origin;
       if (!analyser && sameOrigin) {
@@ -535,7 +545,7 @@
       if (context) await context.resume();
       if (context !== spectrumContext) return;
     } catch { resetSpectrum(); } // A missing capture must never interfere with playback.
-    if (spectrumFrame == null && !audio.paused && !document.hidden && !reducedMotion.matches) spectrumFrame=requestAnimationFrame(drawSpectrum);
+    if (spectrumFrame == null && !audio.paused && !pageHidden() && !reducedMotion.matches) spectrumFrame=requestAnimationFrame(drawSpectrum);
   }
   function resetSpectrum() {
     stopSpectrum(); capture?.getTracks().forEach(track => track.stop()); capture=null;
@@ -547,10 +557,11 @@
   audio.addEventListener('ended', stopSpectrum);
   reducedMotion.addEventListener('change', () => reducedMotion.matches ? stopSpectrum() : void startSpectrum());
   document.addEventListener('pointerdown', () => { if (spectrumContext?.state === 'suspended') void startSpectrum(); }, {passive:true});
-  document.addEventListener('visibilitychange', () => document.hidden ? stopSpectrum() : void startSpectrum());
+  document.addEventListener('visibilitychange', () => pageHidden() ? stopSpectrum() : void startSpectrum());
+  document.addEventListener('musicserver-desktop-visibility', () => pageHidden() ? stopSpectrum() : void startSpectrum());
   let pointerFrame = null, pointerX = .5, pointerY = .5;
   document.addEventListener('pointermove', event => {
-    if (reducedMotion.matches || event.pointerType === 'touch') return;
+    if (pageHidden() || reducedMotion.matches || event.pointerType === 'touch') return;
     pointerX=event.clientX/root.innerWidth; pointerY=event.clientY/root.innerHeight;
     if (pointerFrame == null) pointerFrame=requestAnimationFrame(() => {
       pointerFrame=null;
