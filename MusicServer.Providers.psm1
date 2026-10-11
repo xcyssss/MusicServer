@@ -535,6 +535,9 @@ function Get-SharedTitlePrefixes {
         $upper = [Math]::Min($MaximumLength, $text.Length)
         for ($length = $MinimumLength; $length -le $upper; $length++) {
             $prefix = $text.Substring(0, $length)
+            # Repeated bracketed performer labels (e.g. 【SNH48】) are still
+            # credits. Their format alone is not evidence of channel branding.
+            if ($prefix -match '^【[^【】]+】\s*$') { continue }
             if (-not [regex]::IsMatch($prefix, '[】\]）)\s\-–—｜|：:·、,，。!！?？]$')) { continue }
             if ($counts.ContainsKey($prefix)) { $counts[$prefix] = $counts[$prefix] + 1 } else { $counts[$prefix] = 1 }
         }
@@ -586,6 +589,12 @@ function Get-TitleCreditAfterSeriesLabel {
     return ([string](@($tokens[($last + 1)..($tokens.Count - 1)]) -join ' ')).Trim()
 }
 
+function Test-MusicServerArtistCredit {
+    param([AllowEmptyString()][string]$Artist = '')
+    $value = $Artist.Trim().Trim('[', ']', '【', '】').Trim()
+    return $value -and $value -notmatch '^(?i)(?:unknown(?:[ _-]+(?:artist|singer))?|various(?:[ _-]+artists)?|n/?a|none|null|未知(?:歌手|艺术家|藝人)?|佚名|群星)$'
+}
+
 function Get-TitleDeclaredArtist {
     <#
     .SYNOPSIS
@@ -631,6 +640,19 @@ function Get-TitleDeclaredArtist {
             # This runs before the trailing cleanup, which would otherwise erase
             # the punctuation ("仙气空灵！") that proves it is not a name.
             $isSentence = [regex]::IsMatch($before, '[，。！？、丨｜\u201c\u201d\u2018\u2019]')
+            # An isolated performer label immediately before the song is a
+            # credit; quality/format labels in the same position are not.
+            $labels = [regex]::Matches($before, '【([^【】]{1,40})】')
+            $unlabelled = [regex]::Replace($before, '【[^【】]*】', '').Trim()
+            if (-not $unlabelled -and $labels.Count -gt 0) {
+                $credit = [string]$labels[$labels.Count - 1].Groups[1].Value.Trim()
+                if ((Test-MusicServerArtistCredit -Artist $credit) -and
+                    $credit -notmatch '(?i)4k|8k|\d+fps|hi-?res|full|mv|ost|中字|歌词|歌詞|字幕|音质|音質|无损|無損|现场|現場|翻唱|纯享|舞台|录音|動態|动态|水印|明日方舟' -and
+                    $credit -notmatch '[，。！？丨｜/:：]' -and
+                    -not ($credit -match '[\u3400-\u9fff\u3040-\u30ff]' -and $credit -match '\s')) {
+                    return $credit
+                }
+            }
             $isBracketed = [regex]::IsMatch($before, '[《》「」『』【】]')
             if (-not $isSentence -and -not $isBracketed) {
                 # "artist - song" in front of the bracket: keep the artist side.
@@ -639,7 +661,7 @@ function Get-TitleDeclaredArtist {
                 } elseif ($before.Contains('-') -and [regex]::IsMatch($before, '[\u3400-\u9fff]')) {
                     # CJK titles often glue it as "artist-song-series" with no
                     # spaces, e.g. "小树-不安的前方-动漫"; the first part is the singer.
-                    $before = [string](@($before.Split('-') | Where-Object { $_ })[0])
+                    $before = [string](@([regex]::Split($before, '(?<=[\u3400-\u9fff])-(?=[\u3400-\u9fff])') | Where-Object { $_ })[0])
                 }
                 $before = [regex]::Replace($before, '[\s\-–—－|｜·、,，。!！?？:：+~～*"' + [char]0x201c + [char]0x201d + [char]0x2018 + [char]0x2019 + ']+$', '').Trim()
                 # Accept only a single credit, never a phrase. Text mixing CJK with
@@ -652,7 +674,7 @@ function Get-TitleDeclaredArtist {
                 $acceptable = $true
                 if ($hasCjk -and $hasSpace) { $acceptable = $false }
                 elseif ($hasCjk -and -not $hasSeparator -and $before.Length -gt 12) { $acceptable = $false }
-                if ($acceptable -and $before.Length -gt 0 -and $before.Length -le 40) {
+                if ($acceptable -and $before.Length -gt 0 -and $before.Length -le 40 -and (Test-MusicServerArtistCredit -Artist $before)) {
                     return $before
                 }
             }
@@ -678,7 +700,7 @@ function Get-TitleDeclaredArtist {
     if ($tail) {
         $cleanHead = -not [regex]::IsMatch($head, '[《》「」『』【】，。！？]')
         $cleanTail = -not [regex]::IsMatch($tail, '[《》「」『』【】（）()，。！？、丨｜|]|Hi-?Res|无损|音质')
-        if ($cleanHead -and $cleanTail -and $tail.Length -le 40) { return $tail }
+        if ($cleanHead -and $cleanTail -and $tail.Length -le 40 -and (Test-MusicServerArtistCredit -Artist $tail)) { return $tail }
     }
     return ''
 }
@@ -703,13 +725,26 @@ function Resolve-DisplayArtist {
         [AllowEmptyString()][string]$Title = '',
         [AllowEmptyString()][string]$Indexed = '',
         [AllowNull()]$CachedRow = $null,
-        [AllowEmptyCollection()][string[]]$KnownPrefixes = @()
+        [AllowEmptyCollection()][string[]]$KnownPrefixes = @(),
+        [AllowNull()]$CanonicalTrack = $null
     )
 
+    # Only an exact local binding/worker receipt supplies CanonicalTrack. It
+    # preserves complete download credits that a short filename cannot vouch for.
+    if ($CanonicalTrack -and (Test-MusicServerArtistCredit -Artist ([string](Get-OptionalProperty $CanonicalTrack 'artist' '')))) {
+        $album = [string](Get-OptionalProperty $CanonicalTrack 'album' '')
+        $year = [int](Get-OptionalProperty $CanonicalTrack 'release_year' 0)
+        if ($year -le 0 -and $CachedRow -and
+            (Test-MusicServerArtistCredit -Artist ([string](Get-OptionalProperty $CachedRow 'artist' ''))) -and
+            [string](Get-OptionalProperty $CachedRow 'album' '') -eq $album) {
+            $year = [int](Get-OptionalProperty $CachedRow 'release_year' 0)
+        }
+        return [pscustomobject]@{ artist=[string]$CanonicalTrack.artist; album=$album; year=$year; source='canonical' }
+    }
     if ($CachedRow) {
         $source = [string](Get-OptionalProperty $CachedRow 'source' '')
         $cached = [string](Get-OptionalProperty $CachedRow 'artist' '')
-        if ($source -ne 'title' -and $cached) {
+        if ($source -ne 'title' -and (Test-MusicServerArtistCredit -Artist $cached)) {
             return [pscustomobject]@{
                 artist = $cached
                 album = [string](Get-OptionalProperty $CachedRow 'album' '')
@@ -723,7 +758,7 @@ function Resolve-DisplayArtist {
     if ($declared) {
         return [pscustomobject]@{ artist = $declared; album = ''; year = 0; source = 'title' }
     }
-    if ($Indexed) {
+    if (Test-MusicServerArtistCredit -Artist $Indexed) {
         return [pscustomobject]@{ artist = $Indexed; album = ''; year = 0; source = '' }
     }
     return $null
@@ -833,11 +868,12 @@ function Test-FileVouchesForArtist {
         [Parameter(Mandatory)][AllowEmptyString()][string]$Title
     )
 
-    if ([string]::IsNullOrWhiteSpace($Artist)) { return $false }
+    if (-not (Test-MusicServerArtistCredit -Artist $Artist)) { return $false }
     $fileKey = ConvertTo-MusicServerKey -Value $Title
     $names = @($Artist -split '[,，、/＆&×;；]|\s+feat\.?\s+|\s+ft\.?\s+' | ForEach-Object { $_.Trim() } | Where-Object { $_.Length -ge 2 })
     if ($names.Count -eq 0) { return $false }
     foreach ($name in $names) {
+        if (-not (Test-MusicServerArtistCredit -Artist $name)) { return $false }
         if (-not $fileKey.Contains((ConvertTo-MusicServerKey -Value $name))) { return $false }
     }
     return $true
@@ -969,7 +1005,8 @@ function Resolve-MusicServerLocalLyrics {
     $status='MISSING'; $text=''; $songId=''; $phase='identity'; $failure=''; $timer=[Diagnostics.Stopwatch]::StartNew()
     try {
         $resolved = Get-LocalTrackArtistDb -PathKey $key
-        $artist = if ($resolved -and $resolved.status -eq 'RESOLVED' -and $resolved.source -eq 'netease') { [string]$resolved.artist } else { Get-TitleDeclaredArtist -Title $info.BaseName }
+        $decision = Resolve-DisplayArtist -Title $info.BaseName -CachedRow $resolved
+        $artist = if ($decision) { [string]$decision.artist } else { '' }
         if (-not $artist) { $missing.message='未能确认这首歌的歌手，暂不自动匹配。也可把同名 .lrc 放在歌曲旁。'; return $missing }
         $title = [string](@(Get-TitleSearchKeywords -Title $info.BaseName) | Select-Object -First 1)
         $track = New-CanonicalTrack -Title $title -Artist $artist

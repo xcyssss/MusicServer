@@ -301,19 +301,7 @@ function Get-NavidromeLibraryItem {
 }
 
 function Get-LocalCanonicalTrackMap {
-    $map = Get-CanonicalLocalTrackMapDb
-    # Exact download receipts cover files published before Navidrome indexed them.
-    # Never match by title: different recordings can share a title.
-    $receipts = @(Invoke-MusicServerSqlJson -Query "SELECT f.file_name, c.id FROM recommendation_files f JOIN canonical_tracks c ON c.id=f.track_id WHERE f.seed_source='wanted_worker';")
-    foreach ($receipt in $receipts) {
-        $name = [string]$receipt.file_name
-        if (-not $name -or [IO.Path]::GetFileName($name) -ne $name) { continue }
-        $key = 'file:' + [IO.Path]::GetFullPath((Join-Path $Config.MusicDir $name))
-        if ($map.ContainsKey($key) -and [string]$map[$key].id -ne [string]$receipt.id) {
-            $map[$key] = $null # Ambiguous receipts must not toggle another recording.
-        } else { $map[$key] = $receipt }
-    }
-    return $map
+    return Get-CanonicalLocalTrackMapDb -MusicDir $Config.MusicDir
 }
 
 function New-ListeningLibraryItem {
@@ -375,10 +363,12 @@ function Get-LibraryFolderArtist {
 # every library surface reads that cache here. Fail-soft: a resolution that has
 # not run yet leaves the index value in place rather than blanking it.
 function Add-ResolvedArtist {
-    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Items)
+    param([Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Items, [hashtable]$CanonicalByLocalId = @{})
     if (@($Items).Count -eq 0) { return @() }
     $resolved = @{}
     try { $resolved = Get-LocalTrackArtistMapDb } catch { $resolved = @{} }
+    $canonicalById = @{}
+    foreach ($track in $CanonicalByLocalId.Values) { if ($track) { $canonicalById[[string]$track.id] = $track } }
     # Channel branding is a prefix shared by many titles, so it is only
     # recognisable from the whole set; a single-item lookup gets no prefixes.
     $prefixes = @()
@@ -398,7 +388,17 @@ function Add-ResolvedArtist {
     foreach ($item in @($Items)) {
         $key = Get-MusicServerPathKey -Path ([string](Get-OptionalProperty $item 'file' ''))
         $row = if ($key -and $resolved.ContainsKey($key)) { $resolved[$key] } else { $null }
-        $decision = Resolve-DisplayArtist -Title ([string](Get-OptionalProperty $item 'title' '')) -Indexed ([string](Get-OptionalProperty $item 'artist' '')) -CachedRow $row -KnownPrefixes $prefixes
+        $canonical = $canonicalById[[string]$item.canonical_track_id]
+        $item | Add-Member -NotePropertyName 'canonical_title' -NotePropertyValue '' -Force
+        $item | Add-Member -NotePropertyName 'canonical_title_source' -NotePropertyValue '' -Force
+        if ($canonical) {
+            $ids = @(ConvertFrom-MusicServerJsonArray -Json ([string](Get-OptionalProperty $canonical 'identifiers_json' '[]')))
+            if (@($ids | Where-Object { (Get-OptionalProperty $_ 'type' '') -eq 'netease' -and [string](Get-OptionalProperty $_ 'value' '') -match '^\d+$' }).Count -gt 0) {
+                $item.canonical_title = [string]$canonical.title
+                $item.canonical_title_source = 'netease'
+            }
+        }
+        $decision = Resolve-DisplayArtist -Title ([string](Get-OptionalProperty $item 'title' '')) -Indexed ([string](Get-OptionalProperty $item 'artist' '')) -CachedRow $row -KnownPrefixes $prefixes -CanonicalTrack $canonical
         if (-not $decision) { continue }
         if ($decision.artist) { $item.artist = $decision.artist }
         if ($decision.album) { $item.album = $decision.album }
@@ -449,7 +449,7 @@ function Get-LocalListeningItems {
         $known = $id -and $preferences.ContainsKey($id)
         $item | Add-Member -NotePropertyName liked -NotePropertyValue $(if ($known) { $preferences[$id] -eq 'LIKE' } else { $null }) -Force
     }
-    return @(Add-ResolvedArtist -Items @($items))
+    return @(Add-ResolvedArtist -Items @($items) -CanonicalByLocalId $canonicalByLocalId)
 }
 
 function Get-LocalListeningItem {

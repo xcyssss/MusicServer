@@ -170,6 +170,44 @@ Describe 'MusicServer live UI API proxy' {
         }
     }
 
+    It 'uses exact download receipts for complete metadata and heals unknown credits on both library routes' {
+        $root = $script:ProxyTest.Root
+        $cfg = New-MusicServerConfig -Root $ProjectRoot -AppHome $root
+        New-Item -ItemType Directory -Path $cfg.MusicDir -Force | Out-Null
+        $limeName = '酸橙色信笺 - 塞壬唱片-MSR.mp3'
+        $lime = Join-Path $cfg.MusicDir $limeName
+        $seasons = Join-Path $cfg.MusicDir '【SNH48】《春夏秋冬》舞台 - Unknown Artist.mp3'
+        $unbound = Join-Path $cfg.MusicDir '酸橙色信笺 - Another Singer.mp3'
+        foreach ($file in @($lime, $seasons, $unbound)) { [IO.File]::WriteAllBytes($file, (New-Object byte[] 4)) }
+        $track = New-CanonicalTrack -TrackId 'exact-lime' -Title '酸橙色信笺' -Artist '塞壬唱片-MSR,DAZBEE' -Album '酸橙色信笺' -ReleaseYear 2026 -Status LOCAL -Identifiers @([pscustomobject]@{type='netease';value='3410744228'})
+        (Save-CanonicalTrackDb -Track $track).Success | Should Be $true
+        Invoke-MusicServerParamNonQuery -Template "INSERT INTO recommendation_files(file_name,track_id,title,artist,seed_source,created_at) VALUES(@file,'exact-lime','酸橙色信笺','塞壬唱片-MSR,DAZBEE','wanted_worker','2026-09-29');" -Params @{file=$limeName} | Out-Null
+        Save-LocalTrackArtistDb -PathKey (Get-MusicServerPathKey -Path $lime) -Artist '塞壬唱片-MSR' -Album '酸橙色信笺' -Status RESOLVED -Source netease -ReleaseYear 2026 | Out-Null
+        Save-LocalTrackArtistDb -PathKey (Get-MusicServerPathKey -Path $seasons) -Artist 'Unknown Artist' -Album 'CSLMAGE001' -Status RESOLVED -Source netease -ReleaseYear 2015 | Out-Null
+        $apiPort = Get-TestFreePort
+        do { $uiPort = Get-TestFreePort } while ($apiPort -eq $uiPort)
+        $args = @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $root 'start_musicserver_ui.ps1'),'-ApiPrefix',"http://127.0.0.1:$apiPort/",'-UiPrefix',"http://127.0.0.1:$uiPort/",'-NoBrowser')
+        $ui = Start-Process -FilePath (Get-TestTermExe) -ArgumentList $args -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $root 'ui.out.log') -RedirectStandardError (Join-Path $root 'ui.err.log')
+        $script:ProxyTest.Processes += $ui
+        Wait-TestHealth -BaseUrl "http://127.0.0.1:$uiPort"
+        foreach ($port in @($apiPort, $uiPort)) {
+            $library = Invoke-RestMethod -Uri "http://127.0.0.1:$port/api/library" -TimeoutSec 10
+            $actual = @($library.items | Where-Object { $_.file -eq $lime })[0]
+            $actual.artist | Should Be '塞壬唱片-MSR,DAZBEE'
+            $actual.canonical_title | Should Be '酸橙色信笺'
+            $actual.canonical_title_source | Should Be 'netease'
+            $actual.title | Should Be '酸橙色信笺 - 塞壬唱片-MSR'
+            $actual.raw_artist | Should Be ''
+            $seasonRow = @($library.items | Where-Object { $_.file -eq $seasons })[0]
+            $seasonRow.artist | Should Be 'SNH48'
+            $seasonRow.album | Should Be ''
+            $seasonRow.year | Should Be 0
+            $other = @($library.items | Where-Object { $_.file -eq $unbound })[0]
+            $other.artist | Should Be 'Another Singer'
+            $other.canonical_title | Should Be ''
+        }
+    }
+
     It 'forwards browser-style JSON-body POST like requests through the UI gateway' {
         $app = Get-Content -LiteralPath (Join-Path $ProjectRoot 'web\app.js') -Raw
         $app | Should Match "headers:\s*\{\s*'Content-Type':\s*'application/json; charset=utf-8'\s*\}"

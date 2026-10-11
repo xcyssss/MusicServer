@@ -287,10 +287,24 @@ function Get-CanonicalTrackDb {
 }
 
 function Get-CanonicalLocalTrackMapDb {
+    param([string]$MusicDir = '')
     $map = @{}
-    foreach ($row in @(Invoke-MusicServerSqlJson -Query "SELECT id, local_song_id, status FROM canonical_tracks WHERE local_song_id IS NOT NULL AND local_song_id != '';")) {
+    foreach ($row in @(Invoke-MusicServerSqlJson -Query "SELECT id, local_song_id, status, title, artist, album, duration, release_year, identifiers_json FROM canonical_tracks WHERE local_song_id IS NOT NULL AND local_song_id != '';")) {
         $localSongId = [string]$row.local_song_id
         if ($localSongId) { $map[$localSongId] = $row }
+    }
+    if ($MusicDir) {
+        # Worker receipts bind the exact published filename, including files
+        # downloaded before indexing. A title match is never recording evidence.
+        $receipts = @(Invoke-MusicServerSqlJson -Query "SELECT f.file_name, c.id, c.title, c.artist, c.album, c.duration, c.release_year, c.identifiers_json FROM recommendation_files f JOIN canonical_tracks c ON c.id=f.track_id WHERE f.seed_source='wanted_worker';")
+        foreach ($receipt in $receipts) {
+            $name = [string]$receipt.file_name
+            if (-not $name -or [IO.Path]::GetFileName($name) -ne $name) { continue }
+            $key = 'file:' + [IO.Path]::GetFullPath((Join-Path $MusicDir $name))
+            if ($map.ContainsKey($key) -and (-not $map[$key] -or [string]$map[$key].id -ne [string]$receipt.id)) {
+                $map[$key] = $null
+            } else { $map[$key] = $receipt }
+        }
     }
     return $map
 }
