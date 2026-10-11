@@ -577,8 +577,11 @@ async function fetchJson(url, options = {}) {
   if (options.signal?.aborted) cancel();
   options.signal?.addEventListener('abort', cancel, { once: true });
   const timer = setTimeout(cancel, options.timeoutMs || 12000);
+  const started = Date.now();
+  let status = 0;
   try {
     const response = await fetch(url, { ...options, cache: 'no-store', signal: controller.signal });
+    status = response.status;
     let payload;
     try {
       payload = await response.json();
@@ -588,11 +591,27 @@ async function fetchJson(url, options = {}) {
     }
     if (!response.ok) throw new Error(payload?.message || `请求失败 (${response.status})`);
     return payload;
+  } catch (error) {
+    const phase = url.startsWith('/api/library') ? 'library' : url.includes('recommendations') ? 'recommendations' : url.includes('wanted') ? 'wanted' : url.includes('settings') ? 'settings' : 'runtime';
+    reportClientDiagnostic(phase, controller.signal.aborted ? 'TIMEOUT' : status >= 400 ? `HTTP_${status}` : 'NETWORK', Date.now() - started);
+    throw error;
   } finally {
     clearTimeout(timer);
     options.signal?.removeEventListener('abort', cancel);
   }
 }
+
+let nextDiagnosticAt = 0;
+function reportClientDiagnostic(phase, code, elapsed_ms = 0) {
+  if (Date.now() < nextDiagnosticAt) return;
+  nextDiagnosticAt = Date.now() + 2000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 2000);
+  void fetch('/api/diagnostics/client', { method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({phase, code, elapsed_ms}), signal: controller.signal }).catch(() => {}).finally(() => clearTimeout(timer));
+}
+window.addEventListener('error', () => reportClientDiagnostic('runtime', 'JS_ERROR'));
+window.addEventListener('unhandledrejection', () => reportClientDiagnostic('runtime', 'REJECTION'));
 
 function refreshOnce(key, action) {
   if (refreshes.has(key)) return refreshes.get(key);
@@ -651,7 +670,7 @@ function filteredLibrary() {
 }
 
 // Sort displayed library items. 'added' sorts newest-added first using the
-// file modification time carried in item.addedto / item.collectionat.
+// durable import order. Older servers retain the timestamp fallback.
 function sortLibraryVisible(visible) {
   if (state.librarySort !== 'added') return visible;
   const byTime = (item) => {
@@ -668,7 +687,11 @@ function sortLibraryVisible(visible) {
     }
     return 0;
   };
-  return [...visible].sort((a, b) => byTime(b) - byTime(a));
+  return [...visible].sort((a, b) => {
+    const orderA = Number(a?.import_order), orderB = Number(b?.import_order);
+    if (orderA > 0 && orderB > 0) return orderB - orderA;
+    return byTime(b) - byTime(a);
+  });
 }
 
 function shuffled(items) {
@@ -1294,12 +1317,17 @@ async function toggleLike(item) {
   }
 }
 
-async function loadLibrary(silent = false) {
+async function loadLibrary(silent = false, forceRefresh = !silent) {
   return refreshOnce('library', async () => {
   const revision = state.libraryRevision;
   try {
-    const payload = await fetchJson(silent ? '/api/library' : '/api/library?refresh=1');
+    const payload = await fetchJson(forceRefresh ? '/api/library?refresh=1' : '/api/library', {timeoutMs:60000});
     if (revision !== state.libraryRevision) return;
+    if (payload.loading) {
+      if (!state.library.length) $('#library-list').innerHTML = '<div class="empty-state">正在读取音乐库，界面仍可操作…</div>';
+      setTimeout(() => loadLibrary(true), 1500);
+      return;
+    }
     if (!Array.isArray(payload.items)) throw new Error('Invalid library response');
     syncLibrary(payload.items); renderLibrary(); updateNavigationButtons();
   } catch { if (!silent) { if (!state.library.length) { $('#library-list')._sig = null; $('#library-list').innerHTML = '<div class="empty-state">暂时无法读取音乐库。<br />点击右上角刷新重试。</div>'; } showToast('音乐库同步失败，请刷新重试'); } }
@@ -1773,7 +1801,8 @@ renderMode(); renderDisplayModeChoice(); loadRecommendations(); loadWanted(); lo
 // The display mode decides how the local names are rendered, so it is resolved
 // before the local lists are fetched. An unreachable API keeps the traditional
 // names rather than silently showing regularized ones.
-loadDisplayModeSettings().finally(() => { loadLibrary(); loadListening(); });
+loadLibrary(false, false);
+void loadDisplayModeSettings();
 setInterval(() => { if (document.hidden) return; loadLibrary(true); loadRecommendations(true); loadWanted(true); loadProviderStatus(); }, 15000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) { loadLibrary(true); loadRecommendations(true); loadWanted(true); loadProviderStatus(); } });
 $('#library-sort').value = state.librarySort;
@@ -1782,6 +1811,7 @@ $('#library-sort').value = state.librarySort;
 try {
   setListeningCollapsed(localStorage.getItem('musicserver-listening-collapsed') !== '0');
 } catch {}
+if (!$('#listening-sidebar').classList.contains('collapsed')) loadListening();
 
 // Scroll forwarding: when the mouse wheel is on a non-scrollable area inside
 // .recommendation-panel or .library-panel, forward the scroll to the panel's

@@ -1,4 +1,5 @@
 ﻿# Desktop maintenance is asynchronous. SQLite owns job state; snapshots are backups only.
+$script:LibraryImportRetries=@{}
 function Initialize-ManagementSchema {
     Invoke-MusicServerSqlNonQuery -Query @'
 CREATE TABLE IF NOT EXISTS maintenance_jobs (
@@ -30,7 +31,7 @@ function Set-ManagementJob {
 
 function Get-ManagementStatus {
     param($Config)
-    Invoke-MusicServerParamNonQuery -Template 'UPDATE maintenance_jobs SET state=''ERROR'',message=''INTERRUPTED_OR_TIMEOUT'' WHERE state=''RUNNING'' AND deadline < @now;' -Params @{now=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()} | Out-Null
+    Invoke-MusicServerParamNonQuery -Template 'UPDATE maintenance_jobs SET state=''ERROR'',message=''INTERRUPTED_OR_TIMEOUT'' WHERE state=''RUNNING'' AND deadline < @now; DELETE FROM app_settings WHERE key=''library_manifest_pending'' AND NOT EXISTS(SELECT 1 FROM maintenance_jobs WHERE state=''RUNNING'' AND operation=''library-import'' AND id=app_settings.value);' -Params @{now=[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()} | Out-Null
     $fresh = New-MusicServerConfig -Root $Config.Root -AppHome $Config.AppHome
     $components = foreach ($pair in @(@('YtDlp','yt-dlp'),@('FFmpeg','ffmpeg'),@('FFprobe','ffprobe'))) {
         $path = [string]$fresh.($pair[0])
@@ -42,7 +43,7 @@ function Get-ManagementStatus {
 }
 
 function Start-ManagementJob {
-    param($Config, [ValidateSet('components','diagnostics','backup','health')][string]$Operation)
+    param($Config, [ValidateSet('components','diagnostics','backup','health','library-export','library-import')][string]$Operation)
     $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     # The child enforces its deadline as well; a terminated APP leaves a visible interrupted job.
     Invoke-MusicServerParamNonQuery -Template 'UPDATE maintenance_jobs SET state=''ERROR'',message=''INTERRUPTED_OR_TIMEOUT'' WHERE state=''RUNNING'' AND deadline < @now;' -Params @{now=$now} | Out-Null
@@ -50,12 +51,60 @@ function Start-ManagementJob {
     if ($existing.Count) { return $existing[0].id }
     $id = [Guid]::NewGuid().ToString('N')
     Invoke-MusicServerParamNonQuery -Template 'INSERT INTO maintenance_jobs(id,operation,state,created_at,updated_at,deadline) VALUES(@id,@op,''RUNNING'',@now,@now,@deadline);' -Params @{id=$id;op=$Operation;now=(Get-NowIso);deadline=($now+720)} | Out-Null
+    if ($Operation -eq 'library-import') { Set-AppSettingDb -Key 'library_manifest_pending' -Value $id }
     try {
         $scriptPath = Join-Path $Config.Root 'manage_musicserver.ps1'
         $args = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -AppHome "{1}" -JobId {2}' -f $scriptPath,$Config.AppHome,$id
         Start-Process -FilePath 'powershell.exe' -ArgumentList $args -WindowStyle Hidden -WorkingDirectory $Config.Root -ErrorAction Stop | Out-Null
-    } catch { Set-ManagementJob -Id $id -State ERROR -Message 'WORKER_START_FAILED'; throw }
+    } catch {
+        Set-ManagementJob -Id $id -State ERROR -Message 'WORKER_START_FAILED'
+        if ($Operation -eq 'library-import') { Remove-AppSettingDb -Key 'library_manifest_pending' }
+        throw
+    }
     return $id
+}
+
+function Get-MusicServerMaintenanceClockSeconds {
+    return [Diagnostics.Stopwatch]::GetTimestamp()/[double][Diagnostics.Stopwatch]::Frequency
+}
+
+function Start-MusicServerLibraryImportIfNeeded {
+    param($Config, [switch]$RetryPending)
+    $root=Get-MusicServerLibraryRootKey -Config $Config
+    $cacheKey=(Get-MusicServerDbPath)+'|'+$root
+    $cached=$script:LibraryImportRetries[$cacheKey]
+    $now=Get-MusicServerMaintenanceClockSeconds
+    if ($RetryPending -and (-not $cached -or -not $cached.pending -or $now -lt $cached.next_check)) { return $null }
+    if (-not $cached) {
+        $cached=@{pending=$false;next_check=0.0;stamp='';hash='';job_id=''}
+        $script:LibraryImportRetries[$cacheKey]=$cached
+    }
+    $cached.next_check=$now+30.0
+    $manifest=Join-Path $Config.MusicDir '.musicserver-library.json'
+    if (-not [IO.Directory]::Exists($Config.MusicDir) -or -not [IO.File]::Exists($manifest)) { $cached.pending=$false;return $null }
+    $file=Get-Item -LiteralPath $manifest
+    if ($file.Length -gt 33554432) { $cached.pending=$false;return $null }
+    $stamp=[string]$file.Length+'|'+$file.LastWriteTimeUtc.Ticks
+    if ($stamp -ne $cached.stamp) { $cached.stamp=$stamp;$cached.hash='';$cached.job_id='' }
+    $cached.pending=$true
+    Initialize-MusicServerLibrarySchema
+    # Do not advertise an import while another maintenance operation owns the
+    # single job slot. Retain a throttled candidate for the idle API tick.
+    $active=@(Invoke-MusicServerSqlJson -Query "SELECT id,operation FROM maintenance_jobs WHERE state='RUNNING';")
+    if ($active.Count) { if ($active[0].operation -eq 'library-import') { $cached.job_id=[string]$active[0].id;return $cached.job_id }; return $null }
+    if ($RetryPending -and $cached.job_id) {
+        $previous=@(Invoke-MusicServerParamSql -Template 'SELECT state FROM maintenance_jobs WHERE id=@id LIMIT 1;' -Params @{id=$cached.job_id})
+        if ($previous.Count -and $previous[0].state -eq 'ERROR') { $cached.pending=$false;return $null }
+    }
+    if (-not $cached.hash) {
+        $stream=[IO.File]::OpenRead($manifest)
+        try { $cached.hash=Get-MusicServerLibraryStreamHash -InputStream $stream }
+        finally { $stream.Dispose() }
+    }
+    $known=@(Invoke-MusicServerParamSql -Template 'SELECT 1 AS present FROM library_imports WHERE root_key=@root AND manifest_hash=@hash LIMIT 1;' -Params @{root=$root;hash=$cached.hash})
+    if ($known.Count) { $cached.pending=$false;return $null }
+    $cached.job_id=Start-ManagementJob -Config $Config -Operation 'library-import'
+    return $cached.job_id
 }
 
 function Receive-VerifiedComponent {
@@ -165,21 +214,38 @@ function Install-DownloadComponents {
 
 function Reset-InterruptedManagementJobs {
     param($Config)
-    $jobs=@(Invoke-MusicServerSqlJson -Query "SELECT id FROM maintenance_jobs WHERE state='RUNNING';")
-    if (-not $jobs.Count) { return }
+    $jobs=@(Invoke-MusicServerSqlJson -Query "SELECT id,operation FROM maintenance_jobs WHERE state='RUNNING';")
+    if (-not $jobs.Count) { Remove-AppSettingDb -Key 'library_manifest_pending'; return }
     $pattern='(?i)(?:^|\s)-File\s+"?'+[regex]::Escape((Join-Path $Config.Root 'manage_musicserver.ps1'))+'(?:"|\s|$)'
     $processes=@(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Where-Object { $_.CommandLine -match $pattern })
     foreach ($job in $jobs) {
         $idPattern='(?i)(?:^|\s)-JobId\s+"?'+[regex]::Escape($job.id)+'(?:"|\s|$)'
         if (-not @($processes | Where-Object { $_.CommandLine -match $idPattern }).Count) {
             Set-ManagementJob -Id $job.id -State ERROR -Message 'INTERRUPTED_OR_TIMEOUT'
+            if ($job.operation -eq 'library-export') {
+                try { Remove-ManagementStaging -Config $Config -JobId $job.id -Operation library-export }
+                catch { Write-MusicServerLog -Path (Join-Path $Config.LogDir 'management.log') -Message 'operation=library-export stage=cleanup result=DEFERRED' }
+            }
         }
     }
+    if (-not @(Invoke-MusicServerSqlJson -Query "SELECT id FROM maintenance_jobs WHERE state='RUNNING' AND operation='library-import';").Count) { Remove-AppSettingDb -Key 'library_manifest_pending' }
 }
 
 function Remove-ManagementStaging {
-    param($Config, [string]$JobId)
+    param($Config, [string]$JobId, [ValidateSet('components','diagnostics','backup','health','library-export','library-import')][string]$Operation='components')
     if ($JobId -notmatch '^[a-f0-9]{32}$') { throw 'INVALID_JOB_ID' }
+    if ($Operation -eq 'library-export') {
+        $scriptPattern='(?i)(?:^|\s)-File\s+"?'+[regex]::Escape((Join-Path $Config.Root 'manage_musicserver.ps1'))+'(?:"|\s|$)'
+        $idPattern='(?i)(?:^|\s)-JobId\s+"?'+[regex]::Escape($JobId)+'(?:"|\s|$)'
+        $active=@(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction Stop | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -match $scriptPattern -and $_.CommandLine -match $idPattern })
+        if ($active.Count) { throw 'EXPORT_STILL_RUNNING' }
+        $output=[IO.Path]::GetFullPath($Config.OutputDir).TrimEnd('\','/')
+        $part=[IO.Path]::GetFullPath((Join-Path $output ('.musicserver-library-export-'+$JobId+'.part')))
+        if (-not $part.StartsWith($output+'\',[StringComparison]::OrdinalIgnoreCase)) { throw 'INVALID_STAGING_PATH' }
+        if ([IO.File]::Exists($part)) { [IO.File]::Delete($part) }
+        return
+    }
+    if ($Operation -ne 'components') { return }
     $base=[IO.Path]::GetFullPath((Join-Path $Config.AppHome 'components'))
     $stage=[IO.Path]::GetFullPath((Join-Path $base ('staging-'+$JobId)))
     if (-not $stage.StartsWith($base+'\',[StringComparison]::OrdinalIgnoreCase)) { throw 'INVALID_STAGING_PATH' }
@@ -242,19 +308,142 @@ function Restore-MusicServerBackup {
     return $rollback
 }
 
+function ConvertTo-MusicServerDiagnosticRoute {
+    param([string]$Route)
+    $path=($Route -split '[?#]',2)[0]
+    if ($path -notmatch '^/(api|health)(/|$)') { return '' }
+    $static=@('api','health','library','listening','stats','play','skip','tracks','lyrics','stream','like','today','recommendations','wanted','settings','onboarding','management','status','jobs','search','runtime','client-log','refresh','desktop','diagnostics','files','bootstrap','library-transfer')
+    $parts=foreach ($part in @($path.Trim('/').Split('/') | Select-Object -First 8)) { if ($part -in $static) { $part } else { ':id' } }
+    return '/'+($parts -join '/')
+}
+
+function Read-MusicServerDiagnosticTail {
+    param([string]$Path, [int]$MaxBytes=65536)
+    $stream=$null;$reader=$null
+    try {
+        $stream=[IO.File]::Open($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+        $truncated=$stream.Length -gt $MaxBytes
+        if ($truncated) { [void]$stream.Seek(-$MaxBytes,[IO.SeekOrigin]::End) }
+        $reader=New-Object IO.StreamReader($stream,[Text.Encoding]::UTF8,$true)
+        if ($truncated) { [void]$reader.ReadLine() }
+        return @([regex]::Split($reader.ReadToEnd(),'\r?\n') | Select-Object -Last 320)
+    } finally { if ($reader) { $reader.Dispose() } elseif ($stream) { $stream.Dispose() } }
+}
+
+function ConvertTo-MusicServerDiagnosticLogEntry {
+    param([string]$Line, [string]$Component)
+    if ($Line.Length -gt 8192) { return $null }
+    $entry=[ordered]@{component=$Component}
+    if ($Line -match '^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]') { $entry.at=$Matches[1] }
+    if ($Line -match '\[(client|library|startup|request|quality|selection|generation|metadata)\]') { $entry.event=$Matches[1] }
+    $numbers=@('elapsed_ms','duration_ms','count','files','items','selected','candidates','local','target','resolved','notFound','failed','progress','pid','download_calls','sqlite_calls','cacheItems','limit','live','lyric_checks','library_count','seed_count','remote_count','local_count','seed_misses')
+    $tokens=@('phase','role','operation','stage','result','code','error_type','reason','source','state','diversity','stop_reason','skipped')
+    foreach ($match in [regex]::Matches($Line,'(?:^|\s)([A-Za-z_][A-Za-z0-9_]*)=([^\s;]+)(?=\s|;|$)')) {
+        $key=$match.Groups[1].Value;$value=$match.Groups[2].Value
+        if ($key -in $numbers -or $key -match '^phase_[a-z_]{1,40}$') {
+            $number=0.0
+            if ([double]::TryParse($value,[Globalization.NumberStyles]::Float,[Globalization.CultureInfo]::InvariantCulture,[ref]$number) -and $number -ge 0 -and $number -le 900000000) { $entry[$key]=$number }
+        } elseif ($key -in $tokens -and $value -match '^[A-Za-z][A-Za-z0-9_-]{0,63}$') {
+            if ($key -eq 'source' -and $value -notin @('local','navidrome','netease','bilibili','onboarding_starter','library','library_import','wanted_worker','sqlite')) { continue }
+            $entry[$key]=$value
+        } elseif ($key -in @('status','http_status') -and $value -match '^[1-5][0-9]{2}$') { $entry[$key]=[int]$value }
+        elseif ($key -eq 'method' -and $value -in @('GET','POST','PUT','DELETE','PATCH','HEAD')) { $entry.method=$value }
+        elseif ($key -eq 'route') { $route=ConvertTo-MusicServerDiagnosticRoute -Route $value; if ($route) { $entry.route=$route } }
+        elseif ($key -in @('cacheHit','empty_result','preserved_existing_day','starter_fallback','library_available','metadata_failed','library_revision_pending','library_revision_ack','completed') -and $value -match '^(true|false)$') { $entry[$key]=$value -ieq 'true' }
+    }
+    # Older builds wrote free-form slow/error lines. Keep just route/status/time;
+    # an exception body or a media identifier never enters the exported report.
+    if ($Line -match '\bSLOW\s+(?:(GET|POST|PUT|DELETE|PATCH)\s+)?(/\S+)\s+took\s+([0-9,]+)\s*ms') {
+        $entry.event='request_slow'
+        if ($Matches[1]) { $entry.method=$Matches[1] }
+        $entry.route=ConvertTo-MusicServerDiagnosticRoute -Route $Matches[2]
+        $entry.duration_ms=[double]$Matches[3].Replace(',','')
+    } elseif ($Line -match '\bERROR\s+(GET|POST|PUT|DELETE|PATCH)\s+(/\S+)\s+status=([1-5][0-9]{2})') {
+        $entry.event='request_error';$entry.method=$Matches[1];$entry.route=ConvertTo-MusicServerDiagnosticRoute -Route $Matches[2];$entry.status=[int]$Matches[3]
+    } elseif (-not $entry.Contains('event')) {
+        foreach ($pattern in @('Launcher failed','UI request failed','Media handler failed','Media request failed','ARTIST backfill failed','Watchdog start failed','Navidrome sqlite query failed','NetEase lyric request failed')) {
+            if ($Line.IndexOf($pattern,[StringComparison]::OrdinalIgnoreCase) -ge 0) { $entry.event='runtime_error';$entry.code=$pattern.ToUpperInvariant().Replace(' ','_');break }
+        }
+    }
+    if (-not $entry.Contains('event') -and -not $entry.Contains('operation')) { return $null }
+    return [pscustomobject]$entry
+}
+
+function Get-MusicServerDiagnosticLogs {
+    param($Config)
+    $logs=@(
+        @('ui','musicserver-ui.log'),@('api','musicserver-api.log'),@('worker','musicserver-worker.log'),
+        @('recommendation','musicserver-recommendation.log'),@('management','management.log'),@('watchdog','musicserver-ui.watchdog.log'),@('startup','musicserver-startup.log')
+    )
+    $result=New-Object Collections.ArrayList
+    foreach ($pair in $logs) {
+        $recent=New-Object Collections.ArrayList
+        foreach ($suffix in @('.1','')) {
+            $path=Join-Path $Config.LogDir ($pair[1]+$suffix)
+            if (-not [IO.File]::Exists($path)) { continue }
+            try {
+                foreach ($line in @(Read-MusicServerDiagnosticTail -Path $path)) {
+                    $entry=ConvertTo-MusicServerDiagnosticLogEntry -Line $line -Component $pair[0]
+                    if ($entry) { [void]$recent.Add($entry) }
+                }
+            } catch { }
+        }
+        foreach ($entry in @($recent | Select-Object -Last 80)) { [void]$result.Add($entry) }
+    }
+    return @($result)
+}
+
+function Get-MusicServerDiagnosticStartup {
+    param($Config)
+    $path=Join-Path $Config.LogDir 'desktop-startup.json'
+    if (-not [IO.File]::Exists($path)) { return $null }
+    if ((Get-Item -LiteralPath $path).Length -gt 65536) { throw 'STARTUP_REPORT_TOO_LARGE' }
+    $raw=[IO.File]::ReadAllText($path) | ConvertFrom-Json
+    $report=[ordered]@{state='unknown';reason='UNKNOWN'}
+    if ([string]$raw.state -in @('starting','ready','failed','stopped','cancelled')) { $report.state=[string]$raw.state }
+    foreach ($name in @('pid','ui_port','api_port','at','elapsed_ms')) {
+        $value=Get-OptionalProperty $raw $name $null
+        $number=0.0
+        if ($null -ne $value -and [double]::TryParse([string]$value,[ref]$number) -and $number -ge 0 -and $number -le 9999999999999) { $report[$name]=$number }
+    }
+    $message=[string](Get-OptionalProperty $raw 'message' '')
+    foreach ($pair in @(
+        @('Runtime deployment failed','RUNTIME_DEPLOYMENT_FAILED'),@('No verified service pair','SERVICE_READINESS_FAILED'),
+        @('Waiting for owned UI/API','WAITING_FOR_SERVICES'),@('Checking local services','CHECKING_SERVICES'),
+        @('Owned services ready','SERVICES_READY'),@("Reusing this app home's current services",'SERVICES_REUSED'),
+        @('stopped','STOPPED'),@('cancelled','CANCELLED')
+    )) { if ($message.IndexOf($pair[0],[StringComparison]::OrdinalIgnoreCase) -ge 0) { $report.reason=$pair[1];break } }
+    return [pscustomobject]$report
+}
+
 function Export-MusicServerDiagnostics {
     param($Config)
     $dir=Join-Path $Config.OutputDir ('diagnostics-'+[Guid]::NewGuid().ToString('N')); [IO.Directory]::CreateDirectory($dir) | Out-Null
-    # Allowlisted fields only. Raw logs, DBs, paths, titles, URLs and exception bodies are never exported.
-    $report=[ordered]@{created_at=(Get-NowIso); os=[Environment]::OSVersion.VersionString; powershell=$PSVersionTable.PSVersion.ToString(); library_available=[IO.Directory]::Exists($Config.MusicDir)}
-    $report.components=@((Get-ManagementStatus -Config $Config).components)
-    $report.queue=@(Invoke-MusicServerSqlJson -Query 'SELECT state,COUNT(*) AS count,MAX(attempt_count) AS max_attempts FROM wanted_queue GROUP BY state;')
-    $report.failure_codes=@(Invoke-MusicServerSqlJson -Query "SELECT last_error AS code,COUNT(*) AS count FROM wanted_queue WHERE length(last_error) BETWEEN 1 AND 64 AND last_error NOT GLOB '*[^A-Z0-9_]*' GROUP BY last_error;")
-    $report.events=@(Invoke-MusicServerSqlJson -Query 'SELECT id,event_type,provider,from_state,to_state,attempt,duration_ms,result,error_type,http_status,created_at FROM events ORDER BY id DESC LIMIT 100;')
-    $report.jobs=@(Invoke-MusicServerSqlJson -Query 'SELECT id,operation,state,progress,created_at FROM maintenance_jobs ORDER BY created_at DESC LIMIT 20;')
-    $report.integrity=@(Invoke-MusicServerSqlJson -Query 'PRAGMA quick_check;')
+    # Extract bounded structured facts, never copy raw log lines or exception
+    # bodies. Each independent source is fail-soft, including a damaged DB.
+    $report=[ordered]@{schema=2;created_at=(Get-NowIso); os=[Environment]::OSVersion.VersionString; powershell=$PSVersionTable.PSVersion.ToString(); library_available=[IO.Directory]::Exists($Config.MusicDir)}
+    $errors=New-Object Collections.ArrayList
+    $report.components=@(foreach ($pair in @(@('YtDlp','yt-dlp'),@('FFmpeg','ffmpeg'),@('FFprobe','ffprobe'))) {
+        $path=[string]$Config.($pair[0])
+        [pscustomobject]@{name=$pair[1];present=([IO.File]::Exists($path) -or [bool](Get-Command $path -ErrorAction SilentlyContinue));managed=$path.StartsWith((Join-Path $Config.AppHome 'components'),[StringComparison]::OrdinalIgnoreCase)}
+    })
+    $queries=[ordered]@{
+        queue='SELECT state,COUNT(*) AS count,MAX(attempt_count) AS max_attempts FROM wanted_queue GROUP BY state;'
+        failure_codes="SELECT last_error AS code,COUNT(*) AS count FROM wanted_queue WHERE length(last_error) BETWEEN 1 AND 64 AND last_error NOT GLOB '*[^A-Z0-9_]*' GROUP BY last_error;"
+        events='SELECT id,event_type,provider,from_state,to_state,attempt,duration_ms,result,error_type,http_status,created_at FROM events ORDER BY id DESC LIMIT 100;'
+        jobs="SELECT id,operation,state,progress,created_at,CASE WHEN length(message) BETWEEN 1 AND 64 AND message NOT GLOB '*[^A-Za-z0-9_]*' THEN message ELSE '' END AS code FROM maintenance_jobs ORDER BY created_at DESC LIMIT 20;"
+        integrity='PRAGMA quick_check;'
+    }
+    foreach ($name in $queries.Keys) {
+        try { $report[$name]=@(Invoke-MusicServerSqlJson -Query $queries[$name]) }
+        catch { $report[$name]=@();[void]$errors.Add([pscustomobject]@{section=$name;code='COLLECTION_FAILED';error_type=$_.Exception.GetBaseException().GetType().Name}) }
+    }
+    $report.runtime_log=@(Get-MusicServerDiagnosticLogs -Config $Config)
+    try { $report.desktop_startup=Get-MusicServerDiagnosticStartup -Config $Config }
+    catch { $report.desktop_startup=$null;[void]$errors.Add([pscustomobject]@{section='desktop_startup';code='COLLECTION_FAILED';error_type=$_.Exception.GetBaseException().GetType().Name}) }
+    $report.collection_errors=@($errors)
     [IO.File]::WriteAllText((Join-Path $dir 'diagnostics.json'),($report | ConvertTo-Json -Depth 10),[Text.UTF8Encoding]::new($false))
-    [IO.File]::WriteAllText((Join-Path $dir 'README.txt'),'Contains OS/PowerShell versions, component availability, queue state counts, maintenance operation IDs and SQLite integrity. No raw logs, song names, paths, cookies, credentials, audio or databases. This folder can be shared after review.')
+    [IO.File]::WriteAllText((Join-Path $dir 'README.txt'),'Contains OS/PowerShell versions, component availability, queue state counts, maintenance operation IDs, SQLite integrity, startup state and bounded sanitized recent runtime timings/failures. Media identifiers in request routes are replaced with :id. No raw logs, song names, user paths, URLs, cookies, credentials, audio or databases. Review before sharing.')
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     [IO.Compression.ZipFile]::CreateFromDirectory($dir,$dir+'.zip')
     return $dir+'.zip'

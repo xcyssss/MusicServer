@@ -12,6 +12,7 @@ Import-Module (Join-Path $ProjectRoot 'MusicServer.Core.psm1') -Force
 Import-Module (Join-Path $ProjectRoot 'MusicServer.Database.psm1') -Force
 Import-Module (Join-Path $ProjectRoot 'MusicServer.State.psm1') -Force
 Import-Module (Join-Path $ProjectRoot 'MusicServer.Migration.psm1') -Force
+Import-Module (Join-Path $ProjectRoot 'MusicServer.Library.psm1') -Force -DisableNameChecking
 
 $script:RecommendationTestRoot = $null
 $script:RecommendationTestConfig = $null
@@ -1089,5 +1090,180 @@ Describe 'Bounded daily lyric evidence' {
         (Get-RecommendationLyricEvidence -Config ([pscustomobject]@{StateDir='fixture';Sqlite='sqlite3'}) -SongId '123' -CacheOnly).status | Should Be 'UNKNOWN'
         Assert-MockCalled Invoke-RestMethod -ModuleName MusicServer.Providers -Times 0 -Exactly -Scope It
         Assert-MockCalled Set-AppSettingDb -ModuleName MusicServer.Providers -Times 0 -Exactly -Scope It
+    }
+}
+
+Describe 'Imported library recommendation seeding' {
+    BeforeEach { Initialize-RecommendationScratchDb }
+    AfterEach {
+        [Environment]::SetEnvironmentVariable('MUSICSERVER_APP_HOME', $script:RecommendationOldAppHome)
+        if ($script:RecommendationTestRoot -and (Test-Path -LiteralPath $script:RecommendationTestRoot)) {
+            Remove-Item -LiteralPath $script:RecommendationTestRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    function Invoke-RecommendationFixtureFunction {
+        param([string]$Name, [psobject]$Config)
+        $tokens = $null; $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile((Join-Path $ProjectRoot 'daily_recommend.ps1'), [ref]$tokens, [ref]$errors)
+        $definition = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $Name }, $true)
+        if (-not $definition) { throw "Missing generator function: $Name" }
+        $body = 'param($Config)' + "`n" + $definition.Extent.Text + "`n& " + $Name
+        return & ([scriptblock]::Create($body)) $Config
+    }
+
+    It 'uses a migrated DailyMix collection as discovery seeds without preference history or Navidrome' {
+        $file = Join-Path $script:RecommendationTestConfig.DailyDir '陈韵若&陈每文《爱的回归线》.flac'
+        [IO.File]::WriteAllBytes($file, [byte[]]@(0,1,2))
+        $rows = @(Invoke-RecommendationFixtureFunction -Name 'Get-LocalLibraryRows' -Config $script:RecommendationTestConfig)
+        $rows.Count | Should Be 1
+        $rows[0].Artist | Should Be '陈韵若&陈每文'
+        $seeds = @(Get-RecommendationSeedCandidatesDb -LibraryFallback $rows -RandomSeed 7)
+        $seeds.Count | Should Be 1
+        $seeds[0].Source | Should Be 'library_fallback'
+        $seeds[0].Artist | Should Be '陈韵若&陈每文'
+    }
+
+    It 'keeps exact canonical title and complete credits instead of a short migrated filename' {
+        $file = Join-Path $script:RecommendationTestConfig.MusicDir '塞壬唱片 - 酸橙色信笺.wav'
+        [IO.File]::WriteAllBytes($file, [byte[]]@(0,1,2))
+        $track = New-CanonicalTrack -Title '酸橙色信笺' -Artist '塞壬唱片-MSR,DAZBEE' -LocalSongId ('file:' + $file) -Status 'LOCAL' -Identifiers @([pscustomobject]@{type='netease';value='3410744228'})
+        Save-CanonicalTrackDb -Track $track | Out-Null
+        $rows = @(Invoke-RecommendationFixtureFunction -Name 'Get-LocalLibraryRows' -Config $script:RecommendationTestConfig)
+        $rows.Count | Should Be 1
+        $rows[0].Title | Should Be '酸橙色信笺'
+        $rows[0].Artist | Should Be '塞壬唱片-MSR,DAZBEE'
+        $rows[0].TrackId | Should Be $track.id
+        $rows[0].NeteaseId | Should Be '3410744228'
+    }
+
+    It 'acknowledges only the successfully generated library revision and keeps a newer switch pending' {
+        $previous = New-RecommendationTestTrack -Title 'Previous library recommendations'
+        $next = New-RecommendationTestTrack -Title 'New library recommendations'
+        $previousRow = New-RecommendationTestRow -Track $previous -Date (Get-TodayDate) -Rank 1
+        $nextRow = New-RecommendationTestRow -Track $next -Date (Get-TodayDate) -Rank 1
+        Save-DailyRecommendationsDb -Recommendations @($previousRow) -Tracks @($previous) | Out-Null
+        Set-AppSettingDb -Key 'recommendation_library_pending' -Value 'library-B' | Out-Null
+        $stale = Save-DailyRecommendationsDb -Recommendations @($nextRow) -Tracks @($next) -EnforceLibraryRevision -ExpectedLibraryRevision 'library-A'
+        $stale.Skipped | Should Be $true
+        (Get-AppSettingDb -Key 'recommendation_library_pending') | Should Be 'library-B'
+        (Get-TodayRecommendationsDb)[0].title | Should Be $previous.title
+        (Get-CanonicalTrackDb -TrackId $next.id) | Should BeNullOrEmpty
+        $fresh = Save-DailyRecommendationsDb -Recommendations @($nextRow) -Tracks @($next) -EnforceLibraryRevision -ExpectedLibraryRevision 'library-B'
+        $fresh.Skipped | Should Be $false
+        (Get-AppSettingDb -Key 'recommendation_library_pending') | Should BeNullOrEmpty
+        (Get-TodayRecommendationsDb)[0].title | Should Be $next.title
+    }
+
+    It 'uses imported portable metadata for discovery when the new device has no artist cache or history' {
+        $file = Join-Path $script:RecommendationTestConfig.DailyDir '0001.flac'
+        [IO.File]::WriteAllBytes($file, [byte[]]@(3,4,5))
+        $hash = [Security.Cryptography.SHA256]::Create()
+        try { $fileHash = [BitConverter]::ToString($hash.ComputeHash([IO.File]::ReadAllBytes($file))).Replace('-','') } finally { $hash.Dispose() }
+        $manifest = [pscustomobject]@{schema=1;tracks=@([pscustomobject]@{
+            relative_path='DailyMix/0001.flac';size=3;sha256=$fileHash
+            import_order=9;imported_at='2026-09-01T12:00:00Z'
+            metadata=[pscustomobject]@{title='酸橙色信笺';artist='塞壬唱片-MSR,DAZBEE';canonical_title='酸橙色信笺';canonical_title_source='netease'}
+        })}
+        [IO.File]::WriteAllText((Join-Path $script:RecommendationTestConfig.MusicDir '.musicserver-library.json'), (ConvertTo-Json -InputObject $manifest -Depth 6), (New-Object Text.UTF8Encoding($false)))
+        Set-AppSettingDb -Key 'music_library_path' -Value $script:RecommendationTestConfig.MusicDir
+        Import-MusicServerLibraryManifest -Config $script:RecommendationTestConfig | Out-Null
+        $rows = @(Invoke-RecommendationFixtureFunction -Name 'Get-LocalLibraryRows' -Config $script:RecommendationTestConfig)
+        $seeds = @(Get-RecommendationSeedCandidatesDb -LibraryFallback $rows -RandomSeed 7)
+        $seeds.Count | Should Be 1
+        $seeds[0].Title | Should Be '酸橙色信笺'
+        $seeds[0].Artist | Should Be '塞壬唱片-MSR,DAZBEE'
+        $seeds[0].Source | Should Be 'library_fallback'
+        @(Get-RecommendationFeedbackDb -FeedbackType 'LIKE').Count | Should Be 0
+    }
+
+    It 'rolls back pending revision acknowledgement together with daily and canonical rows on save failure' {
+        $previous = New-RecommendationTestTrack -Title 'Healthy complete day'
+        $next = New-RecommendationTestTrack -Title 'Interrupted import refresh'
+        $previousRow = New-RecommendationTestRow -Track $previous -Date (Get-TodayDate) -Rank 1
+        $nextRow = New-RecommendationTestRow -Track $next -Date (Get-TodayDate) -Rank 1
+        Set-AppSettingDb -Key 'recommendation_library_pending' -Value 'library-matched' | Out-Null
+        $revisionCommittedResult = Save-DailyRecommendationsDb -Recommendations @($previousRow) -Tracks @($previous) -EnforceLibraryRevision -ExpectedLibraryRevision 'library-matched'
+        $revisionCommittedResult.Skipped | Should Be $false
+        (Get-AppSettingDb -Key 'recommendation_library_pending') | Should BeNullOrEmpty
+        # Fail after the final statement, including the pending-key delete, so
+        # recovery has to roll back acknowledgement as well as replacement rows.
+        Set-AppSettingDb -Key 'recommendation_library_pending' -Value 'library-matched' | Out-Null
+        $revisionInjectedError = ''
+        try {
+            Save-DailyRecommendationsDb -Recommendations @($nextRow) -Tracks @($next) -EnforceLibraryRevision -ExpectedLibraryRevision 'library-matched' -FailAfterStep ([int]$revisionCommittedResult.Steps) | Out-Null
+        } catch { $revisionInjectedError = $_.Exception.Message }
+        $revisionInjectedError | Should Match 'ms_injected_state_failure_probe'
+        (Get-AppSettingDb -Key 'recommendation_library_pending') | Should Be 'library-matched'
+        (Get-TodayRecommendationsDb)[0].title | Should Be $previous.title
+        (Get-CanonicalTrackDb -TrackId $next.id) | Should BeNullOrEmpty
+        (Get-CanonicalTrackDb -TrackId $previous.id).title | Should Be $previous.title
+    }
+}
+
+Describe 'Bounded daily metadata discovery' {
+    BeforeEach {
+        Initialize-RecommendationScratchDb
+        $script:DailyMetadataTestOldDisabled = $env:MUSICSERVER_DISABLE_NETEASE_SEARCH
+        $env:MUSICSERVER_DISABLE_NETEASE_SEARCH = '0'
+        Mock Test-ProviderRequestAvailable { return $true }
+        Mock Claim-ProviderRequest { return $true }
+        Mock Record-ProviderSuccess { }
+        Mock Record-ProviderFailure { }
+        Mock Invoke-RestMethod { return [pscustomobject]@{code=200;result=[pscustomobject]@{songs=@()}} }
+        $script:DailyMetadataFixtureState = [pscustomobject]@{
+            Clock=[Diagnostics.Stopwatch]::StartNew();BudgetSeconds=120;Calls=0
+            ConsecutiveFailures=0;Blocked=$false;StopReason=''
+        }
+    }
+    AfterEach {
+        $env:MUSICSERVER_DISABLE_NETEASE_SEARCH = $script:DailyMetadataTestOldDisabled
+        [Environment]::SetEnvironmentVariable('MUSICSERVER_APP_HOME', $script:RecommendationOldAppHome)
+        if ($script:RecommendationTestRoot -and (Test-Path -LiteralPath $script:RecommendationTestRoot)) {
+            Remove-Item -LiteralPath $script:RecommendationTestRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+    function Invoke-DailyMetadataFixture {
+        $tokens=$null;$errors=$null
+        $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $ProjectRoot 'daily_recommend.ps1'),[ref]$tokens,[ref]$errors)
+        $function=$ast.Find({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Invoke-MusicServerDailyMetadata'},$true)
+        $body='param($Config,$State)' + "`n" + $function.Extent.Text + "`nInvoke-MusicServerDailyMetadata -Config `$Config -State `$State -Uri 'https://music.163.com/fixture'"
+        return & ([scriptblock]::Create($body)) $script:RecommendationTestConfig $script:DailyMetadataFixtureState
+    }
+    It 'makes no new provider request once the wall-clock budget has expired' {
+        $script:DailyMetadataFixtureState.BudgetSeconds=0
+        Invoke-DailyMetadataFixture | Out-Null
+        $script:DailyMetadataFixtureState.StopReason | Should Be 'metadata_budget'
+        Assert-MockCalled Invoke-RestMethod -Scope It -Times 0 -Exactly
+        Assert-MockCalled Claim-ProviderRequest -Scope It -Times 0 -Exactly
+    }
+    It 'limits an individual request to the remaining budget and releases its shared probe on success' {
+        $script:DailyMetadataFixtureState.BudgetSeconds=2
+        Invoke-DailyMetadataFixture | Out-Null
+        Assert-MockCalled Invoke-RestMethod -Scope It -Times 1 -Exactly -ParameterFilter {$TimeoutSec -eq 1}
+        Assert-MockCalled Record-ProviderSuccess -Scope It -Times 1 -Exactly
+        Assert-MockCalled Record-ProviderFailure -Scope It -Times 0 -Exactly
+    }
+    It 'stops all further discovery requests and charges a real response 429 to the shared circuit' {
+        Mock Invoke-RestMethod { return [pscustomobject]@{code=429} }
+        Invoke-DailyMetadataFixture | Out-Null
+        Invoke-DailyMetadataFixture | Out-Null
+        $script:DailyMetadataFixtureState.StopReason | Should Be 'http_429'
+        Assert-MockCalled Invoke-RestMethod -Scope It -Times 1 -Exactly
+        Assert-MockCalled Record-ProviderFailure -Scope It -Times 1 -Exactly -ParameterFilter {$HttpStatus -eq 429}
+    }
+    It 'distinguishes a busy shared probe from real rate limiting without charging a failure' {
+        Mock Claim-ProviderRequest { return $false }
+        Invoke-DailyMetadataFixture | Out-Null
+        $script:DailyMetadataFixtureState.StopReason | Should Be 'provider_probe_busy'
+        Assert-MockCalled Invoke-RestMethod -Scope It -Times 0 -Exactly
+        Assert-MockCalled Record-ProviderFailure -Scope It -Times 0 -Exactly
+    }
+    It 'stops after three transport failures instead of trying every imported song indefinitely' {
+        Mock Invoke-RestMethod { throw (New-Object IO.IOException('fixture network unavailable')) }
+        foreach ($attempt in 1..4) { Invoke-DailyMetadataFixture | Out-Null }
+        $script:DailyMetadataFixtureState.StopReason | Should Be 'metadata_failures'
+        Assert-MockCalled Invoke-RestMethod -Scope It -Times 3 -Exactly
+        Assert-MockCalled Record-ProviderFailure -Scope It -Times 3 -Exactly -ParameterFilter {$HttpStatus -eq 0}
     }
 }

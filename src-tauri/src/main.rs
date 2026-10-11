@@ -644,6 +644,13 @@ fn restart_desktop(app: tauri::AppHandle) {
 }
 
 #[tauri::command]
+fn open_logs() -> Result<(), String> {
+    let logs = resolve_app_home().join("logs");
+    std::fs::create_dir_all(&logs).map_err(|error| error.to_string())?;
+    open_folder(logs.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
 fn open_folder(path: String) -> Result<(), String> {
     let p = std::path::Path::new(&path);
     if !p.is_dir() {
@@ -813,6 +820,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             open_folder,
+            open_logs,
             pick_folder,
             restore_backup,
             restart_desktop,
@@ -884,6 +892,8 @@ fn main() {
                         .permission("dialog:allow-open")
                         .permission("allow-pick-folder")
                         .permission("allow-open-folder")
+                        .permission("allow-open-logs")
+                        .permission("allow-restart-desktop")
                         .permission("allow-desktop-main")
                         .permission("allow-restore-backup");
                     if let Err(error) = app.add_capability(capability) {

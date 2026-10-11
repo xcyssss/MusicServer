@@ -84,8 +84,8 @@ jobs:
         run: |
           Import-Module Pester -RequiredVersion 3.4.0 -Force
           $groups = @{
-            state = @('Core', 'Database', 'V2', 'ArtistResolution', 'WorkerConcurrency', 'DownloadPipeline', 'Management', 'Search', 'Onboarding', 'Recommendation', 'LegacyRetirement', 'Listening', 'Web', 'Tauri', 'ConfigurableLibrary', 'TestRunner', 'Identity')
-            api   = @('Http', 'UiProxyRuntime', 'MediaRuntime', 'OnboardingRuntime', 'SearchRuntime', 'ApiTransaction', 'ApiRuntime')
+            state = @('Core', 'Database', 'V2', 'ArtistResolution', 'WorkerConcurrency', 'DownloadPipeline', 'Management', 'Search', 'Onboarding', 'Recommendation', 'LegacyRetirement', 'Listening', 'Web', 'Tauri', 'ConfigurableLibrary', 'Library', 'TestRunner', 'Identity')
+            api   = @('Http', 'UiProxyRuntime', 'LibraryRuntime', 'MediaRuntime', 'OnboardingRuntime', 'SearchRuntime', 'ApiTransaction', 'ApiRuntime')
           }
           $paths = @($groups['${{ matrix.group }}'] | ForEach-Object { ".\tests\MusicServer.$_.Tests.ps1" })
           Write-Host "Suites: $($paths -join ', ')"

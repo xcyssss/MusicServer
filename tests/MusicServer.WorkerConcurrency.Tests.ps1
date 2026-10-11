@@ -25,7 +25,7 @@ function Build-WorkerChildArgs {
         '-OutFile', $OutFile,
         '-TrackId', $TrackId,
         '-NewState', $NewState,
-        '-ExpectedRevision', ([string]$ExpectedRevision),
+        '-Revision', ([string]$ExpectedRevision),
         '-LeaseMinutes', ([string]$LeaseMinutes)
     )
 }

@@ -24,9 +24,18 @@ INSERT INTO daily_recommendations (date, rank, track_id, netease_id, created_at)
         $replacement = @'
 function Get-NetEaseLyricsById {
     param([string]$SongId)
-    [IO.File]::WriteAllText((Join-Path $Root ('slow-' + [guid]::NewGuid().ToString('N'))), 'started')
-    Start-Sleep -Seconds 4
-    return '[00:00.00]fixture lyric'
+    $marker = Join-Path $Root ('slow-' + [guid]::NewGuid().ToString('N'))
+    [IO.File]::WriteAllText($marker, 'started')
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        # Hold the real provider call until the test has finished its probes.
+        # A bound below the runtime's 35-second lyric deadline prevents a hang.
+        while (-not [IO.File]::Exists((Join-Path $Root 'lyrics.release'))) {
+            if ($watch.Elapsed.TotalSeconds -ge 25) { throw 'Fixture lyric release gate timed out.' }
+            Start-Sleep -Milliseconds 25
+        }
+        return '[00:00.00]fixture lyric'
+    } finally { [IO.File]::Delete($marker) }
 }
 '@
         $source = $source.Substring(0, $fn.Extent.StartOffset) + $replacement + $source.Substring($fn.Extent.EndOffset)
@@ -45,6 +54,7 @@ function Get-NetEaseLyricsById {
         $script:MediaBase = "http://127.0.0.1:$($script:MediaFixture.UiPort)"
     }
     AfterEach {
+        [IO.File]::WriteAllText((Join-Path $script:MediaFixture.Root 'lyrics.release'), 'release')
         Get-Content (Join-Path $script:MediaFixture.Root 'logs/musicserver-ui.log') -ErrorAction SilentlyContinue | Select-Object -Last 8 | ForEach-Object { Write-Host $_ }
         Get-Content (Join-Path $script:MediaFixture.Root 'ui.err.log') -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
         foreach ($request in $script:MediaRequests) { try { $request.Abort() } catch {} }
@@ -91,51 +101,72 @@ function Get-NetEaseLyricsById {
     }
 
     It 'keeps health and heartbeat responsive during slow lyrics and bounds admission' {
+        # Fixture preparation must not consume the provider saturation window.
+        # Cold media lookup is covered independently by the tests above.
+        $library = Invoke-RestMethod ($script:MediaBase + '/api/library') -TimeoutSec 10
+        $library.total | Should Be 1
+        $id = [string]$library.items[0].id
         $pending = @()
-        foreach ($i in 1..3) {
-            $request = [Net.HttpWebRequest]::Create($script:MediaBase + '/api/tracks/slow/lyrics')
-            $request.ConnectionGroupName = "media-$i"
-            $request.Timeout = 15000
-            $script:MediaRequests += $request
-            $pending += $request.BeginGetResponse($null, $null)
+        $audioResponse = $null
+        try {
+            foreach ($i in 1..3) {
+                $request = [Net.HttpWebRequest]::Create($script:MediaBase + '/api/tracks/slow/lyrics')
+                $request.ConnectionGroupName = "media-$i"
+                $request.Timeout = 15000
+                $script:MediaRequests += $request
+                $pending += $request.BeginGetResponse($null, $null)
+            }
+            $deadline = [DateTime]::UtcNow.AddSeconds(10)
+            do {
+                $started = @(Get-ChildItem -LiteralPath $script:MediaFixture.Root -Filter 'slow-*').Count
+                if ($started -eq 3) { break }
+                Start-Sleep -Milliseconds 25
+            } while ([DateTime]::UtcNow -lt $deadline)
+            if ($started -ne 3 -and $pending[0].IsCompleted) {
+                $response = $script:MediaRequests[0].EndGetResponse($pending[0])
+                $reader = [IO.StreamReader]::new($response.GetResponseStream())
+                try { Write-Host $reader.ReadToEnd() } finally { $reader.Dispose(); $response.Dispose() }
+            }
+            $started | Should Be 3
+            foreach ($operation in $pending) { $operation.IsCompleted | Should Be $false }
+            $audio = [Net.HttpWebRequest]::Create($script:MediaBase + "/api/library/$id/stream")
+            # The unread audio response must not occupy a control connection.
+            $audio.ConnectionGroupName = 'media-audio'
+            $audio.Timeout = 2000
+            $script:MediaRequests += $audio
+            $audioResponse = $audio.GetResponse()
+            [int]$audioResponse.StatusCode | Should Be 200
+            $watch = [Diagnostics.Stopwatch]::StartNew()
+            $health = Invoke-RestMethod ($script:MediaBase + '/health') -TimeoutSec 2
+            $health.status | Should Be 'ok'
+            Invoke-WebRequest ($script:MediaBase + '/ui/heartbeat?id=media-test') -Method POST -UseBasicParsing -TimeoutSec 2 | Out-Null
+            ($watch.ElapsedMilliseconds -lt 1500) | Should Be $true
+            $status = 0
+            try { Invoke-WebRequest ($script:MediaBase + '/api/tracks/slow/lyrics') -UseBasicParsing -TimeoutSec 2 | Out-Null }
+            catch {
+                $errorResponse = $_.Exception.Response
+                $status = [int]$errorResponse.StatusCode
+                if ($errorResponse) { $errorResponse.Dispose() }
+            }
+            $status | Should Be 503
+            $latencies = @()
+            foreach ($sample in 1..30) {
+                $timer = [Diagnostics.Stopwatch]::StartNew()
+                (Invoke-RestMethod ($script:MediaBase + '/health') -TimeoutSec 2).status | Should Be 'ok'
+                $latencies += $timer.Elapsed.TotalMilliseconds
+            }
+            $ordered = @($latencies | Sort-Object)
+            Write-Host ("MEDIA_HEALTH samples=30 p95_ms={0:N2}" -f $ordered[28])
+            # Markers represent live provider calls, not historical starts.
+            @(Get-ChildItem -LiteralPath $script:MediaFixture.Root -Filter 'slow-*').Count | Should Be 3
+            foreach ($operation in $pending) { $operation.IsCompleted | Should Be $false }
+        } finally {
+            [IO.File]::WriteAllText((Join-Path $script:MediaFixture.Root 'lyrics.release'), 'release')
+            if ($audioResponse) { $audioResponse.Dispose() }
         }
-        $deadline = [DateTime]::UtcNow.AddSeconds(10)
-        do {
-            $started = @(Get-ChildItem -LiteralPath $script:MediaFixture.Root -Filter 'slow-*').Count
-            if ($started -eq 3) { break }
-            Start-Sleep -Milliseconds 25
-        } while ([DateTime]::UtcNow -lt $deadline)
-        if ($started -ne 3 -and $pending[0].IsCompleted) {
-            $response = $script:MediaRequests[0].EndGetResponse($pending[0])
-            $reader = [IO.StreamReader]::new($response.GetResponseStream())
-            try { Write-Host $reader.ReadToEnd() } finally { $reader.Dispose(); $response.Dispose() }
-        }
-        $started | Should Be 3
-        $id = (Invoke-RestMethod ($script:MediaBase + '/api/library')).items[0].id
-        $audio = [Net.HttpWebRequest]::Create($script:MediaBase + "/api/library/$id/stream")
-        $audio.Timeout = 2000
-        $script:MediaRequests += $audio
-        $audioResponse = $audio.GetResponse()
-        [int]$audioResponse.StatusCode | Should Be 200
-        $watch = [Diagnostics.Stopwatch]::StartNew()
-        $health = Invoke-RestMethod ($script:MediaBase + '/health') -TimeoutSec 2
-        $health.status | Should Be 'ok'
-        Invoke-WebRequest ($script:MediaBase + '/ui/heartbeat?id=media-test') -Method POST -UseBasicParsing -TimeoutSec 2 | Out-Null
-        ($watch.ElapsedMilliseconds -lt 1500) | Should Be $true
-        $status = 0
-        try { Invoke-WebRequest ($script:MediaBase + '/api/tracks/slow/lyrics') -UseBasicParsing -TimeoutSec 2 | Out-Null }
-        catch { $status = [int]$_.Exception.Response.StatusCode }
-        $status | Should Be 503
-        $latencies = @()
-        foreach ($sample in 1..30) {
-            $timer = [Diagnostics.Stopwatch]::StartNew()
-            (Invoke-RestMethod ($script:MediaBase + '/health') -TimeoutSec 2).status | Should Be 'ok'
-            $latencies += $timer.Elapsed.TotalMilliseconds
-        }
-        $ordered = @($latencies | Sort-Object)
-        Write-Host ("MEDIA_HEALTH samples=30 p95_ms={0:N2}" -f $ordered[28])
-        $audioResponse.Dispose()
         foreach ($i in 0..2) {
+            # HttpWebRequest.Timeout does not bound BeginGetResponse.
+            $pending[$i].AsyncWaitHandle.WaitOne(5000) | Should Be $true
             $response = $script:MediaRequests[$i].EndGetResponse($pending[$i])
             $reader = [IO.StreamReader]::new($response.GetResponseStream())
             try { (($reader.ReadToEnd() | ConvertFrom-Json).available) | Should Be $true }

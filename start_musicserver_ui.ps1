@@ -51,6 +51,7 @@ $script:LastActivityAt = [DateTime]::UtcNow
 $script:CurrentRequest = ''
 $script:UiLibraryCache = $null
 $script:UiLibraryCacheAt = [DateTime]::MinValue
+$script:LibraryCacheEpoch = 0
 $script:NextHeartbeatAt = [DateTime]::MinValue
 
 function Write-UiLog {
@@ -254,6 +255,8 @@ function Test-DailyRecommendGeneratedToday {
         $previousExe = Get-MusicServerSqliteExe
         try {
             Connect-MusicServerDatabase -DbPath $dbPath -SqliteExe $taskConfig.Sqlite
+            if (Get-AppSettingDb -Key 'library_manifest_pending') { return $true }
+            if (Get-AppSettingDb -Key 'recommendation_library_pending') { return $false }
             $rows = @(Invoke-MusicServerParamSql -Template "SELECT COUNT(*) AS cnt FROM daily_recommendations WHERE date = @d AND seed_source <> 'onboarding_starter';" -Params @{ d = (Get-TodayDate) })
             return ((@($rows).Count -gt 0) -and ([int]$rows[0].cnt -gt 0))
         } finally {
@@ -385,6 +388,7 @@ Import-Module (Join-Path $Root 'MusicServer.Http.psm1') -DisableNameChecking -Fo
 Import-Module (Join-Path $Root 'MusicServer.Providers.psm1') -DisableNameChecking -Force
 Import-Module (Join-Path $Root 'MusicServer.Identity.psm1') -DisableNameChecking -Force
 Import-Module (Join-Path $Root 'MusicServer.Management.psm1') -DisableNameChecking -Force
+Import-Module (Join-Path $Root 'MusicServer.Library.psm1') -DisableNameChecking -Force
 $startupPhases['module_imports'] = $startupClock.Elapsed.TotalMilliseconds
 $script:BuildMarker = Get-MusicServerBuildIdentity -Root $Root
 $startupPhases['build_identity'] = $startupClock.Elapsed.TotalMilliseconds
@@ -556,6 +560,9 @@ function Get-UiLibrary {
     if ($null -ne $script:UiLibraryCache -and $cacheAge -lt 30) {
         return @($script:UiLibraryCache)
     }
+    $scanClock = [Diagnostics.Stopwatch]::StartNew()
+    $statePath = Join-Path $Config.StateDir 'musicserver.db'
+    if ([IO.File]::Exists($statePath)) { Connect-MusicServerDatabase -DbPath $statePath -SqliteExe $Config.Sqlite }
     $items = New-Object System.Collections.ArrayList
     $seenFiles = @{}
     $script:LibraryFiles = @{}
@@ -599,7 +606,7 @@ function Get-UiLibrary {
 
     foreach ($dir in @($Config.MusicDir)) {
         if (-not (Test-Path -LiteralPath $dir -PathType Container)) { continue }
-        foreach ($entry in @(Get-ChildItem -LiteralPath $dir -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.mp3','.flac','.wav','.aac','.m4a' })) {
+        foreach ($entry in @(Get-MusicServerLibraryAudioFiles -Config $Config)) {
             $file = [System.IO.Path]::GetFullPath($entry.FullName)
             $fileKey = $file.ToLowerInvariant()
             if ($seenFiles.ContainsKey($fileKey)) { continue }
@@ -610,7 +617,7 @@ function Get-UiLibrary {
             $artist = Get-LibraryFolderArtist -File $file
             $lrcPath = Get-LrcPath -File $file
             $addedAt = ''
-            try { $addedAt = (Get-Item -LiteralPath $file).LastWriteTime.ToString('o') } catch {}
+            try { $addedAt = $entry.LastWriteTimeUtc.ToString('o') } catch {}
             [void]$items.Add([pscustomobject]@{
                 id = $id; source = 'local'; provider = 'navidrome'
                 name = $title; title = $title; artist = $artist; album = $artist
@@ -631,6 +638,7 @@ function Get-UiLibrary {
     try { $resolved = Get-LocalTrackArtistMapDb } catch { $resolved = @{} }
     $canonicalMap = @{}
     try { $canonicalMap = Get-CanonicalLocalTrackMapDb -MusicDir $Config.MusicDir } catch { $canonicalMap = @{} }
+    $preferences = Get-TrackPreferenceMapDb
     $prefixes = @()
     try { $prefixes = @(Get-SharedTitlePrefixes -Titles @($items | ForEach-Object { [string]$_.title })) } catch { $prefixes = @() }
     # The year is a property of the track, not of the artist decision, so every row
@@ -652,6 +660,15 @@ function Get-UiLibrary {
         foreach ($candidate in @(([string]$item.id -replace '^library-', ''), [string]$item.id, [string]$item.file, ('file:' + [string]$item.file))) {
             if ($canonicalMap.ContainsKey($candidate)) { $canonical = $canonicalMap[$candidate]; break }
         }
+        $canonicalId = if ($canonical) { [string]$canonical.id } else { '' }
+        $identity = if ($canonicalId) { $canonicalId } else { [string]$item.id }
+        $item | Add-Member -NotePropertyName 'canonical_track_id' -NotePropertyValue $canonicalId -Force
+        $item | Add-Member -NotePropertyName 'track_id' -NotePropertyValue $identity -Force
+        $item | Add-Member -NotePropertyName 'listening_identity' -NotePropertyValue $identity -Force
+        $item | Add-Member -NotePropertyName 'local_status' -NotePropertyValue 'LOCAL' -Force
+        $knownPreference = $canonicalId -and $preferences.ContainsKey($canonicalId)
+        $item | Add-Member -NotePropertyName 'liked' -NotePropertyValue $(if ($knownPreference) { $preferences[$canonicalId] -eq 'LIKE' } else { $null }) -Force
+        $item | Add-Member -NotePropertyName 'disliked' -NotePropertyValue ($knownPreference -and $preferences[$canonicalId] -eq 'DISLIKE') -Force
         $item | Add-Member -NotePropertyName 'canonical_title' -NotePropertyValue '' -Force
         $item | Add-Member -NotePropertyName 'canonical_title_source' -NotePropertyValue '' -Force
         if ($canonical) {
@@ -671,6 +688,18 @@ function Get-UiLibrary {
         }
     }
 
+    $items = @(Sync-MusicServerLibraryIndex -Config $Config -Items @($items))
+    # A legacy manifest can contain older display fields. Current exact local
+    # identity remains authoritative when the completed scan replaces a snapshot.
+    foreach ($item in $items) {
+        foreach ($binding in @(('file:'+[string]$item.file),[string]$item.file,[string]$item.id,([string]$item.id -replace '^library-',''))) {
+            if ($canonicalMap.ContainsKey($binding)) {
+                Merge-MusicServerLibraryCanonicalMetadata -Metadata $item -Canonical $canonicalMap[$binding] | Out-Null
+                break
+            }
+        }
+    }
+    Write-UiLog "[library] phase=scan result=READY count=$($items.Count) elapsed_ms=$($scanClock.ElapsedMilliseconds)"
     $script:UiLibraryCache = @($items)
     $script:UiLibraryJsonCache = $null
     $script:UiLibraryCacheAt = [DateTime]::UtcNow
@@ -696,6 +725,13 @@ function Resolve-UiLibraryFile {
         }
         return $null
     }
+    $libraryDb = Join-Path $Config.StateDir 'musicserver.db'
+    $indexed = $null
+    if ([IO.File]::Exists($libraryDb)) {
+        Connect-MusicServerDatabase -DbPath $libraryDb -SqliteExe $Config.Sqlite
+        $indexed = Get-MusicServerLibraryFileById -Config $Config -Id $Id
+    }
+    if ($indexed) { $script:LibraryFiles[$Id] = $indexed; return $indexed }
     [void](Get-UiLibrary)
     if ($script:LibraryFiles.ContainsKey($Id)) {
         $candidate = [string]$script:LibraryFiles[$Id]
@@ -1207,6 +1243,7 @@ function Handle-Request {
         # Deleting a library track: proxy to the API, then invalidate the local
         # library caches so the next /api/library request reflects the deletion.
         Proxy-ApiRequest -Context $Context
+        $script:LibraryCacheEpoch++
         $script:UiLibraryCache = $null
         $script:UiLibraryCacheAt = [DateTime]::MinValue
         $script:LibraryFiles = @{}
@@ -1242,7 +1279,7 @@ function Handle-Request {
 # the boundary, never the main loop's mutable script context or client registry.
 function Initialize-MediaPool {
     $initial = [Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
-    $initial.ImportPSModule(@((Join-Path $Root 'MusicServer.Core.psm1'), (Join-Path $Root 'MusicServer.Database.psm1'), (Join-Path $Root 'MusicServer.State.psm1'), (Join-Path $Root 'MusicServer.Providers.psm1')))
+    $initial.ImportPSModule(@((Join-Path $Root 'MusicServer.Core.psm1'), (Join-Path $Root 'MusicServer.Database.psm1'), (Join-Path $Root 'MusicServer.State.psm1'), (Join-Path $Root 'MusicServer.Providers.psm1'), (Join-Path $Root 'MusicServer.Library.psm1')))
     # Library lookup fills a private file map. Automatic lyric jobs bind their
     # own SQLite connection and lease before making any bounded provider request.
     foreach ($name in @('Write-UiLog','Invoke-NavidromeSqliteJson','Get-LocalLibraryId','Get-LibraryFolderArtist','Get-LrcPath','Get-LyricQuality','Get-NeteaseIdForTrack','Get-NetEaseLyricsById','Get-UiLibrary','Resolve-UiLibraryFile','Send-ResponseBytes','Send-Json','ConvertTo-JsonStringValue','Send-LyricsJson','Send-JsonRaw','Send-LibraryStream','Send-LibraryLyrics','Send-TrackLyrics')) {
@@ -1255,21 +1292,41 @@ function Initialize-MediaPool {
     $script:MediaJobs = [Collections.ArrayList]::new()
     $script:MediaPool = [RunspaceFactory]::CreateRunspacePool(1, 4, $initial, $Host)
     $script:MediaPool.Open()
+    $script:LibraryJobs = [Collections.ArrayList]::new()
+    $script:LibraryWaiter = $null
+    $script:LibraryPool = [RunspaceFactory]::CreateRunspacePool(1, 1, $initial, $Host)
+    $script:LibraryPool.Open()
 }
 
 function Complete-MediaJobs {
-    foreach ($job in @($script:MediaJobs.ToArray())) {
+    foreach ($job in @($script:MediaJobs.ToArray()) + @($script:LibraryJobs.ToArray())) {
         if ($job.Async.IsCompleted) {
-            try { $job.PowerShell.EndInvoke($job.Async) | Out-Null } catch {}
+            try {
+                $result = @($job.PowerShell.EndInvoke($job.Async))
+                if ($job.Action -eq 'library' -and $job.CacheEpoch -eq $script:LibraryCacheEpoch -and $result.Count -gt 0 -and $result[-1].PSObject.Properties['Items']) {
+                    $script:UiLibraryCache = @($result[-1].Items)
+                    $script:LibraryFiles = $result[-1].Files
+                    $script:UiLibraryCacheAt = [DateTime]::UtcNow
+                    $script:UiLibraryJsonCache = $null
+                }
+            } catch {
+                if ($job.Action -eq 'library') { Write-UiLog '[library] phase=scan result=ERROR code=RUNSPACE_FAILED' }
+            }
             foreach ($errorRecord in $job.PowerShell.Streams.Error) { Write-UiLog "Media request failed: $errorRecord" }
             try { $job.Context.Response.Close() } catch {}
             $job.PowerShell.Dispose()
-            [void]$script:MediaJobs.Remove($job)
+            if ($job.Action -eq 'library') { [void]$script:LibraryJobs.Remove($job) } else { [void]$script:MediaJobs.Remove($job) }
         } elseif ($job.TimeoutSeconds -gt 0 -and -not $job.Stopping -and ([DateTime]::UtcNow - $job.Started).TotalSeconds -gt $job.TimeoutSeconds) {
+            if ($job.Action -eq 'library') { Write-UiLog '[library] phase=scan result=ERROR code=TIMEOUT elapsed_ms=60000' }
             try { $job.Context.Response.Abort() } catch {}
             $job.Stopping = $true
             [void]$job.PowerShell.BeginStop($null, $null)
         }
+    }
+    if ($script:LibraryWaiter -and $script:LibraryJobs.Count -eq 0) {
+        $waiting = $script:LibraryWaiter
+        $script:LibraryWaiter = $null
+        [void](Start-MediaRequest -Context $waiting)
     }
 }
 
@@ -1284,6 +1341,7 @@ function Initialize-ArtistBackfillPool {
         (Join-Path $Root 'MusicServer.Database.psm1'),
         (Join-Path $Root 'MusicServer.State.psm1'),
         (Join-Path $Root 'MusicServer.Providers.psm1')
+        (Join-Path $Root 'MusicServer.Library.psm1')
     ))
     foreach ($name in @('Write-UiLog','Get-UiLibrary','Get-LibraryFolderArtist','Invoke-NavidromeSqliteJson','Get-LocalLibraryId','Get-LrcPath')) {
         $definition = (Get-Command $name -CommandType Function).Definition
@@ -1419,20 +1477,37 @@ function Complete-ArtistBackfill {
 
 function Start-MediaRequest {
     param($Context)
-    if ($Context.Request.HttpMethod -ne 'GET' -or $Context.Request.Url.AbsolutePath -notmatch '^/api/(library|tracks)/([^/]+)/(stream|lyrics)$') { return $false }
-    $kind = $Matches[1]; $id = [Uri]::UnescapeDataString($Matches[2]); $action = $Matches[3]
+    if ($Context.Request.HttpMethod -ne 'GET') { return $false }
+    if ($Context.Request.Url.AbsolutePath -eq '/api/library') {
+        Complete-MediaJobs
+        $fresh = $null -ne $script:UiLibraryCache -and ([DateTime]::UtcNow - $script:UiLibraryCacheAt).TotalSeconds -lt 30
+        if ($fresh -and $Context.Request.QueryString['refresh'] -ne '1') { return $false }
+        if ($script:LibraryJobs.Count) {
+            if ($Context.Request.QueryString['refresh'] -eq '1' -and -not $script:LibraryWaiter) {
+                $script:LibraryWaiter = $Context
+                return $true
+            }
+            if ($null -ne $script:UiLibraryCache) { Send-Json -Context $Context -Body @{items=@($script:UiLibraryCache); total=@($script:UiLibraryCache).Count; updating=$true} }
+            else { Send-Json -Context $Context -Body @{items=@(); total=0; loading=$true} }
+            return $true
+        }
+        $kind = 'library'; $id = ''; $action = 'library'
+    } else {
+        if ($Context.Request.Url.AbsolutePath -notmatch '^/api/(library|tracks)/([^/]+)/(stream|lyrics)$') { return $false }
+        $kind = $Matches[1]; $id = [Uri]::UnescapeDataString($Matches[2]); $action = $Matches[3]
+    }
     if ($kind -eq 'tracks' -and $action -eq 'stream') { return $false }
     # Reserve one slot for playback so rapid lyric changes cannot occupy every
     # media channel while their upstream responses finish or time out.
     $lyricsJobs = @($script:MediaJobs | Where-Object { $_.Action -eq 'lyrics' }).Count
-    if ($script:MediaJobs.Count -ge 4 -or ($action -eq 'lyrics' -and $lyricsJobs -ge 3)) {
+    if ($action -ne 'library' -and ($script:MediaJobs.Count -ge 4 -or ($action -eq 'lyrics' -and $lyricsJobs -ge 3))) {
         $Context.Response.StatusCode = 503
         $Context.Response.Headers['Retry-After'] = '1'
         $Context.Response.Close()
         return $true
     }
     $ps = [PowerShell]::Create()
-    $ps.RunspacePool = $script:MediaPool
+    $ps.RunspacePool = if ($action -eq 'library') { $script:LibraryPool } else { $script:MediaPool }
     [void]$ps.AddScript({
         param($requestContext, $kind, $id, $action, $libraryFiles)
         $ErrorActionPreference = 'Stop'
@@ -1443,7 +1518,31 @@ function Start-MediaRequest {
         $script:UiLibraryCache = $null
         $script:UiLibraryCacheAt = [DateTime]::MinValue
         try {
-            if ($kind -eq 'tracks') { Send-TrackLyrics -Context $requestContext -TrackId $id }
+            if ($action -eq 'library') {
+                $sent = $false
+                Connect-MusicServerDatabase -DbPath (Join-Path $Config.StateDir 'musicserver.db') -SqliteExe $Config.Sqlite
+                if ($requestContext.Request.QueryString['refresh'] -ne '1') {
+                    $snapshot = @(Get-MusicServerLibrarySnapshot -Config $Config)
+                    if ($snapshot.Count) {
+                        Send-Json -Context $requestContext -Body @{items=$snapshot;total=$snapshot.Count;updating=$true}
+                        $sent = $true
+                    }
+                }
+                # The import owns portable order and approved metadata. Keep
+                # this background channel open until it commits instead of
+                # publishing a raw scan that would linger in the UI cache.
+                if (Get-AppSettingDb -Key 'library_manifest_pending') {
+                    if (-not $sent) {
+                        Send-Json -Context $requestContext -Body @{items=@();total=0;loading=$true}
+                        $sent = $true
+                    }
+                    while (Get-AppSettingDb -Key 'library_manifest_pending') { Start-Sleep -Milliseconds 1000 }
+                }
+                $items = @(Get-UiLibrary)
+                if (-not $sent) { Send-Json -Context $requestContext -Body @{items=$items;total=$items.Count} }
+                return [pscustomobject]@{Items=$items;Files=$script:LibraryFiles.Clone()}
+            }
+            elseif ($kind -eq 'tracks') { Send-TrackLyrics -Context $requestContext -TrackId $id }
             elseif ($action -eq 'stream') { Send-LibraryStream -Context $requestContext -Id $id }
             else { Send-LibraryLyrics -Context $requestContext -Id $id }
         } catch {
@@ -1454,8 +1553,9 @@ function Start-MediaRequest {
     $async = $ps.BeginInvoke()
     # Audio transfers may legitimately exceed 35 seconds; their individual
     # writes retain the existing five-second stall deadline.
-    $deadlineSeconds = if ($action -eq 'lyrics') { 35 } else { 0 }
-    [void]$script:MediaJobs.Add([pscustomobject]@{ PowerShell = $ps; Async = $async; Context = $Context; Started = [DateTime]::UtcNow; Stopping = $false; TimeoutSeconds = $deadlineSeconds; Action = $action })
+    $deadlineSeconds = if ($action -eq 'lyrics') { 35 } elseif ($action -eq 'library') { 60 } else { 0 }
+    $job = [pscustomobject]@{ PowerShell = $ps; Async = $async; Context = $Context; Started = [DateTime]::UtcNow; Stopping = $false; TimeoutSeconds = $deadlineSeconds; Action = $action; CacheEpoch = $script:LibraryCacheEpoch }
+    if ($action -eq 'library') { [void]$script:LibraryJobs.Add($job) } else { [void]$script:MediaJobs.Add($job) }
     return $true
 }
 
@@ -1518,7 +1618,7 @@ try {
     }
 
     $startupPhases['watchdog_start'] = $startupClock.Elapsed.TotalMilliseconds
-    Write-MusicServerStartupTrace -Role ui -Checkpoints $startupPhases
+    Write-MusicServerStartupTrace -Role ui -Checkpoints $startupPhases -LogDir $Config.LogDir
     $pending = $script:Listener.BeginGetContext($null, $null)
     while ($script:Listener.IsListening) {
         Complete-MediaJobs
@@ -1559,12 +1659,14 @@ try {
     Write-UiLog "Launcher failed: $($_.Exception.Message)"
     throw
 } finally {
-    foreach ($job in @($script:MediaJobs)) {
+    if ($script:LibraryWaiter) { try { $script:LibraryWaiter.Response.Abort() } catch {} }
+    foreach ($job in @($script:MediaJobs) + @($script:LibraryJobs)) {
         if (-not $job) { continue }
         try { $job.Context.Response.Abort() } catch {}
         try { $job.PowerShell.Stop(); $job.PowerShell.Dispose() } catch {}
     }
     if ($script:MediaPool) { $script:MediaPool.Close(); $script:MediaPool.Dispose() }
+    if ($script:LibraryPool) { $script:LibraryPool.Close(); $script:LibraryPool.Dispose() }
     if ($script:Listener) {
         try { if ($script:Listener.IsListening) { $script:Listener.Stop() } } catch {}
         try { $script:Listener.Close() } catch {}

@@ -2,7 +2,7 @@
 
 Describe 'PowerShell 5.1 test runner contract' {
     function Invoke-RunnerFixture {
-        param([string]$Content, [switch]$Missing, [int]$TimeoutSeconds = 0)
+        param([string]$Content, [switch]$Missing, [int]$TimeoutSeconds = 0, [string]$SkipTag = '')
         $fixture = Join-Path $TestDrive 'runner fixture.Tests.ps1'
         # A nested log directory is deliberate: the runner resolves the log and its
         # own paths through the session provider, so a caller-supplied directory
@@ -20,6 +20,7 @@ Describe 'PowerShell 5.1 test runner contract' {
             $ErrorActionPreference = 'Continue'
             $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $runner, '-SuiteFile', $fixture, '-LogFile', $log)
             if ($TimeoutSeconds -gt 0) { $arguments += @('-TimeoutSeconds', "$TimeoutSeconds") }
+            if ($SkipTag) { $arguments += @('-SkipTag',$SkipTag) }
             $output = & powershell.exe @arguments 2>&1
             $code = $LASTEXITCODE
         } finally {
@@ -39,6 +40,23 @@ Describe 'live suite' -Tag RequiresLocalRuntime { It 'must be excluded' { throw 
         $r.Code | Should Be 0
         $r.Log | Should Match 'Pester: 3.4.0'
         $r.Log | Should Match 'Passed: 1  Failed: 0  Total: 1'
+    }
+
+    It 'accepts the host-safe tag option without exiting before the suite starts' {
+        $r = Invoke-RunnerFixture -SkipTag 'CustomExcluded' @'
+Describe 'isolated suite' { It 'passes' { 1 | Should Be 1 } }
+Describe 'excluded suite' -Tag CustomExcluded { It 'must be excluded' { throw 'tag option ignored' } }
+'@
+        $r.Code | Should Be 0
+        $r.Log | Should Match 'Passed: 1  Failed: 0  Total: 1'
+    }
+
+    It 'keeps an early worker crash distinct from a successful suite' {
+        $r = Invoke-RunnerFixture '[Console]::Error.WriteLine(''Cookie: runner-private-cookie''); [Environment]::Exit(7)'
+        $r.Code | Should Be 2
+        $r.Log | Should Match 'suite process exited with code 7 without writing a log'
+        $r.Log | Should Not Match 'Passed:'
+        $r.Log | Should Not Match 'runner-private-cookie'
     }
 
     It 'reports the failing test, message and location with exit code one' {

@@ -14,7 +14,7 @@
 param(
     [Parameter(Mandatory)][string]$SuiteFile,
     [Parameter(Mandatory)][string]$LogFile,
-    [string[]]$ExcludeTag = @('RequiresLocalRuntime'),
+    [Alias('SkipTag')][string[]]$ExcludeTag = @('RequiresLocalRuntime'),
     # Default budget for one targeted suite. AGENTS.md: investigate anything that
     # needs more than this rather than waiting longer.
     [int]$TimeoutSeconds = 300,
@@ -38,24 +38,39 @@ function ConvertTo-ProcessArgumentLine {
     }) -join ' ')
 }
 
+function ConvertTo-RunnerFailureDetail {
+    param([string]$Text)
+    if (-not $Text) { return '' }
+    if ($Text.Length -gt 8192) { $Text=$Text.Substring($Text.Length-8192) }
+    $Text=[regex]::Replace($Text,'(?i)https?://\S+','[url]')
+    $Text=[regex]::Replace($Text,'(?i)(Cookie|Authorization|token|password|secret)\s*[:=]\s*[^\r\n;]+','$1=[redacted]')
+    $Text=[regex]::Replace($Text,'(?i)[A-Z]:\\Users\\[^\\\r\n ]+','[user]')
+    return $Text.Trim()
+}
+
 if (-not $Worker) {
     # Parent: run the child under a hard wall-clock bound and kill its whole tree on
     # expiry, so a deadlocked suite cannot leave services or listeners behind for
     # the next one to trip over.
     $logPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($LogFile)
+    $suitePath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($SuiteFile)
+    $runnerPath = [IO.Path]::GetFullPath($PSCommandPath)
     $parent = Split-Path -Parent $logPath
     if ($parent) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
     Remove-Item -LiteralPath $logPath -Force -ErrorAction SilentlyContinue
 
     $arguments = @(
         '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-        '-File', $PSCommandPath,
-        '-SuiteFile', $SuiteFile,
+        '-File', $runnerPath,
+        '-SuiteFile', $suitePath,
         '-LogFile', $logPath,
         '-Worker',
         '-TimeoutSeconds', '0'
     )
-    if ($ExcludeTag -and $ExcludeTag.Count -gt 0) { $arguments += @('-ExcludeTag', ($ExcludeTag -join ',')) }
+    # Windows PowerShell's host treats an explicit -Ex... argument as its own
+    # ExecutionPolicy switch, even after -File. The safe script alias avoids a
+    # silent host exit before any suite log can be written.
+    if ($ExcludeTag -and $ExcludeTag.Count -gt 0) { $arguments += @('-SkipTag', ($ExcludeTag -join ',')) }
 
     # System.Diagnostics.Process rather than Start-Process -PassThru: a process
     # object handed back by Start-Process without -Wait does not keep a handle, so
@@ -64,10 +79,13 @@ if (-not $Worker) {
     # prevent. Only the suite's exit code matters here; stdout is discarded because
     # the worker writes the summary and failure detail into the log file.
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
-    $startInfo.FileName = 'powershell.exe'
+    $startInfo.FileName = (Get-Command powershell.exe -ErrorAction Stop).Source
     $startInfo.Arguments = ConvertTo-ProcessArgumentLine -Arguments $arguments
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
+    $startInfo.WorkingDirectory = Split-Path -Parent (Split-Path -Parent $runnerPath)
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
     # The host machine may carry an APP_HOME pin (its real data home). A suite that
     # forgets to set MUSICSERVER_APP_HOME must not fall through to live state, so
     # point the pin lookup at a key that does not exist.
@@ -75,12 +93,16 @@ if (-not $Worker) {
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $startInfo
     [void]$process.Start()
+    # Drain both streams asynchronously: child warnings cannot fill an inherited
+    # pipe and a host crash before Pester starts must leave an actionable error.
+    $stdoutTask=$process.StandardOutput.ReadToEndAsync()
+    $stderrTask=$process.StandardError.ReadToEndAsync()
 
     $exited = $process.WaitForExit($TimeoutSeconds * 1000)
 
     if (-not $exited) {
         # /T kills the suite's own children too (API servers, fixtures, workers).
-        & cmd.exe /c "taskkill /PID $($process.Id) /T /F" 2>&1 | Out-Null
+        & taskkill.exe /PID $process.Id /T /F 2>&1 | Out-Null
         try { $process.WaitForExit(15000) | Out-Null } catch { }
         $name = [IO.Path]::GetFileName($SuiteFile)
         Write-RunnerLog -Content @(
@@ -98,6 +120,8 @@ if (-not $Worker) {
     $process.WaitForExit()
     $code = $process.ExitCode
     if ($null -eq $code) { $code = 2 }
+    $stdout=$stdoutTask.GetAwaiter().GetResult()
+    $stderr=$stderrTask.GetAwaiter().GetResult()
     try { $process.Dispose() } catch { }
 
     # A child that died before writing its own log is a runner error, not a pass:
@@ -107,6 +131,8 @@ if (-not $Worker) {
             "SUITE: $SuiteFile",
             'Pester: 3.4.0',
             "RUNNER EXCEPTION: the suite process exited with code $code without writing a log."
+            (ConvertTo-RunnerFailureDetail -Text $stderr)
+            (ConvertTo-RunnerFailureDetail -Text $stdout)
         )
         [Console]::Error.WriteLine("RUNNER EXCEPTION: no log for $SuiteFile")
         exit 2

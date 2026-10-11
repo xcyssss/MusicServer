@@ -18,8 +18,8 @@
 # file), so a stuck suite is visible instead of being hidden until the pipeline
 # ends.
 param(
-    [string[]]$StateSuites = @('Core', 'Database', 'V2', 'ArtistResolution', 'WorkerConcurrency', 'DownloadPipeline', 'Management', 'Search', 'Onboarding', 'Recommendation', 'LegacyRetirement', 'Listening', 'Web', 'Tauri', 'ConfigurableLibrary', 'TestRunner', 'Identity'),
-    [string[]]$ApiSuites = @('Http', 'UiProxyRuntime', 'MediaRuntime', 'OnboardingRuntime', 'SearchRuntime', 'ApiTransaction', 'ApiRuntime'),
+    [string[]]$StateSuites = @('Core', 'Database', 'V2', 'ArtistResolution', 'WorkerConcurrency', 'DownloadPipeline', 'Management', 'Search', 'Onboarding', 'Recommendation', 'LegacyRetirement', 'Listening', 'Web', 'Tauri', 'ConfigurableLibrary', 'Library', 'TestRunner', 'Identity'),
+    [string[]]$ApiSuites = @('Http', 'UiProxyRuntime', 'LibraryRuntime', 'MediaRuntime', 'OnboardingRuntime', 'SearchRuntime', 'ApiTransaction', 'ApiRuntime'),
     [int]$SuiteTimeoutSeconds = 300,
     [int]$GroupTimeoutSeconds = 900,
     [string]$LogDir = '',
@@ -77,7 +77,7 @@ foreach ($name in $groups.Keys) {
                 continue
             }
             $log = Join-Path $Spec.Dir "$GroupName-$suite.log"
-            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $Spec.Runner -SuiteFile $suitePath -LogFile $log -TimeoutSeconds $Spec.Timeouts -ExcludeTag $Spec.Tags *> (Join-Path $Spec.Dir "$GroupName-$suite.stdout.log")
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $Spec.Runner -SuiteFile $suitePath -LogFile $log -TimeoutSeconds $Spec.Timeouts -SkipTag $Spec.Tags *> (Join-Path $Spec.Dir "$GroupName-$suite.stdout.log")
             $code = $LASTEXITCODE
             $passed = 0; $failed = 0
             $summary = (Get-Content -LiteralPath $log -Encoding UTF8 -ErrorAction SilentlyContinue | Select-String -Pattern '^Passed:\s*(\d+)\s+Failed:\s*(\d+)\s+Total:\s*(\d+)' | Select-Object -First 1)

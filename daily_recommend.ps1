@@ -46,8 +46,22 @@ Import-Module (Join-Path $PSScriptRoot 'MusicServer.State.psm1') -DisableNameChe
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Providers.psm1') -DisableNameChecking -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Migration.psm1') -DisableNameChecking -Force
 Import-Module (Join-Path $PSScriptRoot 'MusicServer.Onboarding.psm1') -DisableNameChecking -Force
+if (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'MusicServer.Library.psm1')) {
+    Import-Module (Join-Path $PSScriptRoot 'MusicServer.Library.psm1') -DisableNameChecking -Force
+}
 
 $Config = New-MusicServerConfig -Root $Root -AppHome $AppHome
+$recommendationMutexName = 'Local\MusicServer_Daily_' + (Get-CanonicalTrackId -Title (Get-MusicServerPathKey -Path $Config.AppHome) -Artist 'generator')
+$RecommendationMutex = [Threading.Mutex]::new($false, $recommendationMutexName)
+$OwnsRecommendationMutex = $false
+try { $OwnsRecommendationMutex = $RecommendationMutex.WaitOne(30000) }
+catch [Threading.AbandonedMutexException] { $OwnsRecommendationMutex = $true }
+if (-not $OwnsRecommendationMutex) {
+    Write-MusicServerLog -Path (Join-Path $Config.LogDir 'musicserver-recommendation.log') -Message '[generation] skipped=generator_busy wait_ms=30000'
+    $RecommendationMutex.Dispose()
+    return
+}
+try {
 $dbPath = Join-Path $Config.StateDir 'musicserver.db'
 if ($DryRun) {
     if (-not (Test-Path -LiteralPath $dbPath -PathType Leaf)) {
@@ -61,6 +75,15 @@ if ($DryRun) {
 }
 Apply-ConfiguredMusicDir -Config $Config
 if (-not $DryRun) { Initialize-MusicServerLibrary -Config $Config | Out-Null }
+$RecommendationLibraryRevision = [string](Get-AppSettingDb -Key 'recommendation_library_pending')
+$RecommendationMusicDir = Get-MusicServerPathKey -Path $Config.MusicDir
+if ($RecommendationLibraryRevision) {
+    try { $libraryRevisionInfo = $RecommendationLibraryRevision | ConvertFrom-Json -ErrorAction Stop } catch { $libraryRevisionInfo = $null }
+    if (-not $libraryRevisionInfo -or [string](Get-OptionalProperty $libraryRevisionInfo 'path_key' '') -ne $RecommendationMusicDir) {
+        Write-MusicServerLog -Path (Join-Path $Config.LogDir 'musicserver-recommendation.log') -Message '[generation] skipped=library_revision_scope_changed preserved_existing_day=true'
+        return
+    }
+}
 # Legacy import is an explicit activation step. DryRun never opens the
 # JSON/CSV migration input path, and a normal scheduled run cannot silently
 # activate production migration by itself.
@@ -69,10 +92,6 @@ if ($MigrateLegacy -and -not $DryRun) {
     if ([string]$migration.status -eq 'FAILED') { throw "Recommendation state migration failed: $($migration.error)" }
 }
 
-$Headers = @{
-    'User-Agent' = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36'
-    'Referer'    = 'https://music.163.com/'
-}
 $RecommendationCooldownDays = 14
 # How hard a song related to a disliked one is pushed down, by how close the
 # relation is. A fresh candidate scores 1 per seed that surfaced it (typically
@@ -98,11 +117,57 @@ $DislikeRelationDivisor = @{
 
 function Write-Step([string]$Message) { Write-Host "`n>>> $Message" -ForegroundColor Cyan }
 
+function Invoke-MusicServerDailyMetadata {
+    param([psobject]$Config, [psobject]$State, [string]$Uri, [switch]$ReadOnly)
+    if ($ReadOnly -or $env:MUSICSERVER_DISABLE_NETEASE_SEARCH -eq '1' -or $State.Blocked) { return $null }
+    $remaining = [double]$State.BudgetSeconds - [double]$State.Clock.Elapsed.TotalSeconds
+    if ($remaining -lt 1 -or [int]$State.Calls -ge 60) {
+        $State.Blocked = $true; $State.StopReason = 'metadata_budget'
+        return $null
+    }
+    if (-not (Test-ProviderRequestAvailable -Config $Config -Provider 'netease')) {
+        $State.Blocked = $true; $State.StopReason = 'provider_circuit'
+        return $null
+    }
+    if (-not (Claim-ProviderRequest -Config $Config -Provider 'netease')) {
+        $State.Blocked = $true; $State.StopReason = 'provider_probe_busy'
+        return $null
+    }
+    $State.Calls = [int]$State.Calls + 1
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        $response = Invoke-RestMethod -Uri $Uri -Headers @{
+            'User-Agent' = 'Mozilla/5.0'; 'Referer' = 'https://music.163.com/'
+        } -TimeoutSec ([int][Math]::Max(1, [Math]::Min(8, [Math]::Floor($remaining)))) -ErrorAction Stop
+        $code = [int](Get-OptionalProperty $response 'code' 200)
+        if ($code -ne 200 -or $response -is [string]) {
+            Record-ProviderFailure -Config $Config -Provider 'netease' -HttpStatus $code -ErrorType 'DAILY_METADATA_FAILED' -Message 'Daily metadata provider rejected request.' | Out-Null
+            $State.ConsecutiveFailures = [int]$State.ConsecutiveFailures + 1
+            if ($code -in @(412,429) -or [int]$State.ConsecutiveFailures -ge 3) {
+                $State.Blocked = $true; $State.StopReason = if ($code -in @(412,429)) { "http_$code" } else { 'metadata_failures' }
+            }
+            return $null
+        }
+        Record-ProviderSuccess -Config $Config -Provider 'netease' -LatencyMs $clock.Elapsed.TotalMilliseconds
+        $State.ConsecutiveFailures = 0
+        return $response
+    } catch {
+        $http = 0; $failedResponse = Get-OptionalProperty $_.Exception 'Response' $null
+        if ($failedResponse) { $http = [int](Get-OptionalProperty $failedResponse 'StatusCode' 0) }
+        Record-ProviderFailure -Config $Config -Provider 'netease' -HttpStatus $http -ErrorType 'DAILY_METADATA_FAILED' -Message 'Daily metadata transport temporarily unavailable.' | Out-Null
+        $State.ConsecutiveFailures = [int]$State.ConsecutiveFailures + 1
+        if ($http -in @(412,429) -or [int]$State.ConsecutiveFailures -ge 3) {
+            $State.Blocked = $true; $State.StopReason = if ($http -in @(412,429)) { "http_$http" } else { 'metadata_failures' }
+        }
+        return $null
+    }
+}
+
 function Search-Netease {
     param([string]$Keyword, [int]$Limit = 3)
     $url = "https://music.163.com/api/search/get?s=$([uri]::EscapeDataString($Keyword))&type=1&limit=$Limit"
     try {
-        $response = Invoke-RestMethod -Uri $url -Headers $Headers -TimeoutSec 20
+        $response = Invoke-MusicServerDailyMetadata -Config $Config -State $DailyMetadataState -Uri $url -ReadOnly:$DryRun
         if ($response.result -and $response.result.songs) { return @($response.result.songs) }
     } catch {
         Write-Host "  网易云搜索失败：$($_.Exception.Message)" -ForegroundColor DarkYellow
@@ -114,7 +179,7 @@ function Get-SimiSongs {
     param([long]$SongId, [int]$Limit = 10)
     $url = "https://music.163.com/api/v1/discovery/simiSong?songid=$SongId&limit=$Limit"
     try {
-        $response = Invoke-RestMethod -Uri $url -Headers $Headers -TimeoutSec 20
+        $response = Invoke-MusicServerDailyMetadata -Config $Config -State $DailyMetadataState -Uri $url -ReadOnly:$DryRun
         if ($response.songs) { return @($response.songs) }
     } catch {
         Write-Host "  相似歌曲请求失败：$($_.Exception.Message)" -ForegroundColor DarkYellow
@@ -156,20 +221,66 @@ function Get-SeedPool {
 function Get-LocalLibraryRows {
     $rows = New-Object System.Collections.ArrayList
     $seen = @{}
-    $resolvedArtists = @{}
-    try { $resolvedArtists = Get-LocalTrackArtistMapDb } catch { $resolvedArtists = @{} }
+    $resolvedArtists = @{}; $canonicalMap = @{}; $portableIndex = @{}
+    try { $resolvedArtists = Get-LocalTrackArtistMapDb } catch { }
+    try { $canonicalMap = Get-CanonicalLocalTrackMapDb -MusicDir $Config.MusicDir } catch { }
+    if (Get-Command Get-MusicServerLibraryIndex -ErrorAction SilentlyContinue) {
+        try { $portableIndex = Get-MusicServerLibraryIndex -Config $Config } catch { }
+    }
+    $musicRoot = [IO.Path]::GetFullPath($Config.MusicDir).TrimEnd('\')
 
     $add = {
-        param([string]$Title, [string]$Artist, [string]$File, [string]$LibraryId, [bool]$ArtistIsResolved)
+        param([string]$Title, [string]$File, [string]$LibraryId)
+        if (-not $File -or -not [IO.File]::Exists($File)) { return }
+        $file = [IO.Path]::GetFullPath($File)
+        $key = [string](Get-MusicServerPathKey -Path $file)
+        if ($seen.ContainsKey($key)) { return }
+        # Stale Navidrome rows from a former library are not current taste.
+        if (-not $file.StartsWith(($musicRoot + '\'), [StringComparison]::OrdinalIgnoreCase)) { return }
+        $seen[$key] = $true
+        if (-not $LibraryId) { $LibraryId = Get-MusicServerLocalIdentity -File $file }
+        $canonical = $null
+        foreach ($candidate in @(($LibraryId -replace '^library-', ''), $LibraryId, $file, ('file:' + $file))) {
+            if ($canonicalMap.ContainsKey($candidate)) { $canonical = $canonicalMap[$candidate]; break }
+        }
+        $relative = $file.Substring($musicRoot.Length + 1).Replace('\','/').ToLowerInvariant()
+        $metadata = $null
+        if ($portableIndex.ContainsKey($relative)) {
+            try { $metadata = [string]$portableIndex[$relative].metadata_json | ConvertFrom-Json -ErrorAction Stop } catch { }
+        }
+        if ($canonical -and [string]$canonical.title) {
+            $Title = [string]$canonical.title
+        } elseif ($metadata) {
+            $exact = [string](Get-OptionalProperty $metadata 'canonical_title' '')
+            if ($exact -and [string](Get-OptionalProperty $metadata 'canonical_title_source' '') -eq 'netease') {
+                $Title = $exact
+            } else {
+                $portableTitle = [string](Get-OptionalProperty $metadata 'title' (Get-OptionalProperty $metadata 'name' ''))
+                if ($portableTitle) { $Title = $portableTitle }
+            }
+        }
         if ([string]::IsNullOrWhiteSpace($Title)) { return }
-        $key = if ($File) { [string](Get-MusicServerPathKey -Path $File) } else { '' }
-        if ($key) {
-            if ($seen.ContainsKey($key)) { return }
-            $seen[$key] = $true
+        $indexedArtist = ''
+        if ($metadata) { $indexedArtist = [string](Get-OptionalProperty $metadata 'artist' '') }
+        if (-not $indexedArtist) {
+            $parent = [IO.Path]::GetDirectoryName($file)
+            if ($parent -ine $musicRoot -and $parent -ine [IO.Path]::GetFullPath($Config.DailyDir).TrimEnd('\')) {
+                $indexedArtist = [IO.Path]::GetFileName($parent)
+            }
+        }
+        $cached = if ($resolvedArtists.ContainsKey($key)) { $resolvedArtists[$key] } else { $null }
+        $decision = Resolve-DisplayArtist -Title $Title -Indexed $indexedArtist -CachedRow $cached -CanonicalTrack $canonical
+        $artist = if ($decision) { [string]$decision.artist } else { '' }
+        $trackId = if ($canonical) { [string]$canonical.id } else { Get-CanonicalTrackId -Title $Title -Artist $artist }
+        $neteaseId = ''
+        if ($canonical) {
+            $identifier = @(ConvertFrom-MusicServerJsonArray -Json ([string](Get-OptionalProperty $canonical 'identifiers_json' '[]'))) |
+                Where-Object { [string](Get-OptionalProperty $_ 'type' '') -eq 'netease' } | Select-Object -First 1
+            if ($identifier) { $neteaseId = [string](Get-OptionalProperty $identifier 'value' '') }
         }
         [void]$rows.Add([pscustomobject]@{
-            Title = $Title; Artist = $Artist; File = $File; LibraryId = $LibraryId
-            ArtistIsResolved = $ArtistIsResolved
+            Title = $Title; Artist = $artist; File = $file; LibraryId = $LibraryId
+            TrackId = $trackId; NeteaseId = $neteaseId; ArtistIsResolved = [bool]$artist
         })
     }
 
@@ -187,45 +298,22 @@ function Get-LocalLibraryRows {
                 if ($parts.Count -lt 3) { continue }
                 $file = [string]$parts[2]
                 if ($file -and -not [IO.Path]::IsPathRooted($file)) { $file = Join-Path $Config.MusicDir $file }
-                if ($file -and -not [IO.File]::Exists($file)) { continue }
-                if ($file -and (Test-Path -LiteralPath $Config.DailyDir -PathType Container)) {
-                    # DailyMix holds previously downloaded recommendations, not the
-                    # user's own collection; seeding from it would recommend the
-                    # recommender's own output back to them.
-                    $dailyFull = [IO.Path]::GetFullPath($Config.DailyDir).TrimEnd('\')
-                    if ([IO.Path]::GetFullPath($file).StartsWith($dailyFull, [StringComparison]::OrdinalIgnoreCase)) { continue }
-                }
-                $artist = ''
-                $isResolved = $false
-                if ($file) {
-                    $row = $resolvedArtists[[string](Get-MusicServerPathKey -Path $file)]
-                    if ($row -and [string]$row.artist -and [string]$row.status -eq 'RESOLVED') {
-                        $artist = [string]$row.artist
-                        $isResolved = $true
-                    }
-                }
-                & $add ([string]$parts[1]) $artist $file ('library-' + [string]$parts[0]) $isResolved
+                & $add ([string]$parts[1]) $file ('library-' + [string]$parts[0])
             }
         } catch { }
-        finally { Remove-Item -LiteralPath "$tmp*" -Force -ErrorAction SilentlyContinue }
+        finally {
+            foreach ($path in @($tmp, "$tmp-wal", "$tmp-shm")) {
+                Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+            }
+        }
     }
 
-    foreach ($entry in @(Get-ChildItem -LiteralPath $Config.MusicDir -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.mp3','.flac','.wav','.aac','.m4a' })) {
-        $file = [IO.Path]::GetFullPath($entry.FullName)
-        if (Test-Path -LiteralPath $Config.DailyDir -PathType Container) {
-            $dailyFull = [IO.Path]::GetFullPath($Config.DailyDir).TrimEnd('\')
-            if ($file.StartsWith($dailyFull, [StringComparison]::OrdinalIgnoreCase)) { continue }
-        }
-        $artist = ''
-        $isResolved = $false
-        $row = $resolvedArtists[[string](Get-MusicServerPathKey -Path $file)]
-        if ($row -and [string]$row.artist -and [string]$row.status -eq 'RESOLVED') {
-            $artist = [string]$row.artist
-            $isResolved = $true
-        }
-        & $add $entry.BaseName $artist $file '' $isResolved
+    # DailyMix contains the user's collected downloads. On another device the
+    # like/history DB may not exist yet; dropping the folder would erase every
+    # available taste seed. It is weak fallback only, never stronger than LIKE.
+    foreach ($entry in @(Get-ChildItem -LiteralPath $Config.MusicDir -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.mp3','.flac','.wav','.aac','.m4a','.ogg','.opus' })) {
+        & $add $entry.BaseName $entry.FullName ''
     }
-
     return @($rows)
 }
 
@@ -254,11 +342,18 @@ if ($picked.Count -eq 0) {
     return
 }
 foreach ($seed in $picked) { Write-Host "    - $($seed.Title) - $($seed.Artist) [$($seed.Source), weight=$($seed.Weight)]" -ForegroundColor DarkGray }
+$DailyMetadataState = [pscustomobject]@{
+    Clock = [Diagnostics.Stopwatch]::StartNew(); BudgetSeconds = 120
+    Calls = 0; ConsecutiveFailures = 0; Blocked = $false; StopReason = ''
+}
 
 Write-Step '建立 SQLite 排除集与近期推荐冷却'
 $exclude = New-Object System.Collections.Generic.HashSet[string]
-foreach ($file in @(Get-ChildItem -LiteralPath $Config.MusicDir -Filter '*.mp3' -File -Recurse -ErrorAction SilentlyContinue)) {
-    [void]$exclude.Add((Normalize-MusicText $file.BaseName))
+foreach ($row in $localRows) {
+    [void]$exclude.Add((Normalize-MusicText ([string]$row.Title)))
+    if ($row.File) { [void]$exclude.Add((Normalize-MusicText ([IO.Path]::GetFileNameWithoutExtension([string]$row.File)))) }
+    if ($row.TrackId) { [void]$exclude.Add("track:$($row.TrackId)") }
+    if ($row.NeteaseId) { [void]$exclude.Add("netease:$($row.NeteaseId)") }
 }
 foreach ($row in @(Get-RecommendationExcludedKeysDb)) {
     if ($row.Title) { [void]$exclude.Add((Normalize-MusicText $row.Title)) }
@@ -314,7 +409,7 @@ foreach ($row in $disliked) {
     }
     if (-not $hasSimilar -and $row.NeteaseId -and $dislikeLookups -lt $dislikeLookupLimit) {
         $dislikeLookups++
-        $similar = @(Get-NeteaseSimilarSongs -Config $Config -NeteaseId ([string]$row.NeteaseId) -Limit 10)
+        $similar = if ([string]$row.NeteaseId -match '^\d+$') { @(Get-SimiSongs -SongId ([long]$row.NeteaseId) -Limit 10) } else { @() }
         $relations = @()
         $bootstrapped = @()
         foreach ($song in $similar) {
@@ -444,14 +539,26 @@ Write-Host "  本地重听推荐：$($localPicks.Count) 首（候选 $($localCan
 Write-Step '从网易云生成相似歌曲 metadata'
 $candidateMap = @{}
 $seedMisses = 0
+$knownSeedIds = @{}
+foreach ($row in $localRows) {
+    if ($row.TrackId -and [string]$row.NeteaseId -match '^\d+$') { $knownSeedIds[[string]$row.TrackId] = [string]$row.NeteaseId }
+}
 foreach ($seed in $picked) {
+    if ($DailyMetadataState.Blocked) { break }
     # Searching the raw uploader title wastes the seed: it is the song name plus
     # channel branding plus the song name again. Each cleaned form is tried with
     # the resolved singer first and alone second, and the search only accepts a
     # candidate whose title matches the query, so a wrong artist cannot be picked.
     $found = @()
-    foreach ($query in @(Get-SongSearchQueries -Title ([string]$seed.Title) -Artist ([string]$seed.Artist))) {
+    if ($knownSeedIds.ContainsKey([string]$seed.TrackId)) {
+        # An exact migrated/downloaded recording id is stronger than a new
+        # search and avoids rediscovering a cover or differently credited version.
+        $found = @([pscustomobject]@{ id = $knownSeedIds[[string]$seed.TrackId] })
+    }
+    $queries = if ($found.Count) { @() } else { @(Get-SongSearchQueries -Title ([string]$seed.Title) -Artist ([string]$seed.Artist)) }
+    foreach ($query in $queries) {
         $hits = @(Search-Netease -Keyword $query -Limit 3)
+        if ($DailyMetadataState.Blocked) { break }
         if ($hits.Count -eq 0) { continue }
         $wantKey = ConvertTo-MusicServerKey -Value $query
         foreach ($hit in $hits) {
@@ -484,6 +591,7 @@ foreach ($seed in $picked) {
         }
     }
 }
+Write-MusicServerLog -Path (Join-Path $Config.LogDir 'musicserver-recommendation.log') -Message "[metadata] calls=$($DailyMetadataState.Calls) elapsed_ms=$($DailyMetadataState.Clock.ElapsedMilliseconds) stop_reason=$($DailyMetadataState.StopReason) budget_seconds=120"
 
 # Candidates related to a disliked song are pushed down rather than removed, by
 # how close the relation is. "少推荐" is a soft penalty: a related song keeps a much
@@ -592,15 +700,35 @@ foreach ($r in $recommendations) {
 }
 
 if (-not $DryRun) {
+    if ($DailyMetadataState.Blocked -and $DailyMetadataState.StopReason -ne 'metadata_budget' -and @(Get-TodayRecommendationsDb -Date $today).Count -gt 0) {
+        # A partly successful provider run is still a failed refresh. Keep a
+        # complete existing day (including a starter day) until a healthy retry.
+        Write-MusicServerLog -Path (Join-Path $Config.LogDir 'musicserver-recommendation.log') -Message "[selection] metadata_failed=true stop_reason=$($DailyMetadataState.StopReason) preserved_existing_day=true library_revision_pending=true"
+        return
+    }
     if ($recommendations.Count -eq 0) {
         Initialize-StarterRecommendationsDb -Count $Count | Out-Null
         Write-MusicServerLog -Path (Join-Path $Config.LogDir 'musicserver-recommendation.log') -Message '[selection] empty_result preserved_existing_day=true starter_fallback=true'
         return
     }
-    $saveResult = Save-DailyRecommendationsDb -Recommendations $recommendations -Tracks $tracks -Date $today
+    $currentMusicDir = Get-MusicServerPathKey -Path (Resolve-ConfiguredMusicDir -Config $Config)
+    if ($currentMusicDir -ne $RecommendationMusicDir -or [string](Get-AppSettingDb -Key 'recommendation_library_pending') -ne $RecommendationLibraryRevision) {
+        Write-MusicServerLog -Path (Join-Path $Config.LogDir 'musicserver-recommendation.log') -Message '[generation] skipped=library_changed_during_discovery preserved_existing_day=true'
+        return
+    }
+    $saveResult = Save-DailyRecommendationsDb -Recommendations $recommendations -Tracks $tracks -Date $today -EnforceLibraryRevision -ExpectedLibraryRevision $RecommendationLibraryRevision
+    if ($saveResult.Skipped) {
+        Write-MusicServerLog -Path (Join-Path $Config.LogDir 'musicserver-recommendation.log') -Message '[generation] skipped=library_revision_changed_during_save preserved_existing_day=true'
+        return
+    }
+    Write-MusicServerLog -Path (Join-Path $Config.LogDir 'musicserver-recommendation.log') -Message "[selection] completed=true library_count=$($localRows.Count) seed_count=$($picked.Count) remote_count=$($recommendations.Count - $localAdded) local_count=$localAdded seed_misses=$seedMisses library_revision_ack=$([bool]$RecommendationLibraryRevision) download_calls=0"
     Write-MusicServerEventDb -EventType 'RECOMMENDATIONS_GENERATED' -Result 'SUCCESS' -Message "count=$($recommendations.Count); download_calls=0; feedback=explicit_only; cooldown_days=$RecommendationCooldownDays"
     Write-Host "`n已原子保存 SQLite CanonicalTrack、DailyRecommendation 和 DISPLAY。" -ForegroundColor Green
 } else {
     Write-Host "`n【DryRun 模式，未写 recommendation 状态】" -ForegroundColor Magenta
 }
 Write-Host '推荐阶段不会调用 yt-dlp、Bilibili 下载、ffprobe、歌词下载或 Navidrome 扫描。' -ForegroundColor Cyan
+} finally {
+    if ($OwnsRecommendationMutex) { $RecommendationMutex.ReleaseMutex() }
+    $RecommendationMutex.Dispose()
+}

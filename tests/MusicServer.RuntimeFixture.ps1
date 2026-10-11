@@ -2,11 +2,13 @@
 function New-MusicServerRuntimeFixture {
     param([Parameter(Mandatory)][string]$ProjectRoot, [string]$Parent = ([IO.Path]::GetTempPath()))
     $parentRoot = [IO.Path]::GetFullPath($Parent).TrimEnd('\','/')
+    $oldMusicDir = [Environment]::GetEnvironmentVariable('MUSICSERVER_MUSIC_DIR', 'Process')
+    [Environment]::SetEnvironmentVariable('MUSICSERVER_MUSIC_DIR', $null, 'Process')
     $fixtureRoot = Join-Path $parentRoot ('musicserver_fixture_' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $fixtureRoot -Force | Out-Null
     # Deliberately omit the downloader from test fixtures: HTTP queue tests must
     # never download media or contend for the user's global worker mutex.
-    foreach ($file in @('music_api.ps1','start_musicserver_ui.ps1','watchdog_ui.ps1','MusicServer.Core.psm1','MusicServer.Database.psm1','MusicServer.State.psm1','MusicServer.Providers.psm1','MusicServer.Onboarding.psm1','MusicServer.Management.psm1','MusicServer.Search.psm1','manage_musicserver.ps1','MusicServer.Http.psm1','MusicServer.Identity.psm1')) {
+    foreach ($file in @('music_api.ps1','start_musicserver_ui.ps1','watchdog_ui.ps1','MusicServer.Core.psm1','MusicServer.Database.psm1','MusicServer.State.psm1','MusicServer.Providers.psm1','MusicServer.Onboarding.psm1','MusicServer.Management.psm1','MusicServer.Library.psm1','MusicServer.Search.psm1','manage_musicserver.ps1','MusicServer.Http.psm1','MusicServer.Identity.psm1')) {
         Copy-Item -LiteralPath (Join-Path $ProjectRoot $file) -Destination (Join-Path $fixtureRoot $file)
     }
     Copy-Item -LiteralPath (Join-Path $ProjectRoot 'web') -Destination (Join-Path $fixtureRoot 'web') -Recurse
@@ -25,7 +27,7 @@ function New-MusicServerRuntimeFixture {
     $database = Join-Path $config.StateDir 'musicserver.db'
     Initialize-MusicServerDatabase -DbPath $database -SqliteExe $config.Sqlite
     Initialize-MusicServerSchema
-    return [pscustomobject]@{ Root = $fixtureRoot; Parent = $parentRoot; Database = $database; Config = $config; OldAppHome = $oldAppHome; OldBackfill = $oldBackfill; Processes = @(); ApiPort = 0; UiPort = 0; StartupMs = 0 }
+    return [pscustomobject]@{ Root = $fixtureRoot; Parent = $parentRoot; Database = $database; Config = $config; OldAppHome = $oldAppHome; OldBackfill = $oldBackfill; OldMusicDir=$oldMusicDir; Processes = @(); ApiPort = 0; UiPort = 0; StartupMs = 0 }
 }
 
 function Get-MusicServerFixturePort {
@@ -88,6 +90,7 @@ function Remove-MusicServerRuntimeFixture {
     param([Parameter(Mandatory)]$Fixture)
     Stop-MusicServerFixtureServices -Fixture $Fixture
     [Environment]::SetEnvironmentVariable('MUSICSERVER_APP_HOME', $Fixture.OldAppHome)
+    if ($Fixture.PSObject.Properties['OldMusicDir']) { [Environment]::SetEnvironmentVariable('MUSICSERVER_MUSIC_DIR', $Fixture.OldMusicDir, 'Process') }
     if ($Fixture.PSObject.Properties['OldBackfill']) {
         [Environment]::SetEnvironmentVariable('MUSICSERVER_DISABLE_ARTIST_BACKFILL', $Fixture.OldBackfill)
     }

@@ -12,7 +12,7 @@ param(
     [Parameter(Mandatory = $true)][string]$OutFile,
     [string]$TrackId = '',
     [string]$NewState = 'RETRY_WAIT',
-    [int]$ExpectedRevision = -1,
+    [Alias('Revision')][int]$ExpectedRevision = -1,
     [int]$LeaseMinutes = 30,
     [int]$JitterMs = 0
 )
