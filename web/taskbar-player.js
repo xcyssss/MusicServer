@@ -3,12 +3,27 @@
   const invoke = window.__TAURI__.core.invoke, listen = window.__TAURI__.event.listen;
   const $ = id => document.getElementById(id);
   let snapshot = { key: '' }, revision = 0;
+  function measureLyric() {
+    const viewport = $('dock-lyric'), line = $('dock-line');
+    const travel = Math.max(0, line.scrollWidth - viewport.clientWidth);
+    viewport.classList.toggle('overflowing', travel > 2);
+    viewport.style.setProperty('--lyric-travel', `${travel}px`);
+    viewport.style.setProperty('--lyric-duration', `${Math.max(6, travel / 26 + 3)}s`);
+  }
   function render(state) {
     snapshot = state;
     $('dock-title').textContent = state.title || 'MusicServer';
     $('dock-artist').textContent = state.artist || '';
-    $('dock-lyric').textContent = state.lyric || '让音乐，从一片叶子开始';
-    $('dock-text').title = `${state.title || 'MusicServer'}\n${state.lyric || ''}\n拖动调整位置 · 双击显示主窗口`;
+    const lyric = state.lyric || state.title || '让音乐，从一片叶子开始';
+    if ($('dock-line').textContent !== lyric) {
+      // Restart only on a new line, not on every playback snapshot.
+      $('dock-lyric').classList.remove('overflowing');
+      $('dock-line').textContent = lyric;
+      void $('dock-line').offsetWidth;
+    }
+    $('dock-lyric').classList.toggle('paused', !state.playing);
+    measureLyric();
+    $('dock-text').title = `${state.title || 'MusicServer'}${state.artist ? ` · ${state.artist}` : ''}\n${state.lyric || ''}\n拖动切换左右位置 · 双击显示主窗口`;
     $('toggle').querySelector('path').setAttribute('d', state.playing ? 'M8 5v14M16 5v14' : 'm8 5 11 7-11 7Z');
     $('toggle').setAttribute('aria-label', state.playing ? '暂停' : '播放');
     for (const action of ['previous', 'toggle', 'next']) $(action).disabled = !state.can_play;
@@ -22,6 +37,9 @@
     $('like').setAttribute('aria-label', state.liked ? '取消喜欢当前歌曲' : '喜欢当前歌曲并下载');
     $('like').title = state.liked ? '已收藏 · 点击取消收藏（保留本地文件）' : '收藏这首歌';
   }
+  const resize = new ResizeObserver(measureLyric);
+  resize.observe($('dock-lyric'));
+  window.addEventListener('pagehide', () => resize.disconnect(), {once:true});
   async function action(name) {
     $('dock-status').textContent = '';
     try { await invoke('desktop_player_action', { action: name, key: snapshot.key }); }
