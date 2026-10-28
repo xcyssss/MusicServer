@@ -871,11 +871,11 @@ Describe 'Disliked tracks and release year' {
         $track_bucket = $buckets['TRACK']
         $track_bucket.ContainsKey($track.id) | Should Be $true
         $track_bucket.ContainsKey('netease:167876') | Should Be $true
-        $track_bucket.ContainsKey([string](Normalize-MusicText 'Key Song')) | Should Be $true
-        $track_bucket.ContainsKey([string](Normalize-MusicText 'Key Song许嵩')) | Should Be $true
+        $track_bucket.ContainsKey([string](Normalize-MusicText 'Key Song')) | Should Be $false
+        $track_bucket.ContainsKey([string](Get-CanonicalTrackId -Title 'Key Song' -Artist '许嵩')) | Should Be $true
     }
 
-    It 'matches a candidate by NetEase id, track id, name, or name+artist' {
+    It 'matches exact identities without blocking another artist with the same title' {
         $track = New-CanonicalTrack -Title 'Match Song' -Artist '许嵩' -Identifiers @([pscustomobject]@{ type = 'netease'; value = '999' })
         Save-CanonicalTrackDb -Track $track | Out-Null
         Write-TrackDislikeDb -TrackId $track.id -Title 'Match Song' -Artist '许嵩' -NeteaseId '999' | Out-Null
@@ -883,7 +883,8 @@ Describe 'Disliked tracks and release year' {
 
         (Get-CandidateDislikeRelation -Title 'Other' -Artist 'Other' -NeteaseId '999' -Buckets $buckets) | Should Be 'TRACK'
         (Get-CandidateDislikeRelation -Title 'Other' -Artist 'Other' -TrackId $track.id -Buckets $buckets) | Should Be 'TRACK'
-        (Get-CandidateDislikeRelation -Title 'Match Song' -Artist 'Other' -Buckets $buckets) | Should Be 'TRACK'
+        (Get-CandidateDislikeRelation -Title 'Match Song' -Artist 'Other' -Buckets $buckets) | Should Be ''
+        (Get-CandidateDislikeRelation -Title 'Match Song' -Buckets $buckets) | Should Be ''
         (Get-CandidateDislikeRelation -Title 'Match Song' -Artist '许嵩' -Buckets $buckets) | Should Be 'TRACK'
         # A different recording of a different song must not be caught.
         (Get-CandidateDislikeRelation -Title '无关歌曲' -Artist '其他歌手' -NeteaseId '111' -Buckets $buckets) | Should Be ''
@@ -904,8 +905,7 @@ Describe 'Disliked tracks and release year' {
     }
 
     It 'lets a non-disliked track win the slot from a disliked one' {
-        # The whole point of the penalty on the LOCAL source: it must change which
-        # tracks get selected, not merely the order of tracks already selected.
+        # Exact dislikes must affect selection, not just the order of its results.
         $favourite = New-DislikeCandidate -Title 'Favourite' -Artist '最爱歌手' -LibraryId 'library-fav'
         $other = New-DislikeCandidate -Title 'Other' -Artist '还不错歌手' -LibraryId 'library-other'
         $affinity = Get-LocalArtistAffinity -ListeningStats @(
@@ -925,16 +925,26 @@ Describe 'Disliked tracks and release year' {
         $after[0].LibraryId | Should Be 'library-other'
     }
 
-    It 'still recommends a disliked track rather than coming back short' {
-        # A penalty, not an exclusion: with nothing else left to fill the slot the
-        # disliked track must still be returned, with a reduced but nonzero weight.
+    It 'leaves a local slot empty rather than recommending an explicitly disliked track' {
         $only = New-DislikeCandidate -Title 'Only One' -Artist '唯一歌手' -LibraryId 'library-only'
         $affinity = Get-LocalArtistAffinity -ListeningStats @([pscustomobject]@{ artist = '唯一歌手'; play_count = 30 }) -PositiveTracks @()
         $buckets = Get-DislikeRelationBuckets -Disliked @([pscustomobject]@{ TrackId = ([string]$only.TrackId); Title = 'Only One'; Artist = '唯一歌手'; Album = ''; NeteaseId = '' })
         $picks = @(Select-LocalRecommendationTracks -Candidates @($only) -Affinity $affinity -Limit 1 -DislikeBuckets $buckets -DislikeDivisors @{ TRACK = 4; ARTIST = 3; ALBUM = 2; SIMILAR = 2; SEED = 1 })
-        $picks.Count | Should Be 1
-        $picks[0].LibraryId | Should Be 'library-only'
-        ([int]$picks[0].Weight -gt 0) | Should Be $true
+        $picks.Count | Should Be 0
+    }
+
+    It 'excludes a disliked remote recording despite its score while retaining related songs' {
+        $buckets = Get-DislikeRelationBuckets -Disliked @([pscustomobject]@{ Title='No Again'; Artist='Singer'; NeteaseId='99' })
+        $candidates = @(
+            [pscustomobject]@{ Title='Renamed'; Artist='New Credit'; NeteaseId='99'; Score=999; LyricQuality='TIMED' }
+            [pscustomobject]@{ Title='No Again'; Artist='Singer'; NeteaseId='100'; Score=998; LyricQuality='TIMED' }
+            [pscustomobject]@{ Title='Another Song'; Artist='Singer'; NeteaseId='101'; Score=1; LyricQuality='TIMED' }
+            [pscustomobject]@{ Title='No Again'; Artist='Other Singer'; NeteaseId='102'; Score=1; LyricQuality='TIMED' }
+        )
+        $picks = @(Select-QualityRemoteRecommendations -Candidates $candidates -Count 20 -DislikeBuckets $buckets)
+        $picks.Count | Should Be 2
+        @($picks | Where-Object { $_.NeteaseId -in @('99','100') }).Count | Should Be 0
+        @(Select-QualityRemoteRecommendations -Candidates @($candidates[0]) -Count 20 -DislikeBuckets $buckets).Count | Should Be 0
     }
 
     It 'down-weights another song by the disliked singer, not just the exact track' {

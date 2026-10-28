@@ -880,9 +880,16 @@ function Get-RecommendationQualityTier {
 }
 
 function Select-QualityRemoteRecommendations {
-    param([AllowEmptyCollection()][object[]]$Candidates=@(), [int]$Count=20)
+    param([AllowEmptyCollection()][object[]]$Candidates=@(), [int]$Count=20, [hashtable]$DislikeBuckets=@{})
     if ($Count -le 0) { return @() }
-    $ordered = @($Candidates | Sort-Object @{Expression={(Get-RecommendationQualityTier $_).Tier}}, @{Expression={$_.Score};Descending=$true})
+    # Exclude explicit dislikes before quality/diversity limits consume slots.
+    $eligible = @(foreach ($candidate in $Candidates) {
+        $relation = Get-CandidateDislikeRelation -Title ([string]$candidate.Title) -Artist ([string]$candidate.Artist) `
+            -TrackId ([string](Get-OptionalProperty $candidate 'TrackId')) `
+            -NeteaseId ([string](Get-OptionalProperty $candidate 'NeteaseId')) -Buckets $DislikeBuckets
+        if ($relation -ne 'TRACK') { $candidate }
+    })
+    $ordered = @($eligible | Sort-Object @{Expression={(Get-RecommendationQualityTier $_).Tier}}, @{Expression={$_.Score};Descending=$true})
     $liveCount=0; $liveLimit=[int][Math]::Floor($Count * 0.1)
     $pool=@(foreach ($item in $ordered) {
         if ((Get-RecommendationQualityTier $item).Live) {
@@ -998,17 +1005,13 @@ function Select-LocalRecommendationTracks {
         $playedAt = Convert-ToUtcDateTime $lastPlayed
         if ($playedAt -and $playedAt -gt $cutoff) { continue }
 
-        # Owned tracks related to something disliked sink within their tier rather
-        # than being excluded: dividing the weight here, before the ordering, is what
-        # lets an unrelated track actually win the slot. Demoting after selection
-        # would only reorder the tracks already chosen. "少推荐" is a penalty, not an
-        # exclusion, so the track stays eligible and returns when nothing better is
-        # left. A disliked singer is the common case, so the ARTIST relation matters
-        # as much as an exact track match here.
+        # An explicit dislike excludes this recording, even in a thin pool.
+        # Related tracks remain eligible with a lower affinity before selection.
         if ($DislikeBuckets.Count -gt 0) {
             $relation = Get-CandidateDislikeRelation -Title $title -Artist $artist `
                 -Album ([string](Get-OptionalProperty $candidate 'Album' (Get-OptionalProperty $candidate 'album'))) `
-                -TrackId $trackId -Buckets $DislikeBuckets
+                -TrackId $trackId -NeteaseId ([string](Get-OptionalProperty $candidate 'NeteaseId')) -Buckets $DislikeBuckets
+            if ($relation -eq 'TRACK') { continue }
             if ($relation) {
                 $divisor = 4.0
                 if ($DislikeDivisors.ContainsKey($relation)) { $divisor = [double]$DislikeDivisors[$relation] }
@@ -1081,9 +1084,8 @@ function Get-RecommendationExcludedKeysDb {
 # Disliking is a statement about what to RECOMMEND, not about what to keep, so it
 # is deliberately preference-only: unlike LIKE it never queues a download, and
 # unlike UNLIKE it never cancels or deletes anything. It records feedback plus an
-# audit event, and the generator turns it into a reduced weight. "少推荐" is a soft
-# penalty, not an exclusion -- a disliked track sinks below fresh candidates but
-# can still surface when there is nothing better, which is what the user asked for.
+# audit event. Recommendations exclude the exact recording while related songs
+# receive a reduced weight. Clearing this preference makes the recording eligible.
 
 function Write-TrackDislikeDb {
     <#
@@ -1209,19 +1211,23 @@ function Get-DislikedTrackKeysDb {
     [CmdletBinding()]
     param()
 
-    $preference = Get-TrackPreferenceMapDb
-    $values = @{}
-    foreach ($row in @(Invoke-MusicServerParamSql -Template "SELECT track_id, value, created_at, id FROM recommendation_feedback WHERE feedback_type = 'DISLIKE' ORDER BY created_at ASC, id ASC;" -Params @{})) {
-        $trackId = [string](Get-OptionalProperty $row 'track_id')
-        if ($trackId) { $values[$trackId] = [string](Get-OptionalProperty $row 'value') }
-    }
-
+    # One snapshot/query also serves the daily API: avoid a SQLite subprocess per
+    # disliked track on every refresh. Use the same (created_at,id) preference order.
+    $rows = @(Invoke-MusicServerParamSql -Template @'
+SELECT f.track_id, f.value, c.title, c.artist, c.album, c.identifiers_json
+FROM recommendation_feedback f LEFT JOIN canonical_tracks c ON c.id=f.track_id
+WHERE f.feedback_type='DISLIKE' AND f.id=(
+    SELECT p.id FROM recommendation_feedback p WHERE p.track_id=f.track_id
+      AND p.feedback_type IN ('LIKE','UNLIKE','DISLIKE','UNDISLIKE')
+    ORDER BY p.created_at DESC, p.id DESC LIMIT 1
+);
+'@ -Params @{})
     $result = @()
-    foreach ($trackId in @($preference.Keys)) {
-        if ([string]$preference[$trackId] -ne 'DISLIKE') { continue }
+    foreach ($row in $rows) {
+        $trackId = [string]$row.track_id
         $title = ''; $artist = ''; $album = ''; $neteaseId = ''
-        if ($values.ContainsKey($trackId)) {
-            $valueObject = Convert-RecommendationFeedbackValue -Value ([string]$values[$trackId])
+        if ($row.value) {
+            $valueObject = Convert-RecommendationFeedbackValue -Value ([string]$row.value)
             if ($valueObject) {
                 $title = [string](Get-OptionalProperty $valueObject 'title' (Get-OptionalProperty $valueObject 'Title'))
                 $artist = [string](Get-OptionalProperty $valueObject 'artist' (Get-OptionalProperty $valueObject 'Artist'))
@@ -1229,15 +1235,14 @@ function Get-DislikedTrackKeysDb {
                 $neteaseId = [string](Get-OptionalProperty $valueObject 'netease_id' (Get-OptionalProperty $valueObject 'NeteaseId'))
             }
         }
-        $canonical = Get-CanonicalTrackDb -TrackId $trackId
-        if ($canonical) {
-            if (-not $title) { $title = [string]$canonical.title }
-            if (-not $artist) { $artist = [string]$canonical.artist }
-            if (-not $album) { $album = [string]$canonical.album }
+        if ($row) {
+            if (-not $title) { $title = [string]$row.title }
+            if (-not $artist) { $artist = [string]$row.artist }
+            if (-not $album) { $album = [string]$row.album }
             # Read the identifier here rather than calling the provider module's
             # helper, so this module stays usable on its own with Providers absent.
             if (-not $neteaseId) {
-                foreach ($identifier in @(Get-OptionalProperty $canonical 'identifiers' @())) {
+                foreach ($identifier in @(ConvertFrom-MusicServerJsonArray -Json ([string]$row.identifiers_json))) {
                     if ([string](Get-OptionalProperty $identifier 'type') -eq 'netease') {
                         $neteaseId = [string](Get-OptionalProperty $identifier 'value')
                         break
@@ -1354,9 +1359,8 @@ function Get-DislikeRelationBuckets {
         if ($neteaseId) { $buckets['TRACK']["netease:$neteaseId"] = $true }
         if ($title) {
             $normalizedTitle = Normalize-MusicText $title
-            if ($normalizedTitle) { $buckets['TRACK'][$normalizedTitle] = $true }
-            $pair = Normalize-MusicText "$title$artist"
-            if ($pair) { $buckets['TRACK'][$pair] = $true }
+            # A title alone is not an identity: another artist may use the same
+            # title. Canonical IDs normalize both title and credited artists.
             if ($title -and $artist) {
                 $canonicalId = [string](Get-CanonicalTrackId -Title $title -Artist $artist)
                 if ($canonicalId) { $buckets['TRACK'][$canonicalId] = $true }
@@ -1382,7 +1386,7 @@ function Get-DislikeRelationBuckets {
             foreach ($relation in @($RelationMap[$trackId])) {
                 $type = [string]$relation.Type
                 $key = [string]$relation.Key
-                if (-not $type -or -not $key) { continue }
+                if (-not $type -or -not $key -or $type -eq 'TRACK') { continue }
                 if (-not $buckets.ContainsKey($type)) { continue }
                 $buckets[$type][$key] = $true
             }
@@ -1435,13 +1439,7 @@ function Get-CandidateDislikeRelation {
     if ($exact.Count -gt 0) {
         if ($TrackId -and $exact.ContainsKey($TrackId)) { return 'TRACK' }
         if ($NeteaseId -and $exact.ContainsKey("netease:$NeteaseId")) { return 'TRACK' }
-        if ($Title) {
-            $normalizedTitle = Normalize-MusicText $Title
-            if ($normalizedTitle -and $exact.ContainsKey($normalizedTitle)) { return 'TRACK' }
-            if ($Artist) {
-                $pair = Normalize-MusicText "$Title$Artist"
-                if ($pair -and $exact.ContainsKey($pair)) { return 'TRACK' }
-            }
+        if ((Normalize-MusicText $Title) -and (Normalize-MusicText $Artist)) {
             if ($exact.ContainsKey([string](Get-CanonicalTrackId -Title $Title -Artist $Artist))) { return 'TRACK' }
         }
     }

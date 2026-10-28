@@ -261,7 +261,7 @@ test('dislike writes serialize per track and liking clears the dislike', async (
   assert.equal(a.requests.filter(r => r.url.endsWith('/dislike')).length, 1);
   assert.match(a.get('recommendation-list').innerHTML, /dislike-button disliked/);
   writing.resolve(json({ disliked: true })); await dislike;
-  assert.equal(a.run('state.items[0].disliked'), true);
+  assert.equal(a.run('state.items.length'), 0);
 
   // Liking is the same axis, so the server-reported like must clear the dislike.
   a.context.likeTrack = { track_id: 'one', title: 'One', liked: false, disliked: true };
@@ -280,6 +280,75 @@ test('a failed dislike reverts the button', async () => {
   await a.run('toggleDislike(track)');
   assert.equal(a.run('state.items[0].disliked'), false);
   assert.doesNotMatch(a.get('recommendation-list').innerHTML, /dislike-button disliked/);
+});
+
+test('stale recommendation reads cannot restore a disliked track or undo a pending dislike', async () => {
+  const a = await app(); const reading = deferred(); const writing = deferred();
+  a.context.track = { track_id: 'one', title: 'One', disliked: false };
+  a.run('state.items = [track]');
+  a.context.fetchHandler = url => url.endsWith('/dislike') ? writing.promise : reading.promise;
+  const refresh = a.run('loadRecommendations(true)'); await settle();
+  const dislike = a.run('toggleDislike(track)');
+  void a.run('toggleLike(track)');
+  assert.equal(a.requests.filter(r => r.url.endsWith('/like')).length, 0);
+  reading.resolve(json({ items: [{ track_id: 'one', title: 'Stale', disliked: false }] })); await refresh;
+  assert.equal(a.run('state.items[0].disliked'), true);
+  writing.resolve(json({ disliked: true })); await dislike;
+  assert.equal(a.run('state.items.length'), 0);
+  a.context.fetchHandler = () => json({ items: [{ track_id: 'one', disliked: true }, { track_id: 'two', title: 'Two' }] });
+  await a.run('loadRecommendations(true)');
+  assert.equal(a.run('state.items.length'), 1);
+  assert.equal(a.run('state.items[0].track_id'), 'two');
+});
+
+test('disliking the playing recommendation advances the queue and pauses when it becomes empty', async () => {
+  const a = await app();
+  a.context.track = { track_id: 'one', title: 'One', liked: true, disliked: false };
+  a.context.other = { track_id: 'two', title: 'Two', preview_source: { media_url: 'https://example.test/two.mp3' } };
+  a.run("state.items = [track, other]; state.currentItem = { ...track }; state.currentKey = keyOf(track); state.currentCollection = 'recommendations'");
+  a.get('audio-player').paused = false;
+  a.context.fetchHandler = () => json({ disliked: true });
+  await a.run('toggleDislike(track)'); await settle();
+  assert.equal(a.run('state.currentKey === keyOf(other)'), true);
+  assert.equal(a.run('playbackCollection().length'), 1);
+  await a.run('toggleDislike(other)');
+  assert.equal(a.get('audio-player').paused, true);
+  assert.equal(a.run('playbackCollection().length'), 0);
+});
+
+test('removing a paused recommendation does not start playback', async () => {
+  const a = await app();
+  a.context.track = { track_id: 'one', title: 'One', disliked: false };
+  a.run("state.items = [track]; state.currentItem = track; state.currentKey = keyOf(track); state.currentCollection = 'recommendations'");
+  a.context.fetchHandler = () => json({ disliked: true });
+  await a.run('toggleDislike(track)');
+  assert.equal(a.get('audio-player').playCalls, 0);
+  assert.equal(a.run('state.items.length'), 0);
+});
+
+test('a confirmed dislike cannot interrupt a song selected during the write', async () => {
+  const a = await app(); const writing = deferred();
+  a.context.track = { track_id: 'one', title: 'One', disliked: false };
+  a.run("state.items = [track]; state.currentItem = track; state.currentKey = keyOf(track); state.currentCollection = 'recommendations'");
+  a.get('audio-player').paused = false;
+  a.context.fetchHandler = () => writing.promise;
+  const pending = a.run('toggleDislike(track)');
+  a.run("state.currentKey = 'another'; state.currentCollection = 'library'");
+  writing.resolve(json({ disliked: true })); await pending;
+  assert.equal(a.get('audio-player').paused, false);
+  assert.equal(a.get('audio-player').playCalls, 0);
+  assert.equal(a.run('state.items.length'), 0);
+});
+
+test('a disliked recording stops even when the next recommendation has no playable source', async () => {
+  const a = await app();
+  a.context.track = { track_id: 'one', title: 'One', disliked: false };
+  a.run("state.items = [track, { track_id: 'two', title: 'Unavailable' }]; state.currentItem = track; state.currentKey = keyOf(track); state.currentCollection = 'recommendations'");
+  a.get('audio-player').paused = false;
+  a.context.fetchHandler = () => json({ disliked: true });
+  await a.run('toggleDislike(track)'); await settle();
+  assert.equal(a.get('audio-player').paused, true);
+  assert.equal(a.run('state.items.length'), 1);
 });
 
 test('the release year is shown only when it is actually known', async () => {
