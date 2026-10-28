@@ -866,8 +866,8 @@ function renderRecommendations() {
       <div class="track-main"><div class="track-title">${escapeHtml(display.title)}</div><div class="track-artist">${escapeHtml(meta)}</div></div>
       <span class="status-badge ${statusClass(status)}">${escapeHtml(labels[status] || status)}</span>
       <span class="track-duration">${duration(item.duration)}</span>
-      <button class="dislike-button ${item.disliked ? 'disliked' : ''}" data-action="dislike" ${pendingDislikes.has(item.track_id) ? 'disabled' : ''} aria-label="${item.disliked ? '取消讨厌' : '讨厌这首歌'}" aria-pressed="${item.disliked}" title="${item.disliked ? '取消讨厌' : '讨厌：以后少推荐这首'}">👎</button>
-      <button class="heart-button ${item.liked ? 'liked' : ''}" data-action="like" ${pendingLikes.has(item.track_id) ? 'disabled' : ''} aria-label="${item.liked ? '取消喜欢' : '喜欢'}" aria-pressed="${item.liked}">${item.liked ? '♥' : '♡'}</button>
+      <button class="dislike-button ${item.disliked ? 'disliked' : ''}" data-action="dislike" ${(pendingDislikes.has(item.track_id) || pendingLikes.has(item.track_id)) ? 'disabled' : ''} aria-label="${item.disliked ? '取消不喜欢' : '不喜欢这首歌'}" aria-pressed="${item.disliked}" title="${item.disliked ? '取消不喜欢' : '不喜欢：不再推荐这首'}">👎</button>
+      <button class="heart-button ${item.liked ? 'liked' : ''}" data-action="like" ${(pendingLikes.has(item.track_id) || pendingDislikes.has(item.track_id)) ? 'disabled' : ''} aria-label="${item.liked ? '取消喜欢' : '喜欢'}" aria-pressed="${item.liked}">${item.liked ? '♥' : '♡'}</button>
     </article>`;
   }).join(''));
   $('#play-first').disabled = !state.items[0];
@@ -1245,12 +1245,12 @@ function previousItem() {
 
 async function toggleDislike(item) {
   const trackId = item.track_id;
-  if (pendingDislikes.has(trackId)) return;
+  if (pendingDislikes.has(trackId) || pendingLikes.has(trackId)) return;
   const next = !item.disliked;
   pendingDislikes.add(trackId);
+  state.recommendationRevision++;
   item.disliked = next;
   render();
-  showToast(next ? '已标记讨厌，以后会少推荐这首' : '已取消讨厌');
   try {
     const response = await fetch(`/api/tracks/${encodeURIComponent(trackId)}/dislike`, {
       method: next ? 'POST' : 'DELETE',
@@ -1264,19 +1264,37 @@ async function toggleDislike(item) {
       throw new Error(detail);
     }
     item.disliked = typeof result?.disliked === 'boolean' ? result.disliked : next;
+    if (item.disliked) item.liked = false;
+    syncTrackCopies(item);
+    if (item.disliked) {
+      // Choose the next surviving entry from the current order before removal.
+      // Recheck the playing item after the write: the listener may have switched.
+      const isCurrentRecommendation = state.currentCollection === 'recommendations' && state.currentKey === keyOf(item);
+      const queue = isCurrentRecommendation ? playbackCollection() : [];
+      const index = queue.findIndex(candidate => keyOf(candidate) === state.currentKey);
+      const following = [...queue.slice(index + 1), ...queue.slice(0, Math.max(0, index))].find(candidate => candidate.track_id !== trackId);
+      state.items = state.items.filter(candidate => candidate.track_id !== trackId);
+      if (isCurrentRecommendation && !$('#audio-player').paused) {
+        // Stop this recording even if the next source is slow or unavailable.
+        $('#audio-player').pause();
+        if (following) void playItem(following, 'recommendations');
+        else setPlaybackStatus('已移出推荐');
+      }
+    }
+    showToast(item.disliked ? '已标记不喜欢，不再推荐这首' : '已取消不喜欢');
   } catch (error) {
     item.disliked = !next;
     render();
-    showToast(`讨厌操作失败：${String(error?.message || '未知错误')}`);
+    showToast(`不喜欢操作失败：${String(error?.message || '未知错误')}`);
   } finally {
     pendingDislikes.delete(trackId);
     state.recommendationRevision++;
-    renderRecommendations();
+    render();
   }
 }
 
 async function toggleLike(item) {
-  if (pendingLikes.has(item.track_id)) return;
+  if (pendingLikes.has(item.track_id) || pendingDislikes.has(item.track_id)) return;
   pendingLikes.add(item.track_id);
   state.recommendationRevision++;
   const next = !item.liked;
@@ -1339,9 +1357,9 @@ async function loadRecommendations(silent = false) {
   const revision = state.recommendationRevision;
   try {
     const payload = await fetchJson('/api/recommendations/today');
-    if (revision !== state.recommendationRevision || pendingLikes.size) return;
+    if (revision !== state.recommendationRevision || pendingLikes.size || pendingDislikes.size) return;
     if (!Array.isArray(payload.items)) throw new Error('Invalid recommendation response');
-    state.items = payload.items;
+    state.items = payload.items.filter(item => !item.disliked);
     $('#last-updated').textContent = `推荐更新于 ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
     const weekday = new Date().toLocaleDateString('zh-CN', { weekday: 'long' }).toUpperCase();
     const dateStr = new Date().toLocaleDateString('zh-CN', { month: 'long', day: 'numeric' });
@@ -1520,7 +1538,7 @@ function renderOnlineSearch() {
     const status = wanted?.state || item.local_status;
     const playing = keyOf(item) === state.currentKey && !$('#audio-player').paused;
     const playLabel = video && status !== 'LOCAL' ? '预览视频' : playing ? '暂停' : '试听';
-    return `<article class="online-song ${playing ? 'playing' : ''}" data-online-id="${escapeHtml(item.track_id)}"><span class="online-song-number">${String(index+1).padStart(2,'0')}</span><button class="online-song-play" type="button" data-online-action="play" aria-label="${playLabel} ${escapeHtml(text.title)}">${playing ? 'Ⅱ' : '▷'}</button><div class="online-song-meta"><strong>${escapeHtml(text.title)}</strong><small>${escapeHtml(text.artist)}${text.album ? ` · ${escapeHtml(text.album)}` : ''}</small><span class="online-song-state">${status && status !== 'REMOTE' ? escapeHtml(labels[status] || status) : '在线歌曲'}</span></div><span class="online-song-duration">${duration(item.duration)}</span><button class="online-song-like ${item.liked ? 'liked' : ''}" data-online-action="like" type="button" aria-label="${item.liked ? '取消喜欢' : '喜欢并下载'} ${escapeHtml(text.title)}" aria-pressed="${!!item.liked}" ${pendingLikes.has(item.track_id) ? 'disabled' : ''}><span aria-hidden="true">${item.liked ? '♥' : '♡'}</span><span>${item.liked ? '已喜欢' : '喜欢并下载'}</span></button></article>`;
+    return `<article class="online-song ${playing ? 'playing' : ''}" data-online-id="${escapeHtml(item.track_id)}"><span class="online-song-number">${String(index+1).padStart(2,'0')}</span><button class="online-song-play" type="button" data-online-action="play" aria-label="${playLabel} ${escapeHtml(text.title)}">${playing ? 'Ⅱ' : '▷'}</button><div class="online-song-meta"><strong>${escapeHtml(text.title)}</strong><small>${escapeHtml(text.artist)}${text.album ? ` · ${escapeHtml(text.album)}` : ''}</small><span class="online-song-state">${status && status !== 'REMOTE' ? escapeHtml(labels[status] || status) : '在线歌曲'}</span></div><span class="online-song-duration">${duration(item.duration)}</span><button class="online-song-like ${item.liked ? 'liked' : ''}" data-online-action="like" type="button" aria-label="${item.liked ? '取消喜欢' : '喜欢并下载'} ${escapeHtml(text.title)}" aria-pressed="${!!item.liked}" ${(pendingLikes.has(item.track_id) || pendingDislikes.has(item.track_id)) ? 'disabled' : ''}><span aria-hidden="true">${item.liked ? '♥' : '♡'}</span><span>${item.liked ? '已喜欢' : '喜欢并下载'}</span></button></article>`;
   }).join('');
   const list = $('#online-search-results');
   if (list._sig !== html) {

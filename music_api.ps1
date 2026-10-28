@@ -642,18 +642,19 @@ COMMIT;
 
 function Get-TodayRecommendationResponse {
     $batch = @(Get-TodayRecommendationBatchDb)
-    # One fold for the whole day rather than a query per row.
-    $preference = @{}
-    try { $preference = Get-TrackPreferenceMapDb } catch { $preference = @{} }
+    # Apply current preferences to already-generated days without deleting history.
+    $dislikeBuckets = Get-DislikeRelationBuckets -Disliked @(Get-DislikedTrackKeysDb)
     return @(foreach ($entry in $batch) {
         $rec = $entry.Recommendation
         $trackId = [string]$rec.track_id
         $track = $entry.Track
+        $relation = Get-CandidateDislikeRelation -TrackId $trackId -Title ([string]$track.title) `
+            -Artist ([string]$track.artist) -NeteaseId ([string]$rec.netease_id) -Buckets $dislikeBuckets
+        if ($relation -eq 'TRACK') { continue }
         $wanted = $entry.Wanted
         $liked = [bool]$rec.liked
         $feedback = $entry.Feedback
         if ($feedback) { $liked = ($feedback -eq 'LIKE') }
-        $disliked = ($preference.ContainsKey($trackId) -and [string]$preference[$trackId] -eq 'DISLIKE')
         $playback = $null
         try { $playback = Get-TrackPlaybackSource -Track $track -TrackId $trackId -Recommendation $rec } catch {}
         $isLocal = ($playback -and $playback.provider -eq 'navidrome')
@@ -673,7 +674,7 @@ function Get-TodayRecommendationResponse {
             preview_source = @($track.preview_sources) | Where-Object { [string](Get-OptionalProperty $_ 'media_url') } | Select-Object -First 1
             playback_source = $playback
             liked    = $liked
-            disliked = $disliked
+            disliked = $false
             stream_url = if ($isLocal) { $playback.url } else { '' }
             lyrics_url = if ($isLocal -and $playback.id) { "/api/library/$($playback.id)/lyrics" } else { "/api/tracks/$trackId/lyrics" }
             local_status = if ($isLocal) { 'LOCAL' } else { [string]$track.status }
