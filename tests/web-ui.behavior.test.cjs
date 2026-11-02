@@ -598,6 +598,25 @@ test('download diagnostics explain exhausted retries without promising another a
   assert.match(text, /停止自动重试/);
 });
 
+test('library shuffle survives newest-added sorting and drives next and previous', async () => {
+  const a = await app();
+  a.run("Math.random=()=>0;state.currentCollection='library';state.librarySort='added';state.librarySequence=['a','b','c','d'].map((id,i)=>({id,title:id,import_order:4-i,stream_url:'/test/'+id}));state.library=[...state.librarySequence];state.currentKey=keyOf(state.library[0])");
+  await a.get('shuffle-button').emit('click');
+  assert.equal(a.run('playbackCollection().map(x=>x.id).join()'), 'b,c,d,a');
+  assert.equal(a.run('adjacentItem(1).id'), 'b');
+  assert.equal(a.run('adjacentItem(-1).id'), 'd');
+  await a.get('next-button').emit('click');
+  assert.equal(a.run('state.currentKey'), a.run("keyOf(state.library.find(x=>x.id==='b'))"));
+  await a.get('audio-player').emit('ended');
+  assert.equal(a.run('state.currentKey'), a.run("keyOf(state.library.find(x=>x.id==='c'))"));
+  await a.get('previous-button').emit('click');
+  assert.equal(a.run('state.currentKey'), a.run("keyOf(state.library.find(x=>x.id==='b'))"));
+  a.run("syncLibrary(state.librarySequence)");
+  assert.equal(a.run('playbackCollection().map(x=>x.id).join()'), 'b,c,d,a');
+  a.run("setPlaybackMode('sequence')");
+  assert.equal(a.run('playbackCollection().map(x=>x.id).join()'), 'a,b,c,d');
+});
+
 test('random playback keeps a stable reversible queue and sequence restores source order',async()=>{
   const a=await app();
   a.run("state.currentCollection='recommendations';state.items=['a','b','c','d'].map(track_id=>({track_id,title:track_id}));reshuffleLibrary()");

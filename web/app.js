@@ -917,7 +917,9 @@ function playbackCollection() {
   if (state.currentCollection === 'online') items = state.onlinePlaybackItems;
   else if (state.currentCollection === 'recommendations') items = state.items;
   else if (state.currentCollection === 'listening') items = listeningCollection();
-  else return sortLibraryVisible(filteredLibrary());
+  // The library already carries its persisted shuffle order. Display sorting
+  // (for example newest-added) must not turn random playback back into sequence.
+  else return state.mode === 'random' ? filteredLibrary() : sortLibraryVisible(filteredLibrary());
   if (state.mode !== 'random') return items;
   const signature = items.map(keyOf).join('\n');
   let saved = randomPlaybackQueues.get(state.currentCollection);
