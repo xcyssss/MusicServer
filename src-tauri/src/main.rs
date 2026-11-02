@@ -866,7 +866,19 @@ fn main() {
                     .load(Ordering::Acquire)
                 {
                     desktop_controls::recover_dock(&dock_app);
-                    let _ = desktop_controls::position_dock(&dock_app);
+                    let reposition_app = dock_app.clone();
+                    // Serialize with preference commands on the window thread.
+                    // Blocking it on a worker holding a placement lock can deadlock
+                    // SetParent/SetWindowPos when they message our WebView window.
+                    let _ = dock_app.run_on_main_thread(move || {
+                        if !reposition_app
+                            .state::<AppState>()
+                            .stopping
+                            .load(Ordering::Acquire)
+                        {
+                            let _ = desktop_controls::position_dock(&reposition_app);
+                        }
+                    });
                     std::thread::sleep(Duration::from_secs(2));
                 }
             });

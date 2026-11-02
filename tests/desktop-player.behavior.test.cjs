@@ -2,18 +2,18 @@ const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const vm=require('node:vm');
-const {lyricLine,watchWindowVisibility}=require('../web/desktop-bridge.js');
+const {lyricLine,taskbarError,taskbarStatus,watchWindowVisibility}=require('../web/desktop-bridge.js');
 test('taskbar lyrics follow seeks, silence before the first line, and missing lyrics without stale text',()=>{
   const lyrics={available:true,entries:[{time:3,text:'新叶'},{time:8,text:'水光'}]};
   assert.equal(lyricLine(lyrics,8),'水光'); assert.equal(lyricLine(lyrics,4),'新叶');
   assert.match(lyricLine(lyrics,0),/等待/); assert.match(lyricLine({},10),/暂无同步歌词/);
 });
-function fixture({failSave=false}={}) {
+function fixture({failSave=false,nativeError=''}={}) {
   const elements=new Map(), calls=[],actions=[],listeners={}, audioListeners={};
-  const element=id=>{if(!elements.has(id))elements.set(id,{checked:false,disabled:false,hidden:false,textContent:'',addEventListener:(name,fn)=>elements.get(id)[name]=fn});return elements.get(id)};
+  const element=id=>{if(!elements.has(id))elements.set(id,{checked:false,disabled:/^#desktop-(tray-only|taskbar-lyrics|width)$/.test(id),hidden:false,textContent:'',addEventListener:(name,fn)=>elements.get(id)[name]=fn});return elements.get(id)};
   const group={querySelector:element};
   let view={key:'song-a',lyric:'第一句'};
-  const root={__TAURI__:{core:{invoke:async(name,args)=>{calls.push({name,args})}},event:{listen:async(name,fn)=>{listeners[name]=fn;return()=>{}}}},addEventListener:()=>{}};
+  const root={__TAURI__:{core:{invoke:async(name,args)=>{calls.push({name,args});if(nativeError&&name==='apply_desktop_preferences'&&args.preferences.taskbar_lyrics)throw Error(nativeError)}},event:{listen:async(name,fn)=>{listeners[name]=fn;return()=>{}}}},addEventListener:()=>{}};
   root.document={hidden:true,createElement:()=>group,querySelector:s=>s==='.settings-content'?{prepend:()=>{}}:{addEventListener:(name,fn)=>audioListeners[name]=fn,removeEventListener:()=>{}}};
   vm.runInNewContext(fs.readFileSync(require.resolve('../web/desktop-bridge.js'),'utf8'),root);
   root.MusicServerDesktop.connect({request:async(url,options)=>{if(options&&failSave)throw Error('offline');return {tray_only:false,taskbar_lyrics:true}},view:()=>view,action:a=>actions.push(a),toast:()=>{}});
@@ -73,4 +73,35 @@ test('taskbar width is saved with preferences and rolled back when saving fails'
     const applied=f.calls.filter(c=>c.name==='apply_desktop_preferences').map(c=>c.args.preferences.taskbar_width);
     assert.deepEqual(applied,failSave?[560,420]:[560]);assert.equal(width.value,failSave?420:560);
   }
+});
+
+test('a persisted dock failure explains its cause and still allows disabling the dock',async()=>{
+  const f=fixture({nativeError:'TASKBAR_DPI_INCOMPATIBLE'});await settle();
+  const dock=f.element('#desktop-taskbar-lyrics');
+  assert.equal(dock.disabled,false,'A failed dock must not lock all desktop settings');
+  assert.equal(dock.checked,true,'Keep the saved preference visible while native embedding is unavailable');
+  assert.match(f.element('#desktop-settings-status').textContent,/缩放/);
+  assert.doesNotMatch(f.element('#desktop-settings-status').textContent,/布局.*缩放.*空间/);
+  dock.checked=false;await dock.change();await settle();
+  assert.equal(dock.checked,false);
+  assert.equal(f.calls.at(-1).args.preferences.taskbar_lyrics,false);
+});
+
+test('embedding failures distinguish actionable causes and report effective width separately from the preference',()=>{
+  assert.match(taskbarError('TASKBAR_DPI_INCOMPATIBLE'),/缩放/);
+  assert.match(taskbarError('TASKBAR_ALREADY_IN_USE'),/另一份/);
+  assert.match(taskbarError('TASKBAR_LAYOUT_UNSUPPORTED'),/结构/);
+  assert.match(taskbarError('TASKBAR_NO_SPACE'),/自动缩窄/);
+  assert.equal(taskbarError('offline'),'');
+  assert.match(taskbarStatus({enabled:true,width:224,requested_width:800}),/224 px/);
+});
+
+test('a running dock reports temporary host failure and later recovery without changing saved settings',async()=>{
+  const f=fixture();await settle();
+  f.listeners['desktop-player-host']({payload:{enabled:true,width:0,requested_width:420,error:'TASKBAR_NOT_READY'}});
+  assert.match(f.element('#desktop-settings-status').textContent,/自动重试/);
+  assert.equal(f.element('#desktop-taskbar-lyrics').checked,true);
+  f.listeners['desktop-player-host']({payload:{enabled:true,width:240,requested_width:420,error:null}});
+  assert.match(f.element('#desktop-settings-status').textContent,/240 px/);
+  assert.equal(f.element('#desktop-width').value,420);
 });
