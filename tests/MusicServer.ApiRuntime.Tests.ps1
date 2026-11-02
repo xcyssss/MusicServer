@@ -507,9 +507,21 @@ Describe 'R: runtime hardening of the real HTTP API (concurrent processes, real 
     }
 
     It 'R7: disliking a track is preference-only and survives a server restart' {
-        $track = New-CanonicalTrack -Title 'Dislike Route' -Artist '测试歌手' -Status 'REMOTE'
+        $track = New-CanonicalTrack -Title 'Dislike Route' -Artist '测试歌手' -Status 'REMOTE' -Identifiers @([pscustomobject]@{type='netease';value='98765'})
         Save-CanonicalTrackDb -Track $track | Out-Null
         $tid = [string]$track.id
+        $alias = New-CanonicalTrack -Title 'Alternate credit' -Artist 'Other credit' -Status 'REMOTE' -Identifiers @([pscustomobject]@{type='netease';value='98765'})
+        $date = Get-Date -Format 'yyyy-MM-dd'
+        $rank = 0
+        $rows = @(foreach ($song in @($track,$alias)) {
+            $rank++
+            [pscustomobject]@{
+                id="dislike_today_$rank"; date=$date; track_id=$song.id; netease_id='98765'
+                title=$song.title; artist=$song.artist; album=''; duration=0; rank=$rank; reason='fixture'; seed_source='fixture'
+                playback_source='netease:98765'; preview_sources=@(); liked=$false; created_at=Get-NowIso; updated_at=Get-NowIso
+            }
+        })
+        Save-DailyRecommendationsDb -Recommendations $rows -Tracks @($track,$alias) | Out-Null
 
         $api = Start-MusicApi -Root $script:T.Root
         $base = $api.BaseUrl
@@ -517,6 +529,8 @@ Describe 'R: runtime hardening of the real HTTP API (concurrent processes, real 
         $before = Invoke-Http -BaseUrl $base -Method 'GET' -Path "/api/tracks/$tid"
         $before.Status | Should Be 200
         $before.Json.disliked | Should Be $false
+        # Warm the daily cache before changing the preference.
+        @( (Invoke-Http -BaseUrl $base -Method 'GET' -Path '/api/today').Json.items ).Count | Should Be 2
 
         $post = Invoke-Http -BaseUrl $base -Method 'POST' -Path "/api/tracks/$tid/dislike"
         $post.Status | Should Be 200
@@ -529,11 +543,23 @@ Describe 'R: runtime hardening of the real HTTP API (concurrent processes, real 
         $after.Json.liked | Should Be $false
         # Preference-only: nothing was queued for download.
         (Get-WantedItemDb -TrackId $tid) | Should BeNullOrEmpty
+        @( (Invoke-Http -BaseUrl $base -Method 'GET' -Path '/api/today').Json.items ).Count | Should Be 0
+        # Exclusion must survive restart and keep recommendation history intact.
+        Stop-AllApiServers
+        $api = Start-MusicApi -Root $script:T.Root
+        $base = $api.BaseUrl
+        @( (Invoke-Http -BaseUrl $base -Method 'GET' -Path '/api/today').Json.items ).Count | Should Be 0
+        @(Get-TodayRecommendationsDb).Count | Should Be 2
 
         $delete = Invoke-Http -BaseUrl $base -Method 'DELETE' -Path "/api/tracks/$tid/dislike"
         $delete.Status | Should Be 200
         $delete.Json.disliked | Should Be $false
         (Invoke-Http -BaseUrl $base -Method 'GET' -Path "/api/tracks/$tid").Json.disliked | Should Be $false
+        @( (Invoke-Http -BaseUrl $base -Method 'GET' -Path '/api/today').Json.items ).Count | Should Be 2
+
+        [void](Invoke-Http -BaseUrl $base -Method 'POST' -Path "/api/tracks/$tid/dislike")
+        [void](Invoke-Http -BaseUrl $base -Method 'POST' -Path "/api/tracks/$tid/like")
+        @( (Invoke-Http -BaseUrl $base -Method 'GET' -Path '/api/today').Json.items ).Count | Should Be 2
 
         $missing = Invoke-Http -BaseUrl $base -Method 'POST' -Path '/api/tracks/zzz_no_such_track_qq/dislike'
         $missing.Status | Should Be 404

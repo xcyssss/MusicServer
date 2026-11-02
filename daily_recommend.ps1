@@ -96,9 +96,8 @@ $RecommendationCooldownDays = 14
 # How hard a song related to a disliked one is pushed down, by how close the
 # relation is. A fresh candidate scores 1 per seed that surfaced it (typically
 # 1-3), so these sink a related song below unrelated ones while leaving it
-# reachable when the pool is thin. "少推荐" is a penalty, never an exclusion.
+# reachable when the pool is thin. The disliked recording itself is excluded.
 $DislikeRelationPenalty = @{
-    TRACK   = 5   # the disliked recording itself
     ARTIST  = 3   # another song by the same singer
     ALBUM   = 2   # another track off the same release
     SIMILAR = 2   # a song NetEase considers similar
@@ -108,7 +107,6 @@ $DislikeRelationPenalty = @{
 # relations divide that weight. SEED is 1 (no change): a local track is not
 # "discovered from" anything.
 $DislikeRelationDivisor = @{
-    TRACK   = 4
     ARTIST  = 3
     ALBUM   = 2
     SIMILAR = 2
@@ -593,11 +591,8 @@ foreach ($seed in $picked) {
 }
 Write-MusicServerLog -Path (Join-Path $Config.LogDir 'musicserver-recommendation.log') -Message "[metadata] calls=$($DailyMetadataState.Calls) elapsed_ms=$($DailyMetadataState.Clock.ElapsedMilliseconds) stop_reason=$($DailyMetadataState.StopReason) budget_seconds=120"
 
-# Candidates related to a disliked song are pushed down rather than removed, by
-# how close the relation is. "少推荐" is a soft penalty: a related song keeps a much
-# lower score than an unrelated one, so it sinks out of the day under normal
-# circumstances but can still appear when there is nothing better -- which is what
-# excluding it outright would prevent.
+# Related songs retain a graded penalty. Exact dislikes are excluded by both
+# quality selection passes, before any provider probes or daily slots are spent.
 $dislikeByRelation = @{}
 if ($bucketsTotal -gt 0) {
     foreach ($candidate in @($candidateMap.Values)) {
@@ -619,7 +614,7 @@ if ($bucketsTotal -gt 0) {
 $ranked = @($candidateMap.Values | Sort-Object @{Expression = {$_.Score}; Descending = $true}, @{Expression = { Get-Random }})
 # Probe only a diverse shortlist, with both request-count and wall-clock limits.
 # DryRun stays read-only; unavailable requests are UNKNOWN, never "no lyrics".
-$shortlist=@(Select-QualityRemoteRecommendations -Candidates $ranked -Count ([Math]::Min(60, [Math]::Max(20,$Count * 3))))
+$shortlist=@(Select-QualityRemoteRecommendations -Candidates $ranked -Count ([Math]::Min(60, [Math]::Max(20,$Count * 3))) -DislikeBuckets $dislikeBuckets)
 foreach ($candidate in $ranked) { $candidate | Add-Member -NotePropertyName LyricQuality -NotePropertyValue 'UNKNOWN' -Force }
 $qualityClock=[Diagnostics.Stopwatch]::StartNew(); $probes=0
 foreach ($candidate in $shortlist) {
@@ -628,7 +623,7 @@ foreach ($candidate in $shortlist) {
     if (-not $cacheOnly) { $probes++ }
     $candidate | Add-Member -NotePropertyName LyricQuality -NotePropertyValue $evidence.status -Force
 }
-$recos = @(Select-QualityRemoteRecommendations -Candidates $ranked -Count ([Math]::Max(0, $Count - @($localPicks).Count)))
+$recos = @(Select-QualityRemoteRecommendations -Candidates $ranked -Count ([Math]::Max(0, $Count - @($localPicks).Count)) -DislikeBuckets $dislikeBuckets)
 $qualitySummary=@($recos | Group-Object LyricQuality | ForEach-Object { "$($_.Name)=$($_.Count)" }) -join ' '
 $liveSelected=@($recos | Where-Object { (Get-RecommendationQualityTier $_).Live }).Count
 Write-MusicServerLog -Path (Join-Path $Config.LogDir 'musicserver-recommendation.log') -Message "[quality] live=$liveSelected lyric_checks=$probes elapsed_ms=$($qualityClock.ElapsedMilliseconds) $qualitySummary"
