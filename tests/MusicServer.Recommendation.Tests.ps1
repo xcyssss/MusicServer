@@ -336,11 +336,39 @@ Describe 'MusicServer Hardening v2 - Recommendation State' {
         $cooldown[0].netease_id | Should Be 'cool_recent'
     }
 
+    It 'uses the saved daily count even when an older task still passes twenty' {
+        Set-AppSettingDb -Key 'daily_recommendation_count' -Value '30'
+        Get-RecommendationTargetCountDb -FallbackCount 20 | Should Be 30
+        Get-AppSettingDb -Key 'daily_recommendation_count' | Should Be '30'
+    }
+
+    It 'uses the requested fallback when no valid daily count has been saved' {
+        Get-RecommendationTargetCountDb | Should Be 30
+        foreach ($value in @('0','101','broken')) {
+            Set-AppSettingDb -Key 'daily_recommendation_count' -Value $value
+            Get-RecommendationTargetCountDb -FallbackCount 35 | Should Be 35
+        }
+    }
+
     It 'keeps a recommendation from fifteen days ago eligible' {
         $track = New-RecommendationTestTrack -Title 'Old Cooldown'
         $row = New-RecommendationTestRow -Track $track -Date '2026-08-15' -Rank 1
         Save-DailyRecommendationsDb -Recommendations @($row) -Tracks @($track) -Date '2026-08-15' | Out-Null
         @(Get-RecommendationCooldownTrackIdsDb -AsOfDate '2026-08-30' -CooldownDays 14) | Where-Object { $_.track_id -eq $track.id } | Should BeNullOrEmpty
+    }
+
+    It 'remembers displayed songs after a same-day recommendation refresh' {
+        $first = New-RecommendationTestTrack -Title 'Previously displayed'
+        $next = New-RecommendationTestTrack -Title 'Replacement selection'
+        Save-DailyRecommendationsDb -Recommendations @((New-RecommendationTestRow -Track $first -Date '2026-08-30' -Rank 1 -NeteaseId 'first-recording')) -Tracks @($first) -Date '2026-08-30' | Out-Null
+        Save-DailyRecommendationsDb -Recommendations @((New-RecommendationTestRow -Track $next -Date '2026-08-30' -Rank 1 -NeteaseId 'next-recording')) -Tracks @($next) -Date '2026-08-30' | Out-Null
+        $cooldown = @(Get-RecommendationCooldownTrackIdsDb -AsOfDate '2026-08-31' -CooldownDays 14)
+        @($cooldown | Where-Object { $_.track_id -eq $first.id }).Count | Should Be 1
+        @($cooldown | Where-Object { $_.track_id -eq $next.id }).Count | Should Be 1
+        # Default freshness lasts a month and follows the recommendation date,
+        # not the wall-clock timestamp at which this fixture was inserted.
+        @(Get-RecommendationCooldownTrackIdsDb -AsOfDate '2026-09-29').Count | Should Be 2
+        @(Get-RecommendationCooldownTrackIdsDb -AsOfDate '2026-09-30').Count | Should Be 0
     }
 
     It 'includes the existing fourteen-day boundary' {
@@ -400,7 +428,8 @@ Describe 'MusicServer Hardening v2 - Recommendation State' {
     It 'rolls back canonical and daily rows when DISPLAY feedback fails' {
         $track = New-RecommendationTestTrack -Title 'Feedback Failure'
         $row = New-RecommendationTestRow -Track $track -Date '2026-08-30' -Rank 1 -NeteaseId 'feedback_failure'
-        try { Save-DailyRecommendationsDb -Recommendations @($row) -Tracks @($track) -Date '2026-08-30' -FailAfterStep 6 | Out-Null; $failed = $false } catch { $failed = $true }
+        Invoke-MusicServerSqliteScript -Sql "CREATE TRIGGER fixture_display_failure BEFORE INSERT ON recommendation_feedback WHEN NEW.feedback_type='DISPLAY' BEGIN SELECT RAISE(ABORT,'fixture display failure'); END;" | Out-Null
+        try { Save-DailyRecommendationsDb -Recommendations @($row) -Tracks @($track) -Date '2026-08-30' | Out-Null; $failed = $false } catch { $failed = $true }
         $failed | Should Be $true
         @(Get-TodayRecommendationsDb -Date '2026-08-30').Count | Should Be 0
         (Get-CanonicalTrackDb -TrackId $track.id) | Should Be $null
@@ -430,7 +459,7 @@ Describe 'MusicServer Hardening v2 - Recommendation State' {
         Save-DailyRecommendationsDb -Recommendations @((New-RecommendationTestRow -Track $t2 -Date '2026-08-30' -Rank 1 -NeteaseId 'replacement')) -Tracks @($t2) -Date '2026-08-30' | Out-Null
         Save-DailyRecommendationsDb -Recommendations @((New-RecommendationTestRow -Track $t2 -Date '2026-08-30' -Rank 1 -NeteaseId 'replacement')) -Tracks @($t2) -Date '2026-08-30' | Out-Null
         @(Get-TodayRecommendationsDb -Date '2026-08-30').Count | Should Be 1
-        @(Get-RecommendationFeedbackDb -FeedbackType 'DISPLAY').Count | Should Be 1
+        @(Get-RecommendationFeedbackDb -FeedbackType 'DISPLAY').Count | Should Be 2
         (Get-TodayRecommendationsDb -Date '2026-08-30')[0].netease_id | Should Be 'replacement'
     }
 
@@ -1028,6 +1057,39 @@ Describe 'Disliked tracks and release year' {
 }
 
 Describe 'Daily recording and lyric quality' {
+    It 'targets thirty songs by default from direct and scheduled entry points' {
+        foreach ($file in @('daily_recommend.ps1','register_daily_recommend.ps1')) {
+            $tokens=$null; $errors=$null
+            $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $ProjectRoot $file),[ref]$tokens,[ref]$errors)
+            $parameter = @($ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'Count' })[0]
+            $parameter.DefaultValue.SafeGetValue() | Should Be 30
+        }
+    }
+
+    It 'spreads a thirty-song day across at least fifteen artists when the pool permits' {
+        $pool = @(foreach ($artist in 1..20) {
+            foreach ($song in 1..5) {
+                [pscustomobject]@{ Title="Song $artist $song"; Artist="Artist $artist"; Album='Studio'; LyricQuality='READY'; Score=(200 - $artist) }
+            }
+        })
+        $result = @(Select-QualityRemoteRecommendations -Candidates $pool -Count 30)
+        $result.Count | Should Be 30
+        @($result | Group-Object Artist).Count | Should BeGreaterThan 14
+        @($result | Group-Object Artist | Where-Object Count -gt 2).Count | Should Be 0
+    }
+
+    It 'counts duet credits toward the same singer limit without padding a thin pool' {
+        $pool = @(
+            [pscustomobject]@{Title='Solo one';Artist='Singer A';Score=5}
+            [pscustomobject]@{Title='Duet';Artist='Singer A×Singer B';Score=4}
+            [pscustomobject]@{Title='Solo two';Artist='Singer A';Score=3}
+            [pscustomobject]@{Title='Other';Artist='Singer C';Score=2}
+        )
+        $result = @(Select-QualityRemoteRecommendations -Candidates $pool -Count 30)
+        $result.Count | Should Be 3
+        @($result | Where-Object Artist -match 'Singer A').Count | Should Be 2
+    }
+
     It 'recognizes version annotations without treating Live Forever as a concert' {
         (Get-RecommendationQualityTier ([pscustomobject]@{Title='Live Forever';Album='Definitely Maybe'})).Live | Should Be $false
         (Get-RecommendationQualityTier ([pscustomobject]@{Title='Alive';Album='Live Through This'})).Live | Should Be $false
@@ -1090,6 +1152,15 @@ Describe 'Bounded daily lyric evidence' {
         (Get-RecommendationLyricEvidence -Config ([pscustomobject]@{StateDir='fixture';Sqlite='sqlite3'}) -SongId '123' -CacheOnly).status | Should Be 'UNKNOWN'
         Assert-MockCalled Invoke-RestMethod -ModuleName MusicServer.Providers -Times 0 -Exactly -Scope It
         Assert-MockCalled Set-AppSettingDb -ModuleName MusicServer.Providers -Times 0 -Exactly -Scope It
+    }
+    It 'treats an absent lyric cache as unknown without errors under the generator error policy' {
+        Mock Get-AppSettingDb { return $null } -ModuleName MusicServer.Providers
+        $output=@(& (Get-Module MusicServer.Providers) {
+            $ErrorActionPreference='Continue'
+            Get-RecommendationLyricEvidence -Config ([pscustomobject]@{StateDir='fixture';Sqlite='sqlite3'}) -SongId '123' -CacheOnly
+        } 2>&1)
+        @($output | Where-Object { $_ -is [Management.Automation.ErrorRecord] }).Count | Should Be 0
+        @($output | Where-Object { $_ -isnot [Management.Automation.ErrorRecord] })[0].status | Should Be 'UNKNOWN'
     }
 }
 
@@ -1198,6 +1269,75 @@ Describe 'Imported library recommendation seeding' {
         (Get-TodayRecommendationsDb)[0].title | Should Be $previous.title
         (Get-CanonicalTrackDb -TrackId $next.id) | Should BeNullOrEmpty
         (Get-CanonicalTrackDb -TrackId $previous.id).title | Should Be $previous.title
+    }
+}
+
+Describe 'Daily discovery breadth' {
+    $tokens=$null; $errors=$null
+    $dailyAst=[Management.Automation.Language.Parser]::ParseFile((Join-Path $ProjectRoot 'daily_recommend.ps1'),[ref]$tokens,[ref]$errors)
+    foreach ($name in @('Search-Netease','Get-SimiSongs','Add-DailyDiscoverySongs','Get-DailyDiscoveryCandidates')) {
+        $definition=$dailyAst.FindAll({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name},$true)[0]
+        . ([scriptblock]::Create($definition.Extent.Text))
+    }
+    function New-DiscoverySong {
+        param([int]$Id, [string]$Title = "Discovery $Id", [string]$Artist = "Singer $Id")
+        return [pscustomobject]@{id=$Id;name=$Title;artists=@([pscustomobject]@{name=$Artist});duration=180000;album=[pscustomobject]@{name='Studio';picUrl='';publishTime=0}}
+    }
+    BeforeEach {
+        $script:DailyMetadataState=[pscustomobject]@{Clock=[Diagnostics.Stopwatch]::StartNew();BudgetSeconds=120;Calls=0;Blocked=$false;StopReason=''}
+        Mock Search-Netease { return @() }
+        Mock Get-CanonicalTrackDb { return $null }
+        Mock Get-SimiSongs { param($SongId,$Limit) return @(New-DiscoverySong -Id 100) }
+    }
+    It 'reuses the liked recording identity instead of spending requests searching for it again' {
+        Mock Get-CanonicalTrackDb { return [pscustomobject]@{identifiers=@([pscustomobject]@{type='netease';value='42'})} }
+        $seed=[pscustomobject]@{TrackId='liked';Title='Favourite';Artist='Familiar';Source='explicit_like'}
+        $result=Get-DailyDiscoveryCandidates -Seeds @($seed) -KnownSeedIds @{} -ExcludedKeys (New-Object 'System.Collections.Generic.HashSet[string]') -TargetCount 30
+        $result.Candidates['100'].FromSeed | Should Be 'Favourite'
+        Assert-MockCalled Search-Netease -Scope It -Times 0 -Exactly
+        Assert-MockCalled Get-SimiSongs -Scope It -Times 1 -Exactly -ParameterFilter {$SongId -eq 42 -and $Limit -eq 20}
+    }
+    It 'fills thirty fresh selections by expanding a small taste-related pool with bounded second hops' {
+        Mock Get-SimiSongs {
+            param($SongId,$Limit)
+            if ($SongId -eq 42) { return @(101..106 | ForEach-Object { New-DiscoverySong -Id $_ }) }
+            return @(1..15 | ForEach-Object { New-DiscoverySong -Id ([int]$SongId * 100 + $_) })
+        }
+        $seed=[pscustomobject]@{TrackId='liked';Title='Favourite';Artist='Familiar';Source='explicit_like'}
+        $result=Get-DailyDiscoveryCandidates -Seeds @($seed) -KnownSeedIds @{liked='42'} -ExcludedKeys (New-Object 'System.Collections.Generic.HashSet[string]') -TargetCount 30
+        $selected=@(Select-QualityRemoteRecommendations -Candidates @($result.Candidates.Values) -Count 30)
+        $selected.Count | Should Be 30
+        @($selected | Where-Object DiscoveryDepth -eq 2).Count | Should BeGreaterThan 0
+        ($result.Expansions -le 6) | Should Be $true
+        Assert-MockCalled Search-Netease -Scope It -Times 0 -Exactly
+    }
+    It 'applies the same cooldown, owned-track, recording and duplicate filters to exploratory songs' {
+        $exclude=New-Object 'System.Collections.Generic.HashSet[string]'
+        [void]$exclude.Add('netease:100')
+        [void]$exclude.Add('track:' + (Get-CanonicalTrackId -Title 'Owned song' -Artist 'Singer 101'))
+        $map=@{}
+        $songs=@((New-DiscoverySong 100),(New-DiscoverySong 101 'Owned song'),(New-DiscoverySong 102 'Song (伴奏)'),(New-DiscoverySong 103),(New-DiscoverySong 103))
+        Add-DailyDiscoverySongs -CandidateMap $map -Songs $songs -Seed ([pscustomobject]@{Title='Branch';Source='similar_exploration'}) -ExcludedKeys $exclude -Depth 2
+        $map.Count | Should Be 1
+        $map['103'].Score | Should Be 0.5
+    }
+    It 'does not expand candidates related to a disliked song' {
+        $buckets=Get-DislikeRelationBuckets -Disliked @([pscustomobject]@{TrackId='disliked';Title='Discovery 100';Artist='Singer 100';Album='';NeteaseId='100'})
+        $seed=[pscustomobject]@{TrackId='liked';Title='Favourite';Artist='Familiar';Source='explicit_like'}
+        $result=Get-DailyDiscoveryCandidates -Seeds @($seed) -KnownSeedIds @{liked='42'} -ExcludedKeys (New-Object 'System.Collections.Generic.HashSet[string]') -TargetCount 30 -DislikeBuckets $buckets
+        $result.Expansions | Should Be 0
+        Assert-MockCalled Get-SimiSongs -Scope It -Times 1 -Exactly
+    }
+    It 'stops exploratory calls as soon as the shared provider budget or circuit closes' {
+        Mock Get-SimiSongs {
+            param($SongId,$Limit)
+            $script:DailyMetadataState.Blocked=$true
+            return @(New-DiscoverySong 100)
+        }
+        $seed=[pscustomobject]@{TrackId='liked';Title='Favourite';Artist='Familiar';Source='explicit_like'}
+        $result=Get-DailyDiscoveryCandidates -Seeds @($seed) -KnownSeedIds @{liked='42'} -ExcludedKeys (New-Object 'System.Collections.Generic.HashSet[string]') -TargetCount 30
+        $result.Expansions | Should Be 0
+        Assert-MockCalled Get-SimiSongs -Scope It -Times 1 -Exactly
     }
 }
 

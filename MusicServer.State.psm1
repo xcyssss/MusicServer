@@ -880,7 +880,7 @@ function Get-RecommendationQualityTier {
 }
 
 function Select-QualityRemoteRecommendations {
-    param([AllowEmptyCollection()][object[]]$Candidates=@(), [int]$Count=20)
+    param([AllowEmptyCollection()][object[]]$Candidates=@(), [int]$Count=30)
     if ($Count -le 0) { return @() }
     $ordered = @($Candidates | Sort-Object @{Expression={(Get-RecommendationQualityTier $_).Tier}}, @{Expression={$_.Score};Descending=$true})
     $liveCount=0; $liveLimit=[int][Math]::Floor($Count * 0.1)
@@ -896,7 +896,7 @@ function Select-QualityRemoteRecommendations {
 function Select-DiverseRemoteRecommendations {
     # Input is already taste-ranked. Avoid adjacent shared singers without losing
     # the ranking or manufacturing candidates when the pool is small.
-    param([AllowEmptyCollection()][object[]]$Candidates = @(), [int]$Count = 20, [int]$MaxPerArtist = 5)
+    param([AllowEmptyCollection()][object[]]$Candidates = @(), [int]$Count = 30, [int]$MaxPerArtist = 2)
     if ($Count -le 0 -or $MaxPerArtist -le 0) { return @() }
     $remaining = New-Object System.Collections.ArrayList
     $seen = @{}
@@ -1044,17 +1044,35 @@ function Select-LocalRecommendationTracks {
     return @($picked)
 }
 
+function Get-RecommendationTargetCountDb {
+    param([ValidateRange(1,100)][int]$FallbackCount = 30)
+    # A saved app preference also applies to older scheduled tasks which still
+    # pass their former default explicitly. Task Scheduler is not runtime state.
+    $saved = [string](Get-AppSettingDb -Key 'daily_recommendation_count')
+    $count = 0
+    if ([int]::TryParse($saved, [ref]$count) -and $count -ge 1 -and $count -le 100) { return $count }
+    return $FallbackCount
+}
+
 function Get-RecommendationCooldownTrackIdsDb {
     param(
         [string]$AsOfDate = (Get-TodayDate),
-        [int]$CooldownDays = 14
+        [int]$CooldownDays = 30
     )
     $asOf = [DateTime]::ParseExact($AsOfDate, 'yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture)
     $cutoff = $asOf.AddDays(-$CooldownDays).ToString('yyyy-MM-dd')
     return @(Invoke-MusicServerParamSql -Template @"
-SELECT DISTINCT track_id, netease_id, date, rank, rec_id
-FROM daily_recommendations
-WHERE date >= @cutoff AND date <= @asof
+SELECT track_id, netease_id, date, rank, rec_id
+FROM daily_recommendations WHERE date >= @cutoff AND date <= @asof
+UNION ALL
+SELECT f.track_id, '', substr(f.value,9,10) AS date, 0 AS rank, '' AS rec_id
+FROM recommendation_feedback f
+WHERE f.feedback_type = 'DISPLAY' AND f.source = 'daily_recommendation'
+  AND f.value LIKE 'display:____-__-__:%'
+  AND substr(f.value,9,10) >= @cutoff AND substr(f.value,9,10) <= @asof
+  AND NOT EXISTS (SELECT 1 FROM daily_recommendations d
+                  WHERE d.track_id = f.track_id AND d.date = substr(f.value,9,10))
+GROUP BY f.track_id, substr(f.value,9,10)
 ORDER BY date, rank;
 "@ -Params @{ cutoff = $cutoff; asof = $AsOfDate })
 }
@@ -1554,8 +1572,8 @@ function Save-DailyRecommendationsDb {
         [void]$statements.Add('INSERT INTO recommendation_empty_guard SELECT COUNT(*) FROM daily_recommendations WHERE date = ' + (ConvertTo-MusicServerSqlLiteral $Date))
     }
     [void]$statements.Add(("DELETE FROM daily_recommendations WHERE date = " + (ConvertTo-MusicServerSqlLiteral $Date)))
-    [void]$statements.Add(("DELETE FROM recommendation_feedback WHERE feedback_type = 'DISPLAY' AND source = 'daily_recommendation' AND value LIKE " + (ConvertTo-MusicServerSqlLiteral "display:${Date}:%")))
-    [void]$statements.Add(("DELETE FROM events WHERE event_type = 'RECOMMENDATION_DISPLAY' AND message LIKE " + (ConvertTo-MusicServerSqlLiteral "date=${Date};rank=%")))
+    # Replacing the visible day must not erase exposure history. DISPLAY is a
+    # neutral fact used by cooldown, not a like or a snapshot of the current list.
     foreach ($track in @($trackMap.Values)) {
         $trackId = [string](Get-OptionalProperty $track 'id')
         $identifiers = ConvertTo-MusicServerJsonArrayText -Items (Get-OptionalProperty $track 'identifiers' @())
@@ -1582,9 +1600,11 @@ function Save-DailyRecommendationsDb {
         }
         [void]$statements.Add("INSERT INTO daily_recommendations (date,rank,rec_id,track_id,netease_id,title,artist,album,duration,reason,seed_source,playback_source,preview_sources_json,liked,created_at,updated_at) VALUES ($($lit.d),$($lit.r),$($lit.rid),$($lit.tid),$($lit.nid),$($lit.title),$($lit.artist),$($lit.album),$($lit.dur),$($lit.reason),$($lit.ss),$($lit.ps),$($lit.prev),0,$($lit.now),$($lit.now))")
         $displayValue = "display:$Date`:$([int](Get-OptionalProperty $rec 'rank'))`:$([string](Get-OptionalProperty $rec 'id'))"
-        [void]$statements.Add("INSERT INTO recommendation_feedback (track_id,feedback_type,source,value,created_at) VALUES ($($lit.tid),'DISPLAY','daily_recommendation',$(ConvertTo-MusicServerSqlLiteral $displayValue),$($lit.now))")
+        $displayLiteral = ConvertTo-MusicServerSqlLiteral $displayValue
+        [void]$statements.Add("INSERT INTO recommendation_feedback (track_id,feedback_type,source,value,created_at) SELECT $($lit.tid),'DISPLAY','daily_recommendation',$displayLiteral,$($lit.now) WHERE NOT EXISTS (SELECT 1 FROM recommendation_feedback WHERE track_id=$($lit.tid) AND feedback_type='DISPLAY' AND source='daily_recommendation' AND value=$displayLiteral)")
         $displayMessage = "date=${Date};rank=$([int](Get-OptionalProperty $rec 'rank'));rec_id=$([string](Get-OptionalProperty $rec 'id'))"
-        [void]$statements.Add("INSERT INTO events (event_type,track_id,result,message,created_at) VALUES ('RECOMMENDATION_DISPLAY',$($lit.tid),'SUCCESS',$(ConvertTo-MusicServerSqlLiteral $displayMessage),$($lit.now))")
+        $messageLiteral = ConvertTo-MusicServerSqlLiteral $displayMessage
+        [void]$statements.Add("INSERT INTO events (event_type,track_id,result,message,created_at) SELECT 'RECOMMENDATION_DISPLAY',$($lit.tid),'SUCCESS',$messageLiteral,$($lit.now) WHERE NOT EXISTS (SELECT 1 FROM events WHERE event_type='RECOMMENDATION_DISPLAY' AND track_id=$($lit.tid) AND message=$messageLiteral)")
     }
     if ($EnforceLibraryRevision -and $ExpectedLibraryRevision) {
         [void]$statements.Add("DELETE FROM app_settings WHERE key='recommendation_library_pending' AND value=" + (ConvertTo-MusicServerSqlLiteral $ExpectedLibraryRevision))

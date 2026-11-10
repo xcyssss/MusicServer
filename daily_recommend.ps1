@@ -8,7 +8,7 @@
     Navidrome starred 仍是外部动态偏好；本阶段不把 Navidrome DB 改成
     MusicServer 的状态源。
 .PARAMETER Count
-    目标推荐数量，默认 20。
+    未保存应用偏好时的目标推荐数量，默认 30；SQLite 中的 daily_recommendation_count 优先。
 .PARAMETER DryRun
     只打印推荐，不写 recommendation state，也不触发 migration。
 .PARAMETER MigrateLegacy
@@ -26,7 +26,7 @@
     可选测试随机种子；默认使用正常随机行为。
 ##>
 param(
-    [int]$Count = 20,
+    [ValidateRange(1, 100)][int]$Count = 30,
     [switch]$DryRun,
     [int]$SeedCount = 25,
     [int]$LocalCount = 0,
@@ -73,6 +73,7 @@ if ($DryRun) {
     Initialize-MusicServerDatabase -DbPath $dbPath -SqliteExe $Config.Sqlite
     Initialize-MusicServerSchema
 }
+$Count = Get-RecommendationTargetCountDb -FallbackCount $Count
 Apply-ConfiguredMusicDir -Config $Config
 if (-not $DryRun) { Initialize-MusicServerLibrary -Config $Config | Out-Null }
 $RecommendationLibraryRevision = [string](Get-AppSettingDb -Key 'recommendation_library_pending')
@@ -92,7 +93,7 @@ if ($MigrateLegacy -and -not $DryRun) {
     if ([string]$migration.status -eq 'FAILED') { throw "Recommendation state migration failed: $($migration.error)" }
 }
 
-$RecommendationCooldownDays = 14
+$RecommendationCooldownDays = 30
 # How hard a song related to a disliked one is pushed down, by how close the
 # relation is. A fresh candidate scores 1 per seed that surfaced it (typically
 # 1-3), so these sink a related song below unrelated ones while leaving it
@@ -185,6 +186,100 @@ function Get-SimiSongs {
         Write-Host "  相似歌曲请求失败：$($_.Exception.Message)" -ForegroundColor DarkYellow
     }
     return @()
+}
+
+function Add-DailyDiscoverySongs {
+    param(
+        [hashtable]$CandidateMap, [AllowEmptyCollection()][object[]]$Songs,
+        [psobject]$Seed, [System.Collections.Generic.HashSet[string]]$ExcludedKeys,
+        [int]$Depth = 1
+    )
+    $seen = @{}
+    foreach ($song in $Songs) {
+        $sid = [string]$song.id
+        $artist = (($song.artists | ForEach-Object { $_.name }) -join ',')
+        if (-not $sid -or -not $song.name -or -not $artist -or $seen.ContainsKey($sid)) { continue }
+        $seen[$sid] = $true
+        $trackId = Get-CanonicalTrackId -Title ([string]$song.name) -Artist $artist
+        if ($ExcludedKeys.Contains("netease:$sid") -or $ExcludedKeys.Contains("track:$trackId")) { continue }
+        $duration = [int]($song.duration / 1000)
+        if ($duration -lt 60 -or $duration -gt 600) { continue }
+        if ($song.name -match '合集|串烧|伴奏|instrumental|纯音乐|Cover |cover版|铃声|remix版|片段|试听|DJ版|女声版|男声版|慢搖|抖音版|加速版|减速版|清唱') { continue }
+        if ($artist -match 'Cover|翻唱') { continue }
+        if ($ExcludedKeys.Contains((Normalize-MusicText "$($song.name)$artist")) -or $ExcludedKeys.Contains((Normalize-MusicText $song.name))) { continue }
+        # Evidence from a second hop is weaker than a direct match to a liked
+        # song. Duplicate entries in one provider response are not extra votes.
+        $weight = if ($Depth -eq 1) { 1.0 } else { 0.5 }
+        if ($CandidateMap.ContainsKey($sid)) { $CandidateMap[$sid].Score += $weight; continue }
+        $CandidateMap[$sid] = [pscustomobject]@{
+            NeteaseId=$sid; Title=[string]$song.name; Artist=$artist; Album=[string]$song.album.name
+            Duration=$duration; FromSeed=[string]$Seed.Title; SeedSource=[string]$Seed.Source
+            Score=$weight; CoverUrl=[string]$song.album.picUrl; DiscoveryDepth=$Depth
+            ReleaseYear=Get-NeteasePublishYear -PublishTime (Get-OptionalProperty (Get-OptionalProperty $song 'album' $null) 'publishTime' 0)
+        }
+    }
+}
+
+function Get-DailyDiscoveryCandidates {
+    param(
+        [AllowEmptyCollection()][object[]]$Seeds, [hashtable]$KnownSeedIds,
+        [System.Collections.Generic.HashSet[string]]$ExcludedKeys, [int]$TargetCount,
+        [hashtable]$DislikeBuckets = @{}
+    )
+    $map = @{}; $misses = 0; $requested = @{}; $expansions = 0
+    foreach ($seed in $Seeds) {
+        if ($DailyMetadataState.Blocked) { break }
+        # Reserve part of the SAME 120-second / 60-request budget for exploring
+        # beyond the first neighbours of favourites when that pool is too small.
+        if ($map.Count -gt 0 -and ($DailyMetadataState.Calls -ge 42 -or $DailyMetadataState.Clock.Elapsed.TotalSeconds -ge 80)) { break }
+        $found = @()
+        $seedId = [string]$seed.TrackId
+        if (-not $KnownSeedIds.ContainsKey($seedId) -and $seedId) {
+            $canonical = Get-CanonicalTrackDb -TrackId $seedId
+            if ($canonical) {
+                $exact = @($canonical.identifiers | Where-Object { $_.type -eq 'netease' -and [string]$_.value -match '^\d+$' } | Select-Object -First 1)
+                if ($exact.Count) { $KnownSeedIds[$seedId] = [string]$exact[0].value }
+            }
+        }
+        if ($KnownSeedIds.ContainsKey($seedId)) { $found = @([pscustomobject]@{ id=$KnownSeedIds[$seedId] }) }
+        $queries = if ($found.Count) { @() } else { @(Get-SongSearchQueries -Title ([string]$seed.Title) -Artist ([string]$seed.Artist)) }
+        foreach ($query in $queries) {
+            $hits = @(Search-Netease -Keyword $query -Limit 3)
+            if ($DailyMetadataState.Blocked) { break }
+            $wantKey = ConvertTo-MusicServerKey -Value $query
+            foreach ($hit in $hits) {
+                $gotKey = ConvertTo-MusicServerKey -Value ([string]$hit.name)
+                if ($gotKey.Length -ge 2 -and ($gotKey -eq $wantKey -or $wantKey.Contains($gotKey) -or $gotKey.Contains($wantKey))) {
+                    $found = @($hit); break
+                }
+            }
+            if ($found.Count) { break }
+        }
+        if (-not $found.Count) { $misses++; continue }
+        $sid = [string]$found[0].id
+        if ($requested.ContainsKey($sid)) { continue }
+        $requested[$sid] = $true
+        $songs = @(Get-SimiSongs -SongId ([long]$sid) -Limit 20)
+        Add-DailyDiscoverySongs -CandidateMap $map -Songs $songs -Seed $seed -ExcludedKeys $ExcludedKeys
+    }
+    # A finite second hop keeps discovery connected to taste without retrying
+    # old songs to fill the target. All normal exclusion/quality rules still run.
+    $branches = @($map.Values | Where-Object {
+        -not (Get-RecommendationQualityTier $_).Live -and
+        -not (Get-CandidateDislikeRelation -Title $_.Title -Artist $_.Artist -Album $_.Album -NeteaseId $_.NeteaseId -FromSeed $_.FromSeed -Buckets $DislikeBuckets)
+    } | Sort-Object @{Expression={$_.Score}; Descending=$true}, @{Expression={Get-Random}})
+    $branches = @(Select-DiverseRemoteRecommendations -Candidates $branches -Count 6 -MaxPerArtist 1)
+    foreach ($branch in $branches) {
+        if ($DailyMetadataState.Blocked) { break }
+        if ($map.Count -ge ($TargetCount * 2) -and @(Select-QualityRemoteRecommendations -Candidates @($map.Values) -Count $TargetCount).Count -ge $TargetCount) { break }
+        if ($requested.ContainsKey([string]$branch.NeteaseId)) { continue }
+        $requested[[string]$branch.NeteaseId] = $true
+        $expansions++
+        $songs = @(Get-SimiSongs -SongId ([long]$branch.NeteaseId) -Limit 20)
+        $seed = [pscustomobject]@{ Title=$branch.Title; Source='similar_exploration' }
+        Add-DailyDiscoverySongs -CandidateMap $map -Songs $songs -Seed $seed -ExcludedKeys $ExcludedKeys -Depth 2
+    }
+    return [pscustomobject]@{ Candidates=$map; SeedMisses=$misses; Expansions=$expansions }
 }
 
 function Get-StarredTitles {
@@ -543,55 +638,10 @@ $knownSeedIds = @{}
 foreach ($row in $localRows) {
     if ($row.TrackId -and [string]$row.NeteaseId -match '^\d+$') { $knownSeedIds[[string]$row.TrackId] = [string]$row.NeteaseId }
 }
-foreach ($seed in $picked) {
-    if ($DailyMetadataState.Blocked) { break }
-    # Searching the raw uploader title wastes the seed: it is the song name plus
-    # channel branding plus the song name again. Each cleaned form is tried with
-    # the resolved singer first and alone second, and the search only accepts a
-    # candidate whose title matches the query, so a wrong artist cannot be picked.
-    $found = @()
-    if ($knownSeedIds.ContainsKey([string]$seed.TrackId)) {
-        # An exact migrated/downloaded recording id is stronger than a new
-        # search and avoids rediscovering a cover or differently credited version.
-        $found = @([pscustomobject]@{ id = $knownSeedIds[[string]$seed.TrackId] })
-    }
-    $queries = if ($found.Count) { @() } else { @(Get-SongSearchQueries -Title ([string]$seed.Title) -Artist ([string]$seed.Artist)) }
-    foreach ($query in $queries) {
-        $hits = @(Search-Netease -Keyword $query -Limit 3)
-        if ($DailyMetadataState.Blocked) { break }
-        if ($hits.Count -eq 0) { continue }
-        $wantKey = ConvertTo-MusicServerKey -Value $query
-        foreach ($hit in $hits) {
-            $gotKey = ConvertTo-MusicServerKey -Value ([string]$hit.name)
-            if ($gotKey.Length -ge 2 -and ($gotKey -eq $wantKey -or $wantKey.Contains($gotKey) -or $gotKey.Contains($wantKey))) {
-                $found = @($hit); break
-            }
-        }
-        if ($found.Count -gt 0) { break }
-    }
-    if ($found.Count -eq 0) { $seedMisses++; continue }
-    $similar = @(Get-SimiSongs -SongId ([long]$found[0].id) -Limit 10)
-    foreach ($song in $similar) {
-        $sid = [string]$song.id
-        $artist = (($song.artists | ForEach-Object { $_.name }) -join ',')
-        $candidateTrackId = ''
-        if ($song.name -and $artist) { $candidateTrackId = Get-CanonicalTrackId -Title ([string]$song.name) -Artist $artist }
-        if (-not $sid -or $acceptedIds.Contains($sid) -or $exclude.Contains("netease:$sid") -or ($candidateTrackId -and $exclude.Contains("track:$candidateTrackId"))) { continue }
-        if ($candidateMap.ContainsKey($sid)) { $candidateMap[$sid].Score++; continue }
-        $duration = [int]($song.duration / 1000)
-        if ($duration -lt 60 -or $duration -gt 600) { continue }
-        if ($song.name -match '合集|串烧|伴奏|instrumental|纯音乐|Cover |cover版|铃声|remix版|片段|试听|DJ版|女声版|男声版|慢搖|抖音版|加速版|减速版|清唱') { continue }
-        if ($artist -match 'Cover|翻唱') { continue }
-        $key = Normalize-MusicText "$($song.name)$artist"
-        if ($exclude.Contains($key) -or $exclude.Contains((Normalize-MusicText $song.name))) { continue }
-        $candidateMap[$sid] = [pscustomobject]@{
-            NeteaseId = $sid; Title = [string]$song.name; Artist = $artist; Album = [string]$song.album.name
-            Duration = $duration; FromSeed = [string]$seed.Title; SeedSource = [string]$seed.Source; Score = 1; CoverUrl = [string]$song.album.picUrl
-            ReleaseYear = Get-NeteasePublishYear -PublishTime (Get-OptionalProperty (Get-OptionalProperty $song 'album' $null) 'publishTime' 0)
-        }
-    }
-}
-Write-MusicServerLog -Path (Join-Path $Config.LogDir 'musicserver-recommendation.log') -Message "[metadata] calls=$($DailyMetadataState.Calls) elapsed_ms=$($DailyMetadataState.Clock.ElapsedMilliseconds) stop_reason=$($DailyMetadataState.StopReason) budget_seconds=120"
+$discovery = Get-DailyDiscoveryCandidates -Seeds $picked -KnownSeedIds $knownSeedIds -ExcludedKeys $exclude -TargetCount $Count -DislikeBuckets $dislikeBuckets
+$candidateMap = $discovery.Candidates
+$seedMisses = $discovery.SeedMisses
+Write-MusicServerLog -Path (Join-Path $Config.LogDir 'musicserver-recommendation.log') -Message "[metadata] expansions=$($discovery.Expansions) calls=$($DailyMetadataState.Calls) elapsed_ms=$($DailyMetadataState.Clock.ElapsedMilliseconds) stop_reason=$($DailyMetadataState.StopReason) budget_seconds=120"
 
 # Candidates related to a disliked song are pushed down rather than removed, by
 # how close the relation is. "少推荐" is a soft penalty: a related song keeps a much

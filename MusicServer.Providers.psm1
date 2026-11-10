@@ -958,7 +958,8 @@ function Get-RecommendationLyricEvidence {
     $key="recommendation_lyrics:netease:$SongId"
     try {
         Connect-MusicServerDatabase -DbPath (Join-Path $Config.StateDir 'musicserver.db') -SqliteExe $Config.Sqlite
-        $cached=Get-AppSettingDb -Key $key | ConvertFrom-Json
+        $cacheText = [string](Get-AppSettingDb -Key $key)
+        $cached = if ($cacheText) { ConvertFrom-Json -InputObject $cacheText -ErrorAction Stop } else { $null }
         if ($cached -and ([DateTimeOffset]$cached.expires).UtcDateTime -gt [DateTime]::UtcNow) { return $cached }
     } catch {}
     if ($CacheOnly -or -not (Test-ProviderRequestAvailable -Config $Config -Provider 'netease') -or -not (Claim-ProviderRequest -Config $Config -Provider 'netease')) { return $unknown }
