@@ -6,14 +6,14 @@
 .PARAMETER Time
     每日触发时间（HH:mm），默认 07:00。
 .PARAMETER Count
-    每次生成的推荐数量，默认 20。
+    每次生成的推荐数量，默认 30。
 .PARAMETER AppHome
     运行时/数据主目录，默认脚本所在目录。
 #>
 param(
     [switch]$Unregister,
     [string]$Time = '07:00',
-    [ValidateRange(1, 100)][int]$Count = 20,
+    [ValidateRange(1, 100)][int]$Count = 30,
     [string]$AppHome = $PSScriptRoot
 )
 

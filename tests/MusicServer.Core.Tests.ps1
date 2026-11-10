@@ -269,7 +269,7 @@ Describe 'MusicServer canonical state and queue' {
         $source = Get-Content -LiteralPath (Join-Path $ProjectRoot 'daily_recommend.ps1') -Raw
         $source | Should Match 'Get-RecommendationSeedCandidatesDb'
         $source | Should Not Match 'Import-LegacyRecommendationState|Read-StateCollection|recommendation_history\.json'
-        $source | Should Match 'RecommendationCooldownDays = 14'
+        $source | Should Match 'RecommendationCooldownDays = 30'
     }
 
     It 'downloads from best available audio instead of worst audio' {

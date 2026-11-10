@@ -286,6 +286,8 @@ DryRun 只读取已有 SQLite 状态并打印结果，不写 recommendation stat
 .\daily_recommend.ps1 -Count 10
 ```
 
+默认目标为 30 首。若应用已在 SQLite 的 `app_settings.daily_recommendation_count` 保存了数量偏好，该偏好优先于 `-Count`，也适用于仍传入旧数量的计划任务；未设置时使用命令行数量。
+
 生成结果会写入 SQLite 中的 CanonicalTrack / DailyRecommendation 等正式状态，由桌面 UI/API 展示。真正需要下载的歌曲通过 Wanted Queue / worker 路径处理，而不是由 `daily_recommend.ps1` 直接下载。
 
 ### Legacy migration

@@ -211,7 +211,7 @@ function Test-DailyRecommendTaskCurrent {
 
 # The task follows the user. A repair triggered by a moved install directory, a
 # reinstall, or settings written by an older build must keep the schedule the
-# user chose instead of silently resetting it to 07:00 / 20. Both values are
+# user chose instead of silently resetting it to 07:00 / 30. Both values are
 # read back from the task that is about to be replaced.
 function Get-DailyRecommendTaskPreferences {
     param([psobject]$Task)
@@ -275,7 +275,7 @@ function Test-DailyRecommendGeneratedToday {
 # create, and it can be bound to another APP_HOME. This fallback makes "open the
 # APP and the day is there" independent of Task Scheduler state.
 function Start-MusicServerDailyRecommendBackfill {
-    param([Parameter(Mandatory)][string]$AppHome, [int]$Count = 20)
+    param([Parameter(Mandatory)][string]$AppHome, [int]$Count = 30)
     try {
         $generator = Join-Path $Root 'daily_recommend.ps1'
         if (-not (Test-Path -LiteralPath $generator -PathType Leaf)) { return }
@@ -320,7 +320,7 @@ function Initialize-MusicServerScheduledTasks {
     $taskName = 'MusicServer_DailyRecommend'
     $task = $null
     $taskCurrent = $false
-    $scheduleCount = 20
+    $scheduleCount = 30
     # Registration is its own failure domain. It used to share a try block with the
     # backfill below, so a denied Register-ScheduledTask (the APP is not elevated)
     # aborted the whole block: the day stayed empty and the log said only
@@ -339,7 +339,7 @@ function Initialize-MusicServerScheduledTasks {
             $preferences = Get-DailyRecommendTaskPreferences -Task $task
             $registerArgs = @{ AppHome = $AppHome }
             $effectiveTime = '07:00'
-            $effectiveCount = 20
+            $effectiveCount = 30
             if ($preferences.Time) { $registerArgs['Time'] = $preferences.Time; $effectiveTime = $preferences.Time }
             if ($preferences.Count) { $registerArgs['Count'] = $preferences.Count; $effectiveCount = $preferences.Count }
             & $registrar @registerArgs | Out-Null
