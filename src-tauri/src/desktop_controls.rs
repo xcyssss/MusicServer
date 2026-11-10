@@ -44,6 +44,26 @@ pub struct DesktopControls {
     pub preferences: Mutex<Preferences>,
     snapshot: Mutex<PlayerSnapshot>,
     horizontal: Mutex<f64>,
+    host_status: Mutex<Option<HostStatus>>,
+}
+
+#[derive(Clone, PartialEq, Serialize)]
+pub struct HostStatus {
+    enabled: bool,
+    width: u32,
+    requested_width: u32,
+    error: Option<String>,
+}
+
+fn report_host(app: &tauri::AppHandle, status: HostStatus) -> HostStatus {
+    if let Ok(mut previous) = app.state::<DesktopControls>().host_status.lock() {
+        if previous.as_ref() != Some(&status) {
+            *previous = Some(status.clone());
+            // Publish transitions only, including recovery after Explorer relayout.
+            let _ = app.emit_to(super::MAIN_WINDOW, "desktop-player-host", &status);
+        }
+    }
+    status
 }
 
 fn main_only(window: &tauri::WebviewWindow) -> Result<(), String> {
@@ -70,22 +90,22 @@ pub fn minimize_to_tray(window: tauri::WebviewWindow) -> Result<(), String> {
     hide_to_tray(window.app_handle())
 }
 
-pub fn position_dock(app: &tauri::AppHandle) -> Result<(), String> {
+pub fn position_dock(app: &tauri::AppHandle) -> Result<HostStatus, String> {
     let state = app.state::<DesktopControls>();
-    if !state
-        .preferences
-        .lock()
-        .map_err(|_| "STATE_LOCKED")?
-        .taskbar_lyrics
-    {
-        return Ok(());
+    let preferences = *state.preferences.lock().map_err(|_| "STATE_LOCKED")?;
+    if !preferences.taskbar_lyrics {
+        return Ok(report_host(
+            app,
+            HostStatus {
+                enabled: false,
+                width: 0,
+                requested_width: preferences.taskbar_width,
+                error: None,
+            },
+        ));
     }
     let dock = app.get_webview_window(DOCK).ok_or("DOCK_MISSING")?;
-    let width = state
-        .preferences
-        .lock()
-        .map_err(|_| "STATE_LOCKED")?
-        .taskbar_width;
+    let width = preferences.taskbar_width;
     let offset = *state.horizontal.lock().map_err(|_| "STATE_LOCKED")?;
     #[cfg(windows)]
     {
@@ -98,7 +118,16 @@ pub fn position_dock(app: &tauri::AppHandle) -> Result<(), String> {
             let _ = dock.hide();
             super::taskbar_host::detach();
         }
-        result
+        let status = report_host(
+            app,
+            HostStatus {
+                enabled: true,
+                width: result.as_ref().copied().unwrap_or(0),
+                requested_width: width,
+                error: result.as_ref().err().cloned(),
+            },
+        );
+        result.map(|_| status)
     }
     #[cfg(not(windows))]
     {
@@ -121,7 +150,7 @@ pub fn recover_dock(app: &tauri::AppHandle) {
         && app.get_webview_window(super::MAIN_WINDOW).is_some()
     {
         #[cfg(windows)]
-        super::taskbar_host::detach();
+        let _ = app.run_on_main_thread(super::taskbar_host::detach);
         let _ = tauri::WebviewWindowBuilder::new(
             app,
             DOCK,
@@ -144,7 +173,7 @@ pub fn recover_dock(app: &tauri::AppHandle) {
 pub fn apply_desktop_preferences(
     window: tauri::WebviewWindow,
     preferences: Preferences,
-) -> Result<(), String> {
+) -> Result<HostStatus, String> {
     main_only(&window)?;
     if !(360..=800).contains(&preferences.taskbar_width) {
         return Err("INVALID_TASKBAR_WIDTH".into());
@@ -154,19 +183,29 @@ pub fn apply_desktop_preferences(
         .preferences
         .lock()
         .map_err(|_| "STATE_LOCKED")? = preferences;
-    let dock = app.get_webview_window(DOCK).ok_or("DOCK_MISSING")?;
-    if preferences.taskbar_lyrics {
-        position_dock(app)?;
+    let status = if preferences.taskbar_lyrics {
+        position_dock(app)?
     } else {
         #[cfg(windows)]
         super::taskbar_host::detach();
-        dock.hide().map_err(|e| e.to_string())?;
-    }
+        if let Some(dock) = app.get_webview_window(DOCK) {
+            dock.hide().map_err(|e| e.to_string())?;
+        }
+        report_host(
+            app,
+            HostStatus {
+                enabled: false,
+                width: 0,
+                requested_width: preferences.taskbar_width,
+                error: None,
+            },
+        )
+    };
     if preferences.tray_only && window.is_minimized().unwrap_or(false) {
         // Missing tray is a safe fallback to ordinary taskbar minimization.
         let _ = hide_to_tray(app);
     }
-    Ok(())
+    Ok(status)
 }
 
 #[tauri::command]
@@ -249,5 +288,5 @@ pub fn shift_desktop_player(window: tauri::WebviewWindow, delta: f64) -> Result<
     let mut horizontal = state.horizontal.lock().map_err(|_| "STATE_LOCKED")?;
     *horizontal = (*horizontal + delta.clamp(-0.1, 0.1)).clamp(-0.5, 0.5);
     drop(horizontal);
-    position_dock(app)
+    position_dock(app).map(|_| ())
 }
