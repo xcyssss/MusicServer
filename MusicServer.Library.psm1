@@ -551,6 +551,7 @@ WHERE NOT EXISTS(SELECT 1 FROM wanted_queue WHERE track_id=@id AND state IN ('RE
     $hasEnvMusic = -not [string]::IsNullOrWhiteSpace($envMusic)
     $configuredRaw = [string](Get-AppSettingDb -Key 'music_library_path')
     $configuredMusic = if ($hasEnvMusic) { $envMusic } elseif ($configuredRaw) { $configuredRaw } else { Get-DefaultMusicDir -AppHome $Config.AppHome }
+    $configuredMusic = Resolve-MusicServerAnchoredPath -Path $configuredMusic -BasePath $Config.AppHome
     $activeScope = [string]::Equals((Get-MusicServerPathKey -Path $configuredMusic).TrimEnd('\','/'),([string]$pending.path_key).TrimEnd('\','/'),[StringComparison]::Ordinal)
     # Compare the normalized scope in PowerShell, then guard its raw setting
     # snapshot inside this transaction. A folder switch during validation or

@@ -30,6 +30,8 @@ if (-not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) {
 }
 
 $startAt = [datetime]::ParseExact($Time, 'HH:mm', [Globalization.CultureInfo]::InvariantCulture)
+Import-Module (Join-Path $PSScriptRoot 'MusicServer.Core.psm1') -Force
+$AppHome = ConvertTo-MusicServerPortablePath -Path $AppHome -BasePath $PSScriptRoot
 $arguments = "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptPath`" -Count $Count -AppHome `"$AppHome`""
 $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arguments -WorkingDirectory $PSScriptRoot
 $trigger = New-ScheduledTaskTrigger -Daily -At $startAt

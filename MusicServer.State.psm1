@@ -2686,17 +2686,21 @@ function Resolve-ConfiguredMusicDir {
     # Priority 1: Environment variable (developer/debug override)
     $envDir = [Environment]::GetEnvironmentVariable('MUSICSERVER_MUSIC_DIR')
     if (-not [string]::IsNullOrWhiteSpace($envDir)) {
-        $resolved = [IO.Path]::GetFullPath($envDir)
+        $resolved = Resolve-MusicServerAnchoredPath -Path $envDir -BasePath $Config.AppHome
         return $resolved
     }
 
     # Priority 2: SQLite persisted setting
-    try {
-        $saved = Get-AppSettingDb -Key 'music_library_path'
-        if ($saved -and -not [string]::IsNullOrWhiteSpace($saved)) {
-            return [IO.Path]::GetFullPath($saved)
-        }
-    } catch {}
+    $saved = ''
+    try { $saved = Get-AppSettingDb -Key 'music_library_path' }
+    catch {
+        # The UI resolves its library before the API creates the first database.
+        # Keep path-validation errors outside this first-use exception handling.
+        if ($_.Exception.Message -notmatch 'Database not initialized|no such table: app_settings') { throw }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($saved)) {
+        return Resolve-MusicServerAnchoredPath -Path $saved -BasePath $Config.AppHome
+    }
 
     # Priority 3: Default. Config.MusicDir is mutable after Apply-ConfiguredMusicDir.
     return (Get-DefaultMusicDir -AppHome $Config.AppHome)
@@ -2727,13 +2731,16 @@ function Test-MusicLibraryPath {
     .SYNOPSIS
       Validates a candidate music library path. Returns @{ Valid=$bool; Reason=$string }.
     #>
-    param([string]$Path)
+    param([string]$Path, [string]$BasePath = '')
 
     if ([string]::IsNullOrWhiteSpace($Path)) {
         return @{ Valid = $false; Reason = 'EMPTY_PATH' }
     }
     $fullPath = ''
-    try { $fullPath = [IO.Path]::GetFullPath($Path) } catch {
+    try {
+        if ($BasePath) { $fullPath = Resolve-MusicServerAnchoredPath -Path $Path -BasePath $BasePath }
+        else { $fullPath = [IO.Path]::GetFullPath($Path) }
+    } catch {
         return @{ Valid = $false; Reason = 'INVALID_PATH' }
     }
     if (Test-Path -LiteralPath $fullPath -PathType Leaf) {

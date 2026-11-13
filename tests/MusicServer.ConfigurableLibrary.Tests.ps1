@@ -33,6 +33,35 @@ Describe 'Configurable music library' {
         (Resolve-ConfiguredMusicDir -Config $fresh) | Should Be ([IO.Path]::GetFullPath($custom))
     }
 
+    It 'resolves stored relative music paths from APP_HOME regardless of working directory' {
+        Set-AppSettingDb -Key 'music_library_path' -Value 'My Music'
+        Push-Location $env:SystemRoot
+        try { (Resolve-ConfiguredMusicDir -Config $script:Config) | Should Be (Join-Path $script:Root 'My Music') }
+        finally { Pop-Location }
+        $fresh = New-MusicServerConfig -Root $ProjectRoot -AppHome (Join-Path $script:Root 'moved')
+        (Resolve-ConfiguredMusicDir -Config $fresh) | Should Be (Join-Path $fresh.AppHome 'My Music')
+        Initialize-MusicServerLibrary -Config ([pscustomobject]@{AppHome=$fresh.AppHome;MusicDir=(Join-Path $fresh.AppHome 'My Music');DailyDir=(Join-Path $fresh.AppHome 'My Music\DailyMix')}) | Should Be $false
+    }
+
+    It 'saves same-volume paths as relative values and resolves them without loss' {
+        $path = Join-Path $script:Root "音乐 #50% O'Brien"
+        $relative = ConvertTo-MusicServerPortablePath -Path $path -BasePath $script:Root
+        $relative | Should Be "音乐 #50% O'Brien"
+        (Resolve-MusicServerAnchoredPath -Path $relative -BasePath $script:Root) | Should Be $path
+        (ConvertTo-MusicServerPortablePath -Path $script:Root -BasePath $script:Root) | Should Be '.'
+        (ConvertTo-MusicServerPortablePath -Path 'Z:\Music' -BasePath $script:Root) | Should Be 'Z:\Music'
+    }
+
+    It 'anchors an environment music path to APP_HOME' {
+        [Environment]::SetEnvironmentVariable('MUSICSERVER_MUSIC_DIR', '.\portable songs')
+        (Resolve-ConfiguredMusicDir -Config $script:Config) | Should Be (Join-Path $script:Root 'portable songs')
+    }
+
+    It 'reports invalid saved paths instead of silently using the default' {
+        Set-AppSettingDb -Key 'music_library_path' -Value 'C:ambiguous'
+        { Resolve-ConfiguredMusicDir -Config $script:Config } | Should Throw
+    }
+
     It 'reset returns to the true default even after Config.MusicDir was mutated' {
         $custom = Join-Path $script:Root 'custom'
         Set-AppSettingDb -Key 'music_library_path' -Value $custom

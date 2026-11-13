@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+mod app_home;
 mod background_process;
 mod desktop_controls;
 mod desktop_startup;
@@ -32,13 +33,13 @@ const FALLBACK_PAIRS: &[(u16, u16)] = &[(8791, 8788), (8792, 8789)];
 const BUILD_MARKER: &str = env!("MUSICSERVER_BUILD_ID");
 const LAUNCHER: &str = "start_musicserver_ui.ps1";
 const APP_HOME_ENV: &str = "MUSICSERVER_APP_HOME";
-const PACKAGED_APP_HOME_DIR: &str = "com.musicserver.desktop";
 const MAIN_WINDOW: &str = "main";
 /// 托盘图标的稳定 id。窗口事件靠它判断托盘是否真的存在，所以它必须是常量而不是
 /// 各处重复的字面量。
 const TRAY_ID: &str = "musicserver-tray";
 
 struct AppState {
+    home: Result<PathBuf, String>,
     /// 由本应用拉起的 launcher 进程（若有）。
     child: Mutex<Option<Child>>,
     stopping: AtomicBool,
@@ -155,35 +156,15 @@ fn read_app_home_pin() -> Option<String> {
     None
 }
 
-/// Precedence is the whole contract, so it lives in a pure function: an explicit
-/// override wins, then the machine pin, then the platform default. Blank values
-/// never win, because a half-written pin must not move state to an empty path.
-fn pick_app_home(
-    configured: Option<String>,
-    pinned: Option<String>,
-    local_app_data: Option<String>,
-) -> PathBuf {
-    if let Some(configured) = configured.filter(|value| !value.trim().is_empty()) {
-        return PathBuf::from(configured);
-    }
-    if let Some(pinned) = pinned.filter(|value| !value.trim().is_empty()) {
-        return PathBuf::from(pinned);
-    }
-    if let Some(local_app_data) = local_app_data.filter(|value| !value.is_empty()) {
-        return PathBuf::from(local_app_data).join(PACKAGED_APP_HOME_DIR);
-    }
-    env::temp_dir().join(PACKAGED_APP_HOME_DIR)
-}
-
-/// Stable writable application home. An explicit environment override wins;
-/// otherwise use the machine pin; otherwise the identifier-scoped LOCALAPPDATA
-/// directory. The executable location is deliberately not consulted, so a
-/// checkout can be deleted or replaced without changing persistent state.
-fn resolve_app_home() -> PathBuf {
-    let configured = env::var_os(APP_HOME_ENV).map(|value| value.to_string_lossy().into_owned());
-    let local_app_data =
-        env::var_os("LOCALAPPDATA").map(|value| value.to_string_lossy().into_owned());
-    pick_app_home(configured, read_app_home_pin(), local_app_data)
+fn resolve_app_home() -> Result<PathBuf, String> {
+    let executable = env::current_exe().map_err(|e| e.to_string())?;
+    let base = executable.parent().ok_or("无法确定程序目录。")?;
+    app_home::resolve(
+        base,
+        env::var(APP_HOME_ENV).ok(),
+        read_app_home_pin(),
+        env::var("LOCALAPPDATA").ok(),
+    )
 }
 
 fn copy_runtime_tree(source: &Path, destination: &Path) -> std::io::Result<()> {
@@ -361,34 +342,9 @@ mod tests {
     }
 
     #[test]
-    fn app_home_prefers_override_then_pin_then_platform_default() {
-        let configured = Some(r"E:\configured".to_string());
-        let pinned = Some(r"E:\pinned".to_string());
-        let local = Some(r"C:\local".to_string());
-
-        assert_eq!(
-            pick_app_home(configured.clone(), pinned.clone(), local.clone()),
-            PathBuf::from(r"E:\configured")
-        );
-        assert_eq!(
-            pick_app_home(None, pinned.clone(), local.clone()),
-            PathBuf::from(r"E:\pinned")
-        );
-        assert_eq!(
-            pick_app_home(None, None, local.clone()),
-            PathBuf::from(r"C:\local").join(PACKAGED_APP_HOME_DIR)
-        );
-        // Blank is not a home: a half-written value must never move state away
-        // from the platform default.
-        assert_eq!(
-            pick_app_home(Some("  ".to_string()), Some(String::new()), local.clone()),
-            PathBuf::from(r"C:\local").join(PACKAGED_APP_HOME_DIR)
-        );
-    }
-
-    #[test]
     fn closing_desktop_prevents_late_service_startup() {
         let state = AppState {
+            home: Ok(env::temp_dir()),
             child: Mutex::new(None),
             stopping: AtomicBool::new(false),
         };
@@ -644,8 +600,9 @@ fn restart_desktop(app: tauri::AppHandle) {
 }
 
 #[tauri::command]
-fn open_logs() -> Result<(), String> {
-    let logs = resolve_app_home().join("logs");
+fn open_logs(app: tauri::AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let logs = state.home.as_ref().map_err(Clone::clone)?.join("logs");
     std::fs::create_dir_all(&logs).map_err(|error| error.to_string())?;
     open_folder(logs.to_string_lossy().into_owned())
 }
@@ -686,7 +643,7 @@ async fn restore_backup(app: tauri::AppHandle, backup_id: String) -> Result<(), 
             "This window does not own the services. Close other MusicServer windows first.".into(),
         );
     }
-    let home = resolve_app_home();
+    let home = state.home.as_ref().map_err(Clone::clone)?;
     // Only the runtime belonging to this APP home can be invoked, never a caller-supplied path.
     let script = home.join("manage_musicserver.ps1");
     if !script.is_file() {
@@ -833,6 +790,7 @@ fn main() {
         ])
         .manage(desktop_controls::DesktopControls::default())
         .manage(AppState {
+            home: resolve_app_home(),
             child: Mutex::new(None),
             stopping: AtomicBool::new(false),
         })
@@ -841,7 +799,18 @@ fn main() {
             let started = Instant::now();
             let resource_dir = app.path().resource_dir().ok();
             let bundle_runtime = resolve_bundled_runtime(resource_dir);
-            let app_home = resolve_app_home();
+            let app_home = match app.state::<AppState>().home.clone() {
+                Ok(home) => home,
+                Err(message) => {
+                    if let Some(window) = app.get_webview_window(MAIN_WINDOW) {
+                        let mut url: tauri::Url =
+                            "http://tauri.localhost/desktop-start.html?failed=1".parse()?;
+                        url.query_pairs_mut().append_pair("path_error", &message);
+                        window.navigate(url)?;
+                    }
+                    return Ok(());
+                }
+            };
             trace.record("resolve_runtime", started);
 
             // 托盘必须在任何一次最小化之前就绪：窗口一旦隐藏，它是唯一的恢复入口。
@@ -952,13 +921,15 @@ fn main() {
                     // Exit through the application lifecycle before tearing down WebView2.
                     // Default close destroys the window while navigation can still be pending.
                     api.prevent_close();
-                    desktop_startup::record(
-                        &resolve_app_home(),
-                        "closing",
-                        "Main window requested normal exit",
-                        None,
-                        BUILD_MARKER,
-                    );
+                    if let Ok(home) = &window.state::<AppState>().home {
+                        desktop_startup::record(
+                            home,
+                            "closing",
+                            "Main window requested normal exit",
+                            None,
+                            BUILD_MARKER,
+                        );
+                    }
                     #[cfg(windows)]
                     taskbar_host::detach();
                     window.app_handle().exit(0);
@@ -1011,21 +982,25 @@ fn main() {
             #[cfg(windows)]
             taskbar_host::detach();
             let state: tauri::State<AppState> = app.state();
-            desktop_startup::record(
-                &resolve_app_home(),
-                "stopping",
-                "Stopping owned services on APP exit",
-                None,
-                BUILD_MARKER,
-            );
+            if let Ok(home) = &state.home {
+                desktop_startup::record(
+                    home,
+                    "stopping",
+                    "Stopping owned services on APP exit",
+                    None,
+                    BUILD_MARKER,
+                );
+            }
             shutdown_desktop(&state);
-            desktop_startup::record(
-                &resolve_app_home(),
-                "stopped",
-                "Owned services stopped on APP exit",
-                None,
-                BUILD_MARKER,
-            );
+            if let Ok(home) = &state.home {
+                desktop_startup::record(
+                    home,
+                    "stopped",
+                    "Owned services stopped on APP exit",
+                    None,
+                    BUILD_MARKER,
+                );
+            }
         }
     });
 }

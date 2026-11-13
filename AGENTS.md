@@ -6,7 +6,7 @@ MusicServer is a Windows music desktop application. The product is the Tauri v2 
 
 - Keep library, discovery and the persistent player on one page. Details open within that workspace. The default view is `web/music-tree.html`; `web/index.html` is the classic view. Both use `web/app.js`. Do not build a second native UI.
 - SQLite is the sole runtime source of truth. JSON is migration input, backup or compatibility output. Likes and wanted downloads must remain transactional and recoverable.
-- Persistent state is independent of the checkout: `MUSICSERVER_APP_HOME` → registry pin `HKCU\Software\MusicServerRuntime\AppHome` → `%LOCALAPPDATA%\com.musicserver.desktop`. Never infer it from executable ancestry or `CARGO_MANIFEST_DIR`.
+- Portable paths use an explicit `musicserver.paths.json` beside the APP or script entry. Resolve its `app_home` relative to that file, before legacy environment/registry settings. Configured missing homes stop startup. Without a sidecar, keep the installed-app default independent of the checkout. See [path configuration](docs/portable-paths.zh-CN.md).
 - Music location is independently resolved: `MUSICSERVER_MUSIC_DIR` → SQLite `app_settings.music_library_path` → `<APP_HOME>\Music`. Every service uses the same `Config.MusicDir`; `DailyDir` is its `DailyMix` child. A missing custom folder is unavailable, not permission to fall back or create another library. Changing settings never moves, copies or deletes music.
 - Never edit a running Navidrome database. Do not commit music, cookies, databases, logs, diagnostics, generated runtime or build output.
 - PowerShell 5.1 and Pester 3.4 are the compatibility baseline. Non-ASCII `.ps1`/`.psm1` files require UTF-8 BOM.

@@ -59,20 +59,63 @@ function Get-MusicServerPinnedAppHome {
     }
 }
 
+function Resolve-MusicServerAnchoredPath {
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$BasePath)
+    if ([string]::IsNullOrWhiteSpace($Path)) { throw 'EMPTY_PATH' }
+    $value = $Path.Trim()
+    if ([IO.Path]::IsPathRooted($value)) {
+        if ($value -notmatch '^(?:[A-Za-z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/]+)') { throw 'AMBIGUOUS_ROOTED_PATH' }
+        return [IO.Path]::GetFullPath($value)
+    }
+    if ($value -match '^[A-Za-z]:') { throw 'AMBIGUOUS_DRIVE_RELATIVE_PATH' }
+    return [IO.Path]::GetFullPath((Join-Path $BasePath $value))
+}
+
+function ConvertTo-MusicServerPortablePath {
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$BasePath)
+    $full = Resolve-MusicServerAnchoredPath -Path $Path -BasePath $BasePath
+    $base = [IO.Path]::GetFullPath($BasePath).TrimEnd('\','/') + '\'
+    if ([IO.Path]::GetPathRoot($full) -ine [IO.Path]::GetPathRoot($base)) { return $full }
+    if ($full.TrimEnd('\','/') -ieq $base.TrimEnd('\','/')) { return '.' }
+    $relative = [Uri]::UnescapeDataString(([Uri]$base).MakeRelativeUri([Uri]$full).ToString())
+    if (-not $relative) { return '.' }
+    return $relative.Replace('\','/')
+}
+
 function Resolve-MusicServerAppHome {
-    param([string]$ConfiguredPath = '')
+    param([string]$ConfiguredPath = '', [string]$BasePath = $PSScriptRoot)
+
+    # An explicit CLI argument also supports intentionally initializing a new home.
+    if (-not [string]::IsNullOrWhiteSpace($ConfiguredPath)) {
+        return Resolve-MusicServerAnchoredPath -Path $ConfiguredPath -BasePath $BasePath
+    }
+    $sidecar = Join-Path $BasePath 'musicserver.paths.json'
+    if (Test-Path -LiteralPath $sidecar) {
+        try {
+            $paths = Get-Content -LiteralPath $sidecar -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            $names = @($paths.PSObject.Properties.Name)
+            if ($names.Count -ne 2 -or $names -notcontains 'schema' -or $names -notcontains 'app_home' -or $paths.schema -ne 1 -or $paths.app_home -isnot [string] -or [string]::IsNullOrWhiteSpace($paths.app_home)) { throw 'INVALID_PATH_CONFIG' }
+            $resolvedHome = Resolve-MusicServerAnchoredPath -Path $paths.app_home -BasePath $BasePath
+        } catch { throw "PATH_CONFIG_INVALID: $sidecar. $($_.Exception.Message)" }
+        if (-not (Test-Path -LiteralPath $resolvedHome -PathType Container)) { throw "APP_HOME_UNAVAILABLE: $resolvedHome. Update $sidecar or restore the existing data directory." }
+        return $resolvedHome
+    }
 
     $candidate = $ConfiguredPath
     if ([string]::IsNullOrWhiteSpace($candidate)) {
         $candidate = [Environment]::GetEnvironmentVariable('MUSICSERVER_APP_HOME', 'Process')
     }
     if (-not [string]::IsNullOrWhiteSpace($candidate)) {
-        return [IO.Path]::GetFullPath($candidate)
+        $resolvedHome = Resolve-MusicServerAnchoredPath -Path $candidate -BasePath $BasePath
+        if (-not (Test-Path -LiteralPath $resolvedHome -PathType Container)) { throw "APP_HOME_UNAVAILABLE: $resolvedHome. Update MUSICSERVER_APP_HOME or restore the existing data directory." }
+        return $resolvedHome
     }
 
     $pinned = Get-MusicServerPinnedAppHome
     if (-not [string]::IsNullOrWhiteSpace($pinned)) {
-        return [IO.Path]::GetFullPath($pinned)
+        $resolvedHome = Resolve-MusicServerAnchoredPath -Path $pinned -BasePath $BasePath
+        if (-not (Test-Path -LiteralPath $resolvedHome -PathType Container)) { throw "APP_HOME_UNAVAILABLE: $resolvedHome. Update the AppHome registry pin or restore the existing data directory." }
+        return $resolvedHome
     }
 
     $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
@@ -135,7 +178,7 @@ function New-MusicServerConfig {
     )
 
     $rootPath = [System.IO.Path]::GetFullPath($Root)
-    $appHomePath = Resolve-MusicServerAppHome -ConfiguredPath $AppHome
+    $appHomePath = Resolve-MusicServerAppHome -ConfiguredPath $AppHome -BasePath $rootPath
     $dataDir = Join-Path $appHomePath 'DailyMix_data'
     $stateDir = Join-Path $dataDir 'state'
     $navidromeDir = Join-Path $appHomePath 'Navidrome'

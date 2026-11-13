@@ -52,6 +52,57 @@ Describe 'MusicServer APP_HOME path resolution' {
         $config.MusicDir | Should Be (Join-Path $script:AppHome 'Music')
     }
 
+    It 'uses a relative sidecar before stale environment and pin values' {
+        $resolvedHome = Join-Path $script:Checkout 'data with spaces'
+        New-Item -ItemType Directory -Path $resolvedHome | Out-Null
+        Set-Content -LiteralPath (Join-Path $script:Checkout 'musicserver.paths.json') -Value '{"schema":1,"app_home":"data with spaces"}' -Encoding UTF8
+        [Environment]::SetEnvironmentVariable('MUSICSERVER_APP_HOME', (Join-Path $script:Checkout 'missing'))
+        Push-Location $env:SystemRoot
+        try { (New-MusicServerConfig -Root $script:Checkout).AppHome | Should Be $resolvedHome }
+        finally { Pop-Location }
+        Test-Path -LiteralPath (Join-Path $script:Checkout 'missing') | Should Be $false
+    }
+
+    It 'keeps relative configuration usable after the enclosing directory moves' {
+        $resolvedHome = Join-Path $script:Checkout 'data'
+        New-Item -ItemType Directory -Path $resolvedHome | Out-Null
+        Set-Content -LiteralPath (Join-Path $resolvedHome 'history.txt') -Value 'preserved'
+        Set-Content -LiteralPath (Join-Path $script:Checkout 'musicserver.paths.json') -Value '{"schema":1,"app_home":"data"}' -Encoding UTF8
+        $old = $script:Checkout
+        $moved = $old + '_moved'
+        Move-Item -LiteralPath $old -Destination $moved
+        $script:Checkout = $moved
+        $config = New-MusicServerConfig -Root $moved
+        $config.AppHome | Should Be (Join-Path $moved 'data')
+        (Get-Content -LiteralPath (Join-Path $config.AppHome 'history.txt')) | Should Be 'preserved'
+        Test-Path -LiteralPath $old | Should Be $false
+    }
+
+    It 'refuses missing configured homes without writing or choosing a fallback' {
+        $missing = Join-Path $script:Checkout 'missing'
+        [Environment]::SetEnvironmentVariable('MUSICSERVER_APP_HOME', $missing)
+        { New-MusicServerConfig -Root $script:Checkout } | Should Throw 'APP_HOME_UNAVAILABLE'
+        Set-Content -LiteralPath (Join-Path $script:Checkout 'musicserver.paths.json') -Value '{"schema":1,"app_home":"missing"}' -Encoding UTF8
+        [Environment]::SetEnvironmentVariable('MUSICSERVER_APP_HOME', $script:AppHome)
+        { New-MusicServerConfig -Root $script:Checkout } | Should Throw 'APP_HOME_UNAVAILABLE'
+        Test-Path -LiteralPath $missing | Should Be $false
+    }
+
+    It 'rejects a malformed sidecar instead of using the environment' {
+        [Environment]::SetEnvironmentVariable('MUSICSERVER_APP_HOME', $script:AppHome)
+        foreach ($json in @('broken', '{"schema":2,"app_home":"."}', '{"schema":1,"app_home":".","typo":true}')) {
+            Set-Content -LiteralPath (Join-Path $script:Checkout 'musicserver.paths.json') -Value $json -Encoding UTF8
+            { New-MusicServerConfig -Root $script:Checkout } | Should Throw 'PATH_CONFIG_INVALID'
+        }
+    }
+
+    It 'anchors explicit relative arguments to the script rather than the caller' {
+        Push-Location $env:SystemRoot
+        try { (New-MusicServerConfig -Root $script:Checkout -AppHome '.\data').AppHome | Should Be (Join-Path $script:Checkout 'data') }
+        finally { Pop-Location }
+        { Resolve-MusicServerAnchoredPath -Path 'C:ambiguous' -BasePath $script:Checkout } | Should Throw
+    }
+
     It 'uses the machine APP_HOME pin when no environment override is supplied' {
         $pin = New-AppHomePinKey
         try {
@@ -116,6 +167,11 @@ Describe 'MusicServer APP_HOME path resolution' {
 
         (Get-DefaultMusicDir -AppHome $config.AppHome) | Should Be (Join-Path $script:AppHome 'Music')
         (Get-DefaultMusicDir -AppHome $config.AppHome) | Should Not Be (Join-Path $script:Checkout 'Music')
+    }
+
+    It 'can resolve the default library before the first database exists' {
+        $config = New-MusicServerConfig -Root $script:Checkout -AppHome $script:AppHome
+        (Resolve-ConfiguredMusicDir -Config $config) | Should Be (Join-Path $script:AppHome 'Music')
     }
 
     It 'creates Navidrome configuration in APP_HOME with no checkout paths' {
