@@ -196,7 +196,8 @@ function Test-DailyRecommendTaskCurrent {
     if ($AppHome) {
         $declared = [regex]::Match([string]$action.Arguments, '-AppHome\s+"([^"]*)"')
         if (-not $declared.Success) { return $false }
-        $declaredHome = $declared.Groups[1].Value.Trim().TrimEnd('\')
+        try { $declaredHome = (Resolve-MusicServerAnchoredPath -Path $declared.Groups[1].Value -BasePath (Split-Path -Parent $Generator)).TrimEnd('\') }
+        catch { return $false }
         if (-not $declaredHome.Equals($AppHome.Trim().TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase)) { return $false }
     }
     $settings = $Task.Settings

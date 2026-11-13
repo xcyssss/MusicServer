@@ -107,6 +107,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
       - name: Show desktop toolchain
         shell: powershell
         run: |
@@ -370,6 +374,19 @@ jobs:
             Start-Sleep -Milliseconds 500
           } while ([DateTime]::UtcNow -lt $deadline)
           if ($stillRunning) { throw 'Tauri-owned services survived installed APP shutdown.' }
+
+      - name: Verify portable paths across a parent-directory move
+        shell: powershell
+        run: |
+          .\tests\verify_portable_paths.ps1 -Executable '.\src-tauri\target\release\musicserver-desktop.exe' -LogDirectory '.\artifacts\portable-paths'
+
+      - name: Upload portable path verification
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: musicserver-portable-path-evidence
+          path: artifacts/portable-paths/
+          retention-days: 14
 
       - name: Upload Windows installer
         uses: actions/upload-artifact@v4

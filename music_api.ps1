@@ -1128,7 +1128,7 @@ while ($true) {
                 Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 400 })
             } else {
                 $candidate = [string]$bodyObj.path
-                $validation = Test-MusicLibraryPath -Path $candidate
+                $validation = Test-MusicLibraryPath -Path $candidate -BasePath $Config.AppHome
                 if (-not $validation.Valid) {
                     $body = @{ error = 'INVALID_PATH'; message = "Path is not valid: $($validation.Reason)"; reason = $validation.Reason }
                     Send-Json -Context ([pscustomobject]@{ Response = $Context.Response; Body = $body; StatusCode = 400 })
@@ -1143,7 +1143,7 @@ while ($true) {
                         }
                     }
                     $previousPath = $Config.MusicDir
-                    Set-AppSettingDb -Key 'music_library_path' -Value $newPath
+                    Set-AppSettingDb -Key 'music_library_path' -Value (ConvertTo-MusicServerPortablePath -Path $newPath -BasePath $Config.AppHome)
                     Apply-ConfiguredMusicDir -Config $Config
                     if ($previousPath -ne $Config.MusicDir) { Set-MusicServerRecommendationLibraryPending -Config $Config | Out-Null }
                     # Sync Navidrome MusicFolder

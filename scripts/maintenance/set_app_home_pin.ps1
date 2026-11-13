@@ -4,7 +4,10 @@
 .DESCRIPTION
     The APP resolves its writable home in this order:
 
-        MUSICSERVER_APP_HOME  ->  this pin  ->  %LOCALAPPDATA%\com.musicserver.desktop
+        musicserver.paths.json -> MUSICSERVER_APP_HOME -> this pin -> platform default
+
+    For a movable installation, prefer set_portable_paths.ps1. This registry
+    setting remains available for installed programs whose data is on another volume.
 
     The pin is stored in the registry so the APP reads it itself instead of
     inheriting it from whoever started the process. The Tauri installer ends by

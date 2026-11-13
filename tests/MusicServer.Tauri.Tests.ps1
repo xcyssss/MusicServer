@@ -360,6 +360,9 @@ Describe 'MusicServer Tauri desktop shell' {
         # Windows paths compare case-insensitively: a difference in case is not a
         # different home.
         (Test-DailyRecommendTaskCurrent -Task $otherHome -Generator $generator -AppHome 'd:\OTHER_HOME') | Should Be $true
+
+        $relativeHome = New-ProbeTask -Arguments "-NonInteractive -WindowStyle Hidden -File `"$generator`" -AppHome `".`"" -StartWhenAvailable $true -DisallowBattery $false -StopOnBattery $false
+        (Test-DailyRecommendTaskCurrent -Task $relativeHome -Generator $generator -AppHome $ProjectRoot) | Should Be $true
         # Without a declared home the binding cannot be verified, so it is stale
         # rather than assumed current.
         $undeclaredHome = New-ProbeTask -Arguments "-NonInteractive -WindowStyle Hidden -File `"$generator`"" -StartWhenAvailable $true -DisallowBattery $false -StopOnBattery $false

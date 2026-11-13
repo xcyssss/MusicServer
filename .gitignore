@@ -4,6 +4,7 @@ cookies.txt
 *.secret
 .env
 .env.*
+/musicserver.paths.json
 
 # Personal/runtime state
 /runtime-manifest.json

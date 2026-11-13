@@ -73,7 +73,7 @@ src-tauri/target/release/bundle/nsis/*.exe
 %LOCALAPPDATA%\com.musicserver.desktop\
 ```
 
-可通过环境变量 `MUSICSERVER_APP_HOME` 覆盖该位置。无论 APP 从安装目录、源码 checkout 还是临时目录启动，APP_HOME 都只由显式环境变量或 Windows 默认目录决定；repository 中是否存在 `Music/`、`DailyMix_data/`、`Navidrome/` 不会改变数据路径。
+1.2.1 起，便携使用优先在程序旁放置 `musicserver.paths.json`，用相对路径指定现有数据目录。相对路径以配置文件位置为基准，整体移动目录后仍可定位数据。环境变量、注册表固定目录和 Windows 默认目录继续作为兼容选项。配置失效时停止启动并提示重新定位，详见[目录迁移与相对路径](docs/portable-paths.zh-CN.md)。
 
 安装包内包含 SQLite，因此 UI/API 和状态库启动不要求用户另装 sqlite3。Bilibili 下载、转码和 Navidrome 集成仍分别需要 yt-dlp、ffmpeg/ffprobe、Navidrome；这些大型/外部组件不塞进桌面 runtime。
 ## 音乐库位置
@@ -113,7 +113,7 @@ APP_HOME 下的默认持久化布局为：
 └─ secrets\cookies.txt
 ```
 
-路径解析规则是：`MUSICSERVER_APP_HOME` -> `%LOCALAPPDATA%\com.musicserver.desktop`；`MusicDir` 则按 `MUSICSERVER_MUSIC_DIR` -> SQLite `app_settings.music_library_path` -> `<APP_HOME>\Music` 解析。`DailyDir` 始终是 `<MusicDir>\DailyMix`。配置音乐库路径不会移动、复制或删除歌曲；配置的目录暂时不存在时视为不可用。
+路径解析规则见[相对路径配置](docs/portable-paths.zh-CN.md)。`MusicDir` 按 `MUSICSERVER_MUSIC_DIR` -> SQLite `app_settings.music_library_path` -> `<APP_HOME>\Music` 解析，相对音乐路径以 APP_HOME 为基准，同卷位置优先保存为相对路径。`DailyDir` 始终是 `<MusicDir>\DailyMix`。配置音乐库路径不会移动、复制或删除歌曲；配置的目录暂时不存在时视为不可用。
 
 源码 checkout 可以被 `git clean -fdx` 清空，也可以被删除后重新 clone。开发机若要使用已有持久化数据，请在启动前设置当前 PowerShell 会话：
 

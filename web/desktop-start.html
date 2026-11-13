@@ -49,10 +49,13 @@ small{display:block;color:#6c795d;font-size:11px;margin-top:22px}
 <div class="brand">MUSICSERVER</div>
 <h1 id="title">让音乐，慢慢醒来。</h1><p id="message" role="status">正在连接本地音乐服务，准备音乐库与今日推荐…</p><button id="retry" hidden>重新启动连接</button><small id="hint">你的音乐和喜欢记录会保留在原来的位置。</small></main>
 <script>
-const failed=new URLSearchParams(location.search).has('failed');
+const startupParams=new URLSearchParams(location.search);
+const failed=startupParams.has('failed');
+const pathError=startupParams.get('path_error');
 const still=()=>document.body.classList.toggle('still',failed||document.hidden);
 still();document.addEventListener('visibilitychange',still);
 if(failed){document.title='MusicServer · 连接需要恢复';document.querySelector('#title').textContent='音乐服务暂时未连接';document.querySelector('#message').textContent='本地服务未能完成启动。请重试；如果仍失败，可在应用数据目录的 logs/desktop-startup.json 查看具体原因。';document.querySelector('#retry').hidden=false;}
+if(pathError){document.title='MusicServer · 数据目录需要重新定位';document.querySelector('#title').textContent='请重新定位数据目录';document.querySelector('#message').textContent=pathError;document.querySelector('#message').style.overflowWrap='anywhere';document.querySelector('#hint').textContent='恢复原目录或更新路径配置后，点击重新启动连接。';}
 document.querySelector('#retry').addEventListener('click',async()=>{try{await window.__TAURI__.core.invoke('restart_desktop');}catch(e){document.querySelector('#message').textContent='重启未成功，请关闭窗口后重新打开 MusicServer。';}});
-const logs=document.createElement('button');logs.textContent='打开日志文件夹';logs.style.marginTop='12px';logs.addEventListener('click',async()=>{try{await window.__TAURI__.core.invoke('open_logs');}catch{document.querySelector('#hint').textContent='可在应用数据目录的 logs 文件夹找到启动和服务日志。';}});document.querySelector('main').append(logs);
+const logs=document.createElement('button');logs.textContent='打开日志文件夹';logs.style.marginTop='12px';logs.addEventListener('click',async()=>{try{await window.__TAURI__.core.invoke('open_logs');}catch{document.querySelector('#hint').textContent='可在应用数据目录的 logs 文件夹找到启动和服务日志。';}});if(!pathError)document.querySelector('main').append(logs);
 </script></body></html>
